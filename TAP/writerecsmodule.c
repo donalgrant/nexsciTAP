@@ -616,19 +616,27 @@ static PyObject *method_writerecs(PyObject *self, PyObject *args) {
                 // Non-char columns
                 
                 else {
+                    /* VOTable's name for a 64-bit integer is "long";
+                       "longlong" is not a VOTable datatype and clients
+                       reject the table. */
+                    const char *votype = typearr[i];
+
+                    if (strcasecmp (typearr[i], "longlong") == 0)
+                        votype = "long";
+
                     if(strlen(descarr[i]) > 0)
                     {
                        if(strlen(unitsarr[i]) > 0)
                        {
                           fprintf (fp, 
                               "    <FIELD ID=\"%s\" datatype=\"%s\" name=\"%s\" unit=\"%s\">\n", 
-                              namearr[i], typearr[i], namearr[i], unitsarr[i]);
+                              namearr[i], votype, namearr[i], unitsarr[i]);
                        }
                        else
                        {
                           fprintf (fp, 
                               "    <FIELD ID=\"%s\" datatype=\"%s\" name=\"%s\">\n", 
-                              namearr[i], typearr[i], namearr[i]);
+                              namearr[i], votype, namearr[i]);
                        }
 
                        fprintf (fp, "  <DESCRIPTION><![CDATA[ %s ]]></DESCRIPTION>\n", descarr[i]);
@@ -640,13 +648,13 @@ static PyObject *method_writerecs(PyObject *self, PyObject *args) {
                        {
                           fprintf (fp, 
                               "    <FIELD ID=\"%s\" datatype=\"%s\" name=\"%s\" unit=\"%s\"/>\n", 
-                              namearr[i], typearr[i], namearr[i], unitsarr[i]);
+                              namearr[i], votype, namearr[i], unitsarr[i]);
                        }
                        else
                        {
                           fprintf (fp, 
                               "    <FIELD ID=\"%s\" datatype=\"%s\" name=\"%s\"/>\n", 
-                              namearr[i], typearr[i], namearr[i]);
+                              namearr[i], votype, namearr[i]);
                        }
                     }
                 }

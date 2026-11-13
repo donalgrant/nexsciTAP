@@ -8,6 +8,8 @@ import logging
 import os
 import sys
 
+from TAP import duckdbsupport
+
 
 class vosiTables:
 #
@@ -305,6 +307,21 @@ class vosiTables:
                 self.status = 'error'
                 self.msg = 'Failed to connect to SQLite3 databases'
                 #self.__printVosiError__ (self.msg)
+                raise Exception (self.msg)
+
+
+        elif (self.dbms.lower() == 'duckdb'):
+
+            # TAP_SCHEMA is a schema inside the DuckDB catalog file, so
+            # `tap_schema` is used as the schema name directly.
+
+            try:
+                self.conn = duckdbsupport.connect(self.connectInfo)
+
+            except Exception as e:
+
+                self.status = 'error'
+                self.msg = 'Failed to connect to DuckDB database: ' + str(e)
                 raise Exception (self.msg)
 
 
