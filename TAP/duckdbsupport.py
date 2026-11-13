@@ -95,7 +95,7 @@ def connect(connectInfo, debug=0):
     conn.execute('SET enable_external_access = false')
     conn.execute('SET lock_configuration = true')
 
-    return Connection(conn)
+    return Connection(conn, connectInfo.get('upload_tables'))
 
 
 class Cursor:
@@ -106,10 +106,16 @@ class Cursor:
     rest of nexsciTAP relies on to size its fetchmany() batches.
     """
 
-    def __init__(self, duck):
+    def __init__(self, duck, upload_tables=None):
         self._cur = duck.cursor()
         self._decimal = []
         self.arraysize = 1
+
+        # Uploaded tables (TAP_UPLOAD) are in-memory Arrow tables.  DuckDB
+        # scopes a registration to one cursor, so each cursor gets its own;
+        # nothing is copied.
+        for name, table in (upload_tables or {}).items():
+            self._cur.register(name, table)
 
     @property
     def description(self):
@@ -161,11 +167,12 @@ class Cursor:
 class Connection:
     """DB-API 2.0 connection wrapper returning the Cursor above."""
 
-    def __init__(self, duck):
+    def __init__(self, duck, upload_tables=None):
         self._duck = duck
+        self._upload_tables = upload_tables
 
     def cursor(self):
-        return Cursor(self._duck)
+        return Cursor(self._duck, self._upload_tables)
 
     def commit(self):
         pass

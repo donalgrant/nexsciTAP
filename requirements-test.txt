@@ -23,3 +23,4 @@ xmltodict
 # at module level until async-flow fixture support lands. Listed as a
 # reminder; comment back in when re-enabling.
 # pyneid
+numpy

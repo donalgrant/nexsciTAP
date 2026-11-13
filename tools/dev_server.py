@@ -50,6 +50,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_DELETE(self):
         self._dispatch()
 
+    def do_HEAD(self):
+        # Clients (Firefly among them) probe a URL with HEAD before fetching it.
+        path = urlsplit(self.path).path
+        if path.startswith(self.workurl + '/'):
+            return self._static(unquote(path[len(self.workurl) + 1:]), body=False)
+        self.send_error(405)
+
     def _dispatch(self):
         parts = urlsplit(self.path)
         path = parts.path
@@ -62,7 +69,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         self.send_error(404)
 
-    def _static(self, rel):
+    def _static(self, rel, body=True):
         root = os.path.realpath(self.workdir)
         full = os.path.realpath(os.path.join(root, rel))
 
@@ -80,7 +87,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header('Content-Type', ctype)
         self.send_header('Content-Length', str(len(data)))
         self.end_headers()
-        self.wfile.write(data)
+        if body:
+            self.wfile.write(data)
 
     def _cgi(self, path_info, query):
         length = int(self.headers.get('Content-Length', '0') or '0')

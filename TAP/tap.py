@@ -21,7 +21,7 @@ from ADQL.adql import ADQL
 from bs4 import BeautifulSoup
 from spatial_index import SpatialIndex
 
-from TAP import compat, duckdbsupport
+from TAP import compat, duckdbsupport, tapupload
 from TAP.configparam import configParam
 from TAP.propfilter import _require_filterable, propFilter
 from TAP.tablenames import TableNames
@@ -720,6 +720,16 @@ class Tap:
         self.statusurl = \
             compat.service_url(self.compat, self.httpurl, self.cgipgm) + \
             '/' + self.tapcontext + '/' + self.workspace
+
+        # Tables sent with the request (UPLOAD=<name>,param:<part>) are kept
+        # with the job, so an async job still has them when it is run.
+
+        try:
+            if str(self.config.connectInfo.get('dbms', '')).lower() == 'duckdb':
+                tapupload.save_uploads(self.form, self.userWorkdir, allow_url=True)
+
+        except Exception as e:
+            self.__printError__('votable', 'UPLOAD failed: ' + str(e), errcode='400')
 
         if self.debug:
             logging.debug('')
@@ -1572,11 +1582,26 @@ class Tap:
                 logging.debug('ADQL initialized')
 
 
+            uploads = tapupload.find_uploads(self.userWorkdir)
+            upload_context = {}
+
+            if uploads:
+
+                if dbms.lower() != 'duckdb':
+                    raise Exception('Table upload is supported only with the DuckDB backend.')
+
+                query_adql, upload_context = tapupload.prepare(
+                    query_adql, uploads, self.config.adqlparam)
+
+                self.config.connectInfo['upload_tables'] = upload_context['tables']
+
             self.query = adql.sql(query_adql)
 
             self.query = duckdbsupport.rescale_index_constraint(
                 self.query, colname, level,
                 self.config.adqlparam.get('stored_level'))
+
+            self.query = tapupload.finish(self.query, upload_context)
 
             if self.debug:
                 logging.debug('')
@@ -3448,6 +3473,15 @@ class Tap:
         print ('      <mime>text/plain</mime>')
         print ('      <alias>ipac</alias>')
         print ('    </outputFormat>')
+
+        # Table upload is implemented for the DuckDB backend only.
+        if str(self.config.connectInfo.get('dbms', '')).lower() == 'duckdb':
+            print ('')
+            print ('    <!-- table upload (TAP_UPLOAD) -->')
+            print ('    <uploadMethod ivo-id="ivo://ivoa.net/std/TAPRegExt#upload-inline"/>')
+            print ('    <uploadMethod ivo-id="ivo://ivoa.net/std/TAPRegExt#upload-http"/>')
+            print ('    <uploadMethod ivo-id="ivo://ivoa.net/std/TAPRegExt#upload-https"/>')
+
         print ('  </capability>')
         print ('')
         print ('  <!-- VOSI table metadata for this TAP service -->')

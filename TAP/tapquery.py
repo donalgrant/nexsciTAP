@@ -611,6 +611,10 @@ class tapQuery:
             if usertbl:
                 internal_tables.add(usertbl.lower())
 
+            # Tables the client uploaded with this request (TAP_UPLOAD).
+            for upload_table in (self.connectInfo.get('upload_tables') or {}):
+                internal_tables.add(upload_table.lower())
+
             user_tables = [t for t in tables
                            if t.lower() not in internal_tables]
 

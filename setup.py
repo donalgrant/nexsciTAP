@@ -17,6 +17,6 @@ setup(name='nexsciTAP',
     # each deployment installs the one for its DBMS.  lxml is not imported,
     # but BeautifulSoup is asked for it by name to read UWS job documents.
     install_requires=['ADQL', 'spatial_index', 'configobj', 'sqlparse',
-                      'astropy', 'beautifulsoup4', 'lxml', 'xmltodict'],
+                      'astropy', 'numpy', 'beautifulsoup4', 'lxml', 'xmltodict'],
     packages=['TAP']
 )

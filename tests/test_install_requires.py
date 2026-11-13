@@ -20,7 +20,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DIST_NAME = {'bs4': 'beautifulsoup4'}
 
 # Database drivers are imported only for the DBMS a deployment configures.
-OPTIONAL = {'cx_Oracle', 'psycopg2', 'mysql', 'duckdb'}
+OPTIONAL = {'cx_Oracle', 'psycopg2', 'mysql', 'duckdb', 'pyarrow', 'astropy_healpix'}
 
 # Not imported, but named as a parser: BeautifulSoup(data, 'lxml').
 NAMED_ONLY = {'lxml'}
