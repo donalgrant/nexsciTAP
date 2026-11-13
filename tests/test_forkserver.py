@@ -98,6 +98,39 @@ def test_async_job_outlives_its_request(fork_server):
     assert row_count_from_ipac(result.text) == 6
 
 
+def test_large_response_to_slow_reader_is_complete(fork_server):
+    """The whole response arrives even when the client is slow to read it.
+
+    The service writes to the connection with blocking writes; a socket left
+    in non-blocking mode cuts the response off once its buffer fills.
+    """
+    import socket
+    from urllib.parse import urlencode, urlsplit
+
+    base, _ = fork_server
+    query = ("select a.l0filename, b.l0filename, c.l0filename, d.l0filename, e.l0filename "
+             "from data_l0 a, data_l0 b, data_l0 c, data_l0 d, data_l0 e")
+    body = urlencode({"query": query, "format": "csv"}).encode()
+    host, port = urlsplit(base).hostname, urlsplit(base).port
+
+    with socket.create_connection((host, port)) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+        s.sendall(b"POST /TAP/sync HTTP/1.0\r\nContent-Type: application/x-www-form-urlencoded\r\n"
+                  b"Content-Length: %d\r\n\r\n" % len(body) + body)
+        time.sleep(1.5)
+        data = b""
+        while True:
+            chunk = s.recv(65536)
+            if not chunk:
+                break
+            data += chunk
+
+    head, _, text = data.partition(b"\r\n\r\n")
+    assert head.startswith(b"HTTP/1.1 200"), head[:200]
+    assert len(text) > 500_000
+    assert len(text.strip().splitlines()) == 6 ** 5 + 1
+
+
 def test_vosi_capabilities(fork_server):
     base, _ = fork_server
     r = requests.get(base + "/TAP/capabilities")

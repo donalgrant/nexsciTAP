@@ -187,7 +187,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
         # reference to the client connection and to the listening socket is
         # dropped, so that an async job's background process, which points
         # its standard streams at /dev/null, holds neither of them open.
+        #
+        # The handler's read timeout put the socket in non-blocking mode,
+        # which is a property of the connection, not of this file object.
+        # The service writes with plain blocking writes, and would otherwise
+        # fail part way through any response larger than the socket buffer
+        # whenever the client reads more slowly than it writes.
         sys.stdout.flush()
+        self.connection.setblocking(True)
         os.dup2(body.fileno(), 0)
         os.dup2(self.connection.fileno(), 1)
         body.close()
