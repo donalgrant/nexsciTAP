@@ -48,6 +48,8 @@ def connect(connectInfo, debug=0):
     connectInfo['allowed_paths']  individual files that must stay readable
                                   (e.g. the CA certificate bundle that
                                   HTTPS access to S3 needs)
+    connectInfo['query_timeout']  seconds after which whatever the connection
+                                  is running is cancelled (None or 0: never)
     """
 
     import duckdb
@@ -95,7 +97,81 @@ def connect(connectInfo, debug=0):
     conn.execute('SET enable_external_access = false')
     conn.execute('SET lock_configuration = true')
 
-    return Connection(conn, connectInfo.get('upload_tables'))
+    return Connection(conn, connectInfo.get('upload_tables'),
+                      Deadline(conn, connectInfo.get('query_timeout')))
+
+
+class QueryTimeout(Exception):
+    pass
+
+
+class Deadline:
+    """
+    Cancels the connection's work once a time limit has passed.
+
+    A signal cannot do this: Python runs signal handlers only between
+    bytecodes, and a long query spends its time inside DuckDB.  A timer
+    thread calls DuckDB's own interrupt instead, which makes the running
+    statement raise; anything started afterwards is refused here.
+
+    The clock starts when the connection is made.  Each request makes its
+    own connection, so the limit is on the request's time in the engine,
+    reading the result included.
+    """
+
+    def __init__(self, duck, seconds):
+        import threading
+
+        try:
+            self.seconds = float(seconds or 0)
+        except (TypeError, ValueError):
+            self.seconds = 0
+
+        self.expired = False
+
+        # DuckDB interrupts one connection object at a time, and each
+        # cursor is a connection of its own, so the ones in use are kept.
+        self._targets = [duck]
+
+        if self.seconds > 0:
+
+            def expire():
+                self.expired = True
+                for target in list(self._targets):
+                    try:
+                        target.interrupt()
+                    except Exception:
+                        pass
+
+            timer = threading.Timer(self.seconds, expire)
+            timer.daemon = True
+            timer.start()
+
+    def watch(self, cursor):
+        self._targets.append(cursor)
+
+    def unwatch(self, cursor):
+        if cursor in self._targets:
+            self._targets.remove(cursor)
+
+    def error(self):
+        return QueryTimeout('Query exceeded the time limit of %g seconds.' % self.seconds)
+
+    def check(self):
+        if self.expired:
+            raise self.error()
+
+    def run(self, call, *args):
+        """Run one DuckDB call, reporting an interrupt as a timeout."""
+
+        self.check()
+
+        try:
+            return call(*args)
+        except Exception:
+            if self.expired:
+                raise self.error() from None
+            raise
 
 
 class Cursor:
@@ -106,8 +182,10 @@ class Cursor:
     rest of nexsciTAP relies on to size its fetchmany() batches.
     """
 
-    def __init__(self, duck, upload_tables=None):
+    def __init__(self, duck, upload_tables=None, deadline=None):
         self._cur = duck.cursor()
+        self._deadline = deadline or Deadline(duck, 0)
+        self._deadline.watch(self._cur)
         self._decimal = []
         self.arraysize = 1
 
@@ -127,9 +205,9 @@ class Cursor:
 
     def execute(self, sql, params=None):
         if params is None:
-            self._cur.execute(sql)
+            self._deadline.run(self._cur.execute, sql)
         else:
-            self._cur.execute(sql, params)
+            self._deadline.run(self._cur.execute, sql, params)
 
         # DECIMAL columns arrive as decimal.Decimal, which the result
         # writer cannot format; they are reported and returned as doubles.
@@ -151,28 +229,30 @@ class Cursor:
         return out
 
     def fetchone(self):
-        row = self._cur.fetchone()
+        row = self._deadline.run(self._cur.fetchone)
         return None if row is None else self._rows([row])[0]
 
     def fetchmany(self, size=None):
-        return self._rows(self._cur.fetchmany(self.arraysize if size is None else size))
+        return self._rows(self._deadline.run(self._cur.fetchmany, self.arraysize if size is None else size))
 
     def fetchall(self):
-        return self._rows(self._cur.fetchall())
+        return self._rows(self._deadline.run(self._cur.fetchall))
 
     def close(self):
+        self._deadline.unwatch(self._cur)
         self._cur.close()
 
 
 class Connection:
     """DB-API 2.0 connection wrapper returning the Cursor above."""
 
-    def __init__(self, duck, upload_tables=None):
+    def __init__(self, duck, upload_tables=None, deadline=None):
         self._duck = duck
         self._upload_tables = upload_tables
+        self._deadline = deadline
 
     def cursor(self):
-        return Cursor(self._duck, self._upload_tables)
+        return Cursor(self._duck, self._upload_tables, self._deadline)
 
     def commit(self):
         pass

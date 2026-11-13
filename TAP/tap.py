@@ -1449,6 +1449,14 @@ class Tap:
                 else:
                     self.__printError__(self.format, self.msg, errcode='400')
 
+        # The service's own ceiling (MAXREC_LIMIT) applies to every query,
+        # including those that set no MAXREC.  The result writer marks a
+        # result cut off at maxrec as overflowed.
+        limit = getattr(self.config, 'maxrec_limit', 0)
+
+        if limit > 0 and (self.maxrec < 0 or self.maxrec > limit):
+            self.maxrec = limit
+
         self.param['maxrec'] = self.maxrec
 
 #

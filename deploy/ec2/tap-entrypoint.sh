@@ -7,6 +7,8 @@
 #   AWS_REGION      region of the bucket
 #   DUCKDB_MEMORY, DUCKDB_THREADS   per-query limits
 #   MAX_REQUESTS    requests handled at once (default 12)
+#   QUERY_TIMEOUT   seconds before a query is cancelled (default 300; 0 = never)
+#   MAXREC_LIMIT    most rows one query may return (default 2000000; 0 = no limit)
 set -euo pipefail
 
 : "${PUBLIC_URL:?}" "${CATALOG_PREFIX:?}" "${TABLES:?}"
@@ -18,6 +20,7 @@ sed -i -e "s|__DUCKDB_MEMORY__|${DUCKDB_MEMORY}|" \
        -e "s|__DUCKDB_THREADS__|${DUCKDB_THREADS}|" /opt/tap/s3_init.sql
 
 sed -e "s|__PUBLIC_URL__|${PUBLIC_URL}|" -e "s|__CATALOG_PREFIX__|${CATALOG_PREFIX}|" \
+    -e "s|__QUERY_TIMEOUT__|${QUERY_TIMEOUT:-300}|" -e "s|__MAXREC_LIMIT__|${MAXREC_LIMIT:-2000000}|" \
     /opt/tap/TAP.conf.template > /opt/tap/TAP.conf
 
 args=()

@@ -164,3 +164,49 @@ def test_queries_cannot_reenable_external_access(parquet_catalog, tmp_path):
     cur = conn.cursor()
     with pytest.raises(Exception):
         cur.execute('SET enable_external_access = true')
+
+
+def test_query_timeout_cancels_a_running_query(tmp_path):
+    """QUERY_TIMEOUT interrupts DuckDB mid-query and refuses further work."""
+    duckdb = pytest.importorskip('duckdb')
+    import time
+
+    from TAP import duckdbsupport
+
+    db = tmp_path / 'empty.duckdb'
+    duckdb.connect(str(db)).close()
+
+    conn = duckdbsupport.connect({'db': str(db), 'query_timeout': '0.5'})
+    cur = conn.cursor()
+
+    start = time.time()
+    with pytest.raises(duckdbsupport.QueryTimeout, match='time limit of 0.5 seconds'):
+        cur.execute('select count(*) from range(100000000000) a, range(1000) b '
+                    'where a.range % 7 = b.range')
+        cur.fetchall()
+    assert time.time() - start < 10
+
+    with pytest.raises(duckdbsupport.QueryTimeout):
+        conn.cursor().execute('select 1')
+
+
+def test_no_query_timeout_by_default(parquet_catalog):
+    from TAP import duckdbsupport
+    from TAP.configparam import configParam
+
+    cfg = configParam(str(parquet_catalog))
+    assert cfg.connectInfo['query_timeout'] is None
+
+    cur = duckdbsupport.connect(cfg.connectInfo).cursor()
+    cur.execute('select count(*) from stars')
+    assert cur.fetchone() == (3,)
+
+
+def test_config_reads_query_timeout(parquet_catalog):
+    from TAP.configparam import configParam
+
+    text = parquet_catalog.read_text().replace('DBMS=duckdb', 'DBMS=duckdb\n    QUERY_TIMEOUT=45', 1)
+    assert 'QUERY_TIMEOUT=45' in text
+    parquet_catalog.write_text(text)
+
+    assert configParam(str(parquet_catalog)).connectInfo['query_timeout'] == '45'

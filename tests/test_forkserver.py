@@ -19,20 +19,25 @@ from _helpers import row_count_from_ipac
 from conftest import FIXTURES, STUBS, TESTS_DIR, _free_port
 
 
-@pytest.fixture(scope="module")
-def fork_server(fixture_root: Path):
+def _serve(fixture_root: Path, name: str, web_extra: str = ""):
+    """Start a fork server with its own work directory and configuration."""
     port = _free_port()
-    workdir = fixture_root / "fork-workdir"
+    workdir = fixture_root / f"{name}-workdir"
     (workdir / "TAP").mkdir(parents=True)
 
-    conf = fixture_root / "TAP-fork.conf"
-    conf.write_text((FIXTURES / "TAP.conf.template").read_text().format(
+    text = (FIXTURES / "TAP.conf.template").read_text().format(
         TEST_WORKDIR=str(workdir),
         TEST_HTTP_HOST="127.0.0.1",
         TEST_HTTP_PORT=str(port),
         TEST_DB_PATH=str(fixture_root / "test_data.db"),
         TEST_TAP_SCHEMA=str(fixture_root / "tap_schema.db"),
-    ))
+    )
+    if web_extra:
+        assert "[WEB]" in text
+        text = text.replace("[WEB]", "[WEB]\n" + web_extra, 1)
+
+    conf = fixture_root / f"TAP-{name}.conf"
+    conf.write_text(text)
 
     env = os.environ.copy()
     env["PYTHONPATH"] = os.pathsep.join(
@@ -43,18 +48,49 @@ def fork_server(fixture_root: Path):
         env=env, cwd=str(fixture_root))
 
     base = f"http://127.0.0.1:{port}"
+    for _ in range(100):
+        try:
+            requests.get(base + "/nothing", timeout=1)
+            break
+        except requests.ConnectionError:
+            assert proc.poll() is None, "fork server exited during start-up"
+            time.sleep(0.1)
+    return proc, base, workdir
+
+
+@pytest.fixture(scope="module")
+def fork_server(fixture_root: Path):
+    proc, base, workdir = _serve(fixture_root, "fork")
     try:
-        for _ in range(100):
-            try:
-                requests.get(base + "/nothing", timeout=1)
-                break
-            except requests.ConnectionError:
-                assert proc.poll() is None, "fork server exited during start-up"
-                time.sleep(0.1)
         yield base, workdir
     finally:
         proc.terminate()
         proc.wait(timeout=10)
+
+
+@pytest.fixture(scope="module")
+def limited_server(fixture_root: Path):
+    proc, base, _ = _serve(fixture_root, "limited", "MAXREC_LIMIT=4")
+    try:
+        yield base
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
+
+
+def test_maxrec_limit_caps_every_query(limited_server):
+    """MAXREC_LIMIT applies with no MAXREC, a larger one, and not a smaller one."""
+    url = limited_server + "/TAP/sync"
+    query = "select l1filename from data_l1"   # 10 rows
+
+    for extra, rows in (({}, 4), ({"maxrec": "1000"}, 4), ({"maxrec": "2"}, 2)):
+        r = requests.post(url, data={"query": query, "format": "ipac", **extra})
+        assert r.status_code == 200, r.text[:500]
+        assert row_count_from_ipac(r.text) == rows, extra
+
+    vot = requests.post(url, data={"query": query, "format": "votable"})
+    assert vot.text.count("<TR>") == 4
+    assert 'value="OVERFLOW"' in vot.text
 
 
 def test_sync_query(fork_server):

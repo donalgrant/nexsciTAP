@@ -4,6 +4,7 @@
     HTTP_URL=__PUBLIC_URL__
     HTTP_PORT=80
     CGI_PGM=TAP
+    MAXREC_LIMIT=__MAXREC_LIMIT__
 
 [DBMS]
     DBMS=duckdb
@@ -12,6 +13,7 @@
     INIT_SQL_FILE=/opt/tap/s3_init.sql
     ALLOWED_DIRECTORIES=__CATALOG_PREFIX__
     ALLOWED_PATHS=/etc/ssl/certs/ca-certificates.crt
+    QUERY_TIMEOUT=__QUERY_TIMEOUT__
 
 [SPTIND]
     MODE=HPX

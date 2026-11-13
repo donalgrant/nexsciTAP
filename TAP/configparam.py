@@ -150,6 +150,15 @@ class configParam:
             self.arraysize = confobj[self.web]['ArraySize']
 
 
+        # MAXREC_LIMIT: the most rows any one query may return.  A request
+        # that asks for more, or sets no MAXREC, gets this many and the
+        # result is marked as overflowed.  Unset or 0: no limit.
+
+        self.maxrec_limit = 0
+        if ('MAXREC_LIMIT' in confobj[self.web]):
+            self.maxrec_limit = int(confobj[self.web]['MAXREC_LIMIT'])
+
+
         # INFOMSG
 
         self.infomsg = ''
@@ -223,6 +232,7 @@ class configParam:
         self.init_sql_file     = None
         self.allowed_directories = None
         self.allowed_paths     = None
+        self.query_timeout     = None
 
         self.cookiename        = ''
         self.accesstbl         = ''
@@ -427,6 +437,12 @@ class configParam:
 
                 if 'ALLOWED_PATHS' in confobj[self.db_connection]:
                     self.allowed_paths = confobj[self.db_connection]['ALLOWED_PATHS']
+
+                # QUERY_TIMEOUT: seconds a request may spend in the engine
+                # before its query is cancelled.  Unset or 0: no limit.
+
+                if 'QUERY_TIMEOUT' in confobj[self.db_connection]:
+                    self.query_timeout = confobj[self.db_connection]['QUERY_TIMEOUT']
 
                 if 'SchemasTable' in confobj[self.db_connection]:
                     self.schemas_table = confobj[self.db_connection]['SchemasTable']
@@ -723,6 +739,7 @@ class configParam:
         self.connectInfo['init_sql_file']     = self.init_sql_file
         self.connectInfo['allowed_directories'] = self.allowed_directories
         self.connectInfo['allowed_paths']     = self.allowed_paths
+        self.connectInfo['query_timeout']     = self.query_timeout
         self.connectInfo['accesstbl']         = self.accesstbl
         self.connectInfo['usertbl']           = self.usertbl
 
