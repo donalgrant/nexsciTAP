@@ -7,7 +7,7 @@
 
 [DBMS]
     DBMS=duckdb
-    DB=/opt/tap/catalog.duckdb
+    DB=/var/lib/tap/catalog.duckdb
     TAP_SCHEMA=tap_schema
     INIT_SQL_FILE=/opt/tap/s3_init.sql
     ALLOWED_DIRECTORIES=__CATALOG_PREFIX__

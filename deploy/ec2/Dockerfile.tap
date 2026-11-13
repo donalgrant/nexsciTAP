@@ -1,4 +1,5 @@
-# nexsciTAP with the DuckDB backend, served by Apache as an nph CGI program.
+# nexsciTAP with the DuckDB backend, served by its pre-loaded forking server
+# (TAP/forkserver.py).
 #
 # Build context: a directory holding two source trees,
 #   nexsciTAP/     this repository
@@ -9,7 +10,7 @@
 FROM python:3.12-slim-bookworm
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends apache2 build-essential ca-certificates \
+ && apt-get install -y --no-install-recommends build-essential ca-certificates util-linux \
  && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir cython numpy setuptools wheel configobj sqlparse \
@@ -47,15 +48,13 @@ RUN cd /opt/nexsciTAP \
 RUN mkdir -p /opt/duckdb_ext \
  && python -c "import duckdb; c = duckdb.connect(); c.execute(\"SET extension_directory='/opt/duckdb_ext'\"); c.execute('INSTALL httpfs'); c.execute('INSTALL aws')"
 
-COPY nexsciTAP/deploy/ec2/tap-apache.conf /etc/apache2/sites-available/000-default.conf
+COPY nexsciTAP/deploy/ec2/refresh_secret.py /opt/tap/refresh_secret.py
 COPY nexsciTAP/deploy/ec2/tap-entrypoint.sh /opt/tap/entrypoint.sh
 COPY nexsciTAP/deploy/ec2/TAP.conf.template /opt/tap/TAP.conf.template
 COPY nexsciTAP/deploy/ec2/s3_init.sql /opt/tap/s3_init.sql
 
-RUN mkdir -p /opt/tap/cgi-bin /work /var/lib/tap \
- && printf '%s\n' '#!/usr/local/bin/python' 'from TAP import tap' 'tap.Tap()' > /opt/tap/cgi-bin/nph-tap.py \
- && chmod 755 /opt/tap/cgi-bin/nph-tap.py /opt/tap/entrypoint.sh \
- && a2enmod cgid >/dev/null \
+RUN mkdir -p /work /var/lib/tap \
+ && chmod 755 /opt/tap/entrypoint.sh \
  && chown -R www-data:www-data /work /var/lib/tap
 
 EXPOSE 80

@@ -15,7 +15,7 @@ docker network inspect aiab >/dev/null 2>&1 || docker network create aiab
 docker volume inspect aiab-work >/dev/null 2>&1 || docker volume create aiab-work
 docker rm -f tap firefly proxy >/dev/null 2>&1 || true
 
-docker run -d --name tap --network aiab --restart unless-stopped --memory 3g \
+docker run -d --name tap --init --network aiab --restart unless-stopped --memory 3g \
     -v aiab-work:/work \
     -e PUBLIC_URL="$PUBLIC_URL" \
     -e CATALOG_PREFIX="s3://ipac-archive-in-a-box-pilot/catalogs/" \
