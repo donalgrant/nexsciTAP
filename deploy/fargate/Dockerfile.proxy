@@ -1,0 +1,4 @@
+# The front door of the Fargate task:  nginx with this deployment's routes.
+# Build context: this directory.
+FROM public.ecr.aws/nginx/nginx:1.27-alpine
+COPY nginx.conf.template /etc/nginx/templates/default.conf.template

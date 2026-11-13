@@ -6,6 +6,8 @@
 #   TABLES          space-separated  name=relative/glob      (allwise=allwise_k0_8/*.parquet ...)
 #   AWS_REGION      region of the bucket
 #   DUCKDB_MEMORY, DUCKDB_THREADS   per-query limits
+#   TAP_PORT        port to listen on (default 80)
+#   HTTP_HOSTS      other names the service answers under, e.g. localhost
 #   MAX_REQUESTS    requests handled at once (default 12)
 #   QUERY_TIMEOUT   seconds before a query is cancelled (default 300; 0 = never)
 #   MAXREC_LIMIT    most rows one query may return (default 2000000; 0 = no limit)
@@ -20,6 +22,7 @@ sed -i -e "s|__DUCKDB_MEMORY__|${DUCKDB_MEMORY}|" \
        -e "s|__DUCKDB_THREADS__|${DUCKDB_THREADS}|" /opt/tap/s3_init.sql
 
 sed -e "s|__PUBLIC_URL__|${PUBLIC_URL}|" -e "s|__CATALOG_PREFIX__|${CATALOG_PREFIX}|" \
+    -e "s|__HTTP_HOSTS__|${HTTP_HOSTS:-}|" \
     -e "s|__QUERY_TIMEOUT__|${QUERY_TIMEOUT:-300}|" -e "s|__MAXREC_LIMIT__|${MAXREC_LIMIT:-2000000}|" \
     /opt/tap/TAP.conf.template > /opt/tap/TAP.conf
 
@@ -48,5 +51,5 @@ chown -R www-data:www-data /work
 
 # One pre-loaded process that forks per request (TAP/forkserver.py).
 cd /opt/nexsciTAP
-exec python -m TAP.forkserver --conf /opt/tap/TAP.conf --host 0.0.0.0 --port 80 \
+exec python -m TAP.forkserver --conf /opt/tap/TAP.conf --host 0.0.0.0 --port "${TAP_PORT:-80}" \
      --user www-data --max-children "${MAX_REQUESTS:-12}"

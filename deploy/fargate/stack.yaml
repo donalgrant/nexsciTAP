@@ -1,0 +1,258 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Archive in a Box pilot on ECS Fargate.  One task holds three containers
+  (TAP service, Firefly, nginx front door) behind an Application Load
+  Balancer.  The catalogs are Parquet files in S3, read through the task role.
+  There are no servers to manage; deleting this stack removes everything in it.
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: At least two public subnets in different zones.
+  AllowedCidr1:
+    Type: String
+    Description: First address range allowed to reach the service.
+  AllowedCidr2:
+    Type: String
+    Description: Second address range allowed to reach the service.
+  TapImage:
+    Type: String
+  ProxyImage:
+    Type: String
+  FireflyImage:
+    Type: String
+  CatalogBucket:
+    Type: String
+  CatalogPrefix:
+    Type: String
+    Default: catalogs/
+  Tables:
+    Type: String
+    Description: Space-separated name=relative/glob pairs under the prefix.
+  HipsUrl:
+    Type: String
+    Default: https://irsa.ipac.caltech.edu/data/hips/CDS/DSS2/color
+  FireflyAdminPassword:
+    Type: String
+    NoEcho: true
+  QueryTimeout:
+    Type: Number
+    Default: 300
+  MaxRecLimit:
+    Type: Number
+    Default: 2000000
+  DesiredCount:
+    Type: Number
+    Default: 1
+    Description: 0 stops the service (and its hourly cost) without deleting it.
+
+Resources:
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /ecs/${AWS::StackName}
+      RetentionInDays: 30
+
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Ref AWS::StackName
+
+  # Lets ECS pull the images and write the logs.
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: ecs-tasks.amazonaws.com}
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  # What the containers themselves may do: read the catalogs, nothing else.
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: ecs-tasks.amazonaws.com}
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: read-catalogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: !Sub arn:aws:s3:::${CatalogBucket}
+                Condition:
+                  StringLike: {'s3:prefix': [!Sub '${CatalogPrefix}*']}
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub arn:aws:s3:::${CatalogBucket}/${CatalogPrefix}*
+
+  LoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Archive in a Box pilot - who may reach the load balancer
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - {IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: !Ref AllowedCidr1}
+        - {IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: !Ref AllowedCidr2}
+
+  TaskSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Archive in a Box pilot - task accepts only the load balancer
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref LoadBalancerSecurityGroup
+
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Ref AWS::StackName
+      Scheme: internet-facing
+      Type: application
+      Subnets: !Ref SubnetIds
+      SecurityGroups: [!Ref LoadBalancerSecurityGroup]
+      LoadBalancerAttributes:
+        # Long synchronous queries and Firefly's WebSocket.
+        - {Key: idle_timeout.timeout_seconds, Value: '900'}
+
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref VpcId
+      Protocol: HTTP
+      Port: 80
+      TargetType: ip
+      HealthCheckPath: /healthz
+      HealthCheckIntervalSeconds: 15
+      HealthyThresholdCount: 2
+      TargetGroupAttributes:
+        - {Key: deregistration_delay.timeout_seconds, Value: '30'}
+
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Protocol: HTTP
+      Port: 80
+      DefaultActions:
+        - {Type: forward, TargetGroupArn: !Ref TargetGroup}
+
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Ref AWS::StackName
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: '2048'
+      Memory: '8192'
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      Volumes:
+        # Async results and uploads.  Lives as long as the task; more than
+        # one task would need shared storage (EFS) here instead.
+        - Name: work
+      ContainerDefinitions:
+        - Name: tap
+          Image: !Ref TapImage
+          Essential: true
+          Memory: 3584
+          Environment:
+            - {Name: PUBLIC_URL, Value: !Sub 'http://${LoadBalancer.DNSName}'}
+            - {Name: HTTP_HOSTS, Value: localhost}
+            - {Name: TAP_PORT, Value: '8081'}
+            - {Name: CATALOG_PREFIX, Value: !Sub 's3://${CatalogBucket}/${CatalogPrefix}'}
+            - {Name: TABLES, Value: !Ref Tables}
+            - {Name: AWS_REGION, Value: !Ref AWS::Region}
+            - {Name: DUCKDB_MEMORY, Value: 2GB}
+            - {Name: DUCKDB_THREADS, Value: '8'}
+            - {Name: QUERY_TIMEOUT, Value: !Ref QueryTimeout}
+            - {Name: MAXREC_LIMIT, Value: !Ref MaxRecLimit}
+          MountPoints:
+            - {SourceVolume: work, ContainerPath: /work}
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: task
+        - Name: firefly
+          Image: !Ref FireflyImage
+          Essential: true
+          Memory: 3584
+          Environment:
+            - {Name: ADMIN_PASSWORD, Value: !Ref FireflyAdminPassword}
+            # Lists the TAP service in Firefly's own menu, by the name
+            # Firefly's server can reach it under.
+            - Name: PROPS_FIREFLY_OPTIONS
+              Value: '{"tap":{"additional":{"services":[{"label":"Archive in a Box pilot","value":"http://localhost/TAP"}]}}}'
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: task
+        - Name: proxy
+          Image: !Ref ProxyImage
+          Essential: true
+          Memory: 256
+          PortMappings:
+            - {ContainerPort: 80}
+          Environment:
+            - {Name: PUBLIC_HOST, Value: !GetAtt LoadBalancer.DNSName}
+            - {Name: HIPS_URL, Value: !Ref HipsUrl}
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: task
+
+  Service:
+    Type: AWS::ECS::Service
+    DependsOn: Listener
+    Properties:
+      ServiceName: !Ref AWS::StackName
+      Cluster: !Ref Cluster
+      LaunchType: FARGATE
+      DesiredCount: !Ref DesiredCount
+      TaskDefinition: !Ref TaskDefinition
+      # One task at a time: the work area is not shared.
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 0
+        MaximumPercent: 100
+      HealthCheckGracePeriodSeconds: 300
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          # A public address, so the task can pull images and read S3
+          # without a NAT gateway; the security group admits only the
+          # load balancer.
+          AssignPublicIp: ENABLED
+          Subnets: !Ref SubnetIds
+          SecurityGroups: [!Ref TaskSecurityGroup]
+      LoadBalancers:
+        - ContainerName: proxy
+          ContainerPort: 80
+          TargetGroupArn: !Ref TargetGroup
+
+Outputs:
+  FireflyUrl:
+    Value: !Sub 'http://${LoadBalancer.DNSName}/firefly/'
+  TapUrl:
+    Value: !Sub 'http://${LoadBalancer.DNSName}/TAP'
+  LogGroup:
+    Value: !Ref LogGroup

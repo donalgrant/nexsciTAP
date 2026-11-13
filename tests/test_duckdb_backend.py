@@ -210,3 +210,26 @@ def test_config_reads_query_timeout(parquet_catalog):
     parquet_catalog.write_text(text)
 
     assert configParam(str(parquet_catalog)).connectInfo['query_timeout'] == '45'
+
+
+def test_http_hosts_lets_a_listed_host_name_the_service(parquet_catalog, monkeypatch):
+    """URLs follow the request's Host header only when HTTP_HOSTS lists it."""
+    from TAP.configparam import configParam
+
+    text = parquet_catalog.read_text()
+    assert 'HTTP_URL=' in text
+    public = configParam(str(parquet_catalog)).httpurl
+
+    parquet_catalog.write_text(text.replace('[WEB]', '[WEB]\n    HTTP_HOSTS=localhost, Inside:8081', 1))
+
+    monkeypatch.setenv('HTTP_HOST', 'localhost')
+    assert configParam(str(parquet_catalog)).httpurl == 'http://localhost'
+
+    monkeypatch.setenv('HTTP_HOST', 'inside:8081')
+    assert configParam(str(parquet_catalog)).httpurl == 'http://inside:8081'
+
+    monkeypatch.setenv('HTTP_HOST', 'evil.example.com')
+    assert configParam(str(parquet_catalog)).httpurl == public
+
+    monkeypatch.delenv('HTTP_HOST')
+    assert configParam(str(parquet_catalog)).httpurl == public

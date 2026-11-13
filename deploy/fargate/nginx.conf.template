@@ -1,0 +1,70 @@
+# One front door on port 80:  /firefly -> Firefly,  /TAP and /workspace -> TAP.
+#
+# The three containers of a Fargate task share one network namespace, so the
+# other two are reached on localhost:  Firefly on 8080, the TAP service on 8081.
+# ${PUBLIC_HOST} and ${HIPS_URL} are filled in from the environment at start-up.
+map $http_upgrade $connection_upgrade { default upgrade; '' close; }
+
+# Load balancer hostnames are longer than nginx's default allows.
+server_names_hash_bucket_size 128;
+
+# Anything that arrives under another name is sent to the one public hostname
+# (see deploy/ec2/nginx.conf for why).  The load balancer's health checks
+# arrive under the task's private address, so they are answered here.
+server {
+    listen 80 default_server;
+    location = /healthz { access_log off; return 200 "ok\n"; }
+    location / { return 301 http://${PUBLIC_HOST}$request_uri; }
+}
+
+server {
+    listen 80;
+    # "localhost" is the name Firefly's server uses for the TAP service next
+    # to it; the restricted public address is closed to it.
+    server_name ${PUBLIC_HOST} localhost;
+    client_max_body_size 600m;
+
+    gzip on;
+    gzip_proxied any;
+    gzip_types application/javascript text/css application/json;
+
+    location = /healthz { access_log off; return 200 "ok\n"; }
+    location = / { return 302 /firefly/; }
+
+    location /firefly {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+
+        # No TLS yet, so Firefly's "Secure" cookies must lose the flag
+        # (see deploy/ec2/nginx.conf).  REMOVE THIS once the load balancer
+        # has an HTTPS listener.
+        proxy_cookie_flags ~ nosecure samesite=lax;
+
+        # CDS's sky-image servers, Firefly's default for the coverage image,
+        # are unreachable (November 2026).  Point the page at another copy.
+        # The page must arrive uncompressed for the substitution to apply.
+        proxy_set_header Accept-Encoding "";
+        sub_filter "http://alasky.u-strasbg.fr/DSS/DSSColor" "${HIPS_URL}";
+        sub_filter_once off;
+    }
+
+    location /TAP {
+        proxy_pass http://127.0.0.1:8081;
+        proxy_set_header Host $http_host;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_read_timeout 900s;
+    }
+
+    location /workspace {
+        proxy_pass http://127.0.0.1:8081;
+        proxy_set_header Host $http_host;
+    }
+}

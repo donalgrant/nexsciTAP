@@ -135,6 +135,25 @@ class configParam:
             if ((self.port != '80') and (self.port != '443')):
                 self.httpurl = self.httpurl + ':' + self.port
 
+        # HTTP_HOSTS: other names (host or host:port, comma-separated) this
+        # service may be reached under, besides the one in HTTP_URL.  A
+        # request that arrives under one of them gets URLs built on that
+        # name, so a client inside the deployment (a Firefly server in the
+        # same task, say) can follow job and result links without going out
+        # through the public address.  The request's Host header is used
+        # only when it is on this list.
+
+        hosts = confobj[self.web].get('HTTP_HOSTS', '')
+        if isinstance(hosts, str):
+            hosts = hosts.split(',')
+        hosts = [h.strip().lower() for h in hosts if h.strip()]
+
+        request_host = os.environ.get('HTTP_HOST', '').strip().lower()
+
+        if request_host and request_host in hosts:
+            scheme = self.httpurl.split('://', 1)[0] if '://' in self.httpurl else 'http'
+            self.httpurl = scheme + '://' + request_host
+
 
         # CGIPGM
 
