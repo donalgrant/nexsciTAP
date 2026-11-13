@@ -27,8 +27,11 @@ docker run -d --name firefly --network aiab --restart unless-stopped --memory 3g
     -e ADMIN_PASSWORD="$(head -c 18 /dev/urandom | base64)" \
     "$FIREFLY_IMAGE"
 
+# The nginx image fills ${PUBLIC_HOST} into the template at start-up; it only
+# substitutes variables that are set, so nginx's own $variables are untouched.
 docker run -d --name proxy --network aiab --restart unless-stopped -p 80:80 \
-    -v "$HERE/nginx.conf:/etc/nginx/conf.d/default.conf:ro" \
+    -e PUBLIC_HOST="${PUBLIC_URL#*://}" \
+    -v "$HERE/nginx.conf:/etc/nginx/templates/default.conf.template:ro" \
     nginx:1.27-alpine
 
 # CDS's sky-image servers are unreachable (November 2026), so point Firefly's
