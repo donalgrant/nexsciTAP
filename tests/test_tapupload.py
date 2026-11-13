@@ -143,3 +143,125 @@ def test_two_catalog_tables_are_not_a_supported_cross_match(sky):
          "where contains(point('ICRS', a.ra, a.dec), circle('ICRS', b.ra, b.dec, 0.001)) = 1")
     with pytest.raises(tapupload.UploadError):
         tapupload.prepare(q, uploads, {'mode': 'HPX', 'level': 14, 'stored_level': 29, 'colname': 'hpx29'})
+
+
+# ---------------------------------------------------------------------------
+# Upload by URL must not reach private addresses
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize('url', [
+    'http://127.0.0.1/x.vot',
+    'http://localhost/x.vot',
+    'http://169.254.169.254/latest/meta-data/iam/security-credentials/',   # AWS instance metadata
+    'http://10.0.0.5/x.vot',
+    'http://192.168.1.10:8080/x.vot',
+    'http://172.16.0.1/x.vot',
+    'http://[::1]/x.vot',
+    'http://[::ffff:127.0.0.1]/x.vot',          # IPv4-mapped loopback
+    'http://[fd00::1]/x.vot',                   # IPv6 unique local
+    'http://0.0.0.0/x.vot',
+    'http://2130706433/x.vot',                  # 127.0.0.1 written as one integer
+])
+def test_url_fetch_refuses_non_public_addresses(url):
+    with pytest.raises(tapupload.UploadError):
+        tapupload.fetch_public_url(url)
+
+
+@pytest.mark.parametrize('url', [
+    'file:///etc/passwd',
+    'ftp://example.com/x.vot',
+    'gopher://example.com/',
+    'http://user:secret@example.com/x.vot',
+    'http:///x.vot',
+])
+def test_url_fetch_refuses_bad_urls(url):
+    with pytest.raises(tapupload.UploadError):
+        tapupload.fetch_public_url(url)
+
+
+@pytest.fixture
+def local_site(monkeypatch):
+    """A local web server that the address check is told to treat as public.
+
+    Only this server's own host and port are exempted, so a redirect from it
+    to anywhere else still meets the real check.
+    """
+    import http.server
+    import threading
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == '/table.vot':
+                body = b'<VOTABLE/>'
+                self.send_response(200)
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            elif self.path == '/big':
+                self.send_response(200)
+                self.send_header('Content-Length', '5000')
+                self.end_headers()
+                self.wfile.write(b'x' * 5000)
+            elif self.path == '/to-metadata':
+                self.send_response(302)
+                self.send_header('Location', 'http://169.254.169.254/latest/meta-data/')
+                self.end_headers()
+            elif self.path == '/to-table':
+                self.send_response(302)
+                self.send_header('Location', '/table.vot')
+                self.end_headers()
+            elif self.path == '/loop':
+                self.send_response(302)
+                self.send_header('Location', '/loop')
+                self.end_headers()
+            else:
+                self.send_response(404)
+                self.end_headers()
+
+        def log_message(self, *args):
+            return
+
+    server = http.server.HTTPServer(('127.0.0.1', 0), Handler)
+    port = server.server_address[1]
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+
+    real = tapupload._public_addresses
+
+    def exempt_this_server(host, p):
+        if host == '127.0.0.1' and p == port:
+            return ['127.0.0.1']
+        return real(host, p)
+
+    monkeypatch.setattr(tapupload, '_public_addresses', exempt_this_server)
+
+    yield f'http://127.0.0.1:{port}'
+
+    server.shutdown()
+
+
+def test_url_fetch_returns_the_table(local_site):
+    assert tapupload.fetch_public_url(local_site + '/table.vot') == b'<VOTABLE/>'
+
+
+def test_url_fetch_follows_a_redirect_to_an_allowed_address(local_site):
+    assert tapupload.fetch_public_url(local_site + '/to-table') == b'<VOTABLE/>'
+
+
+def test_url_fetch_refuses_a_redirect_to_the_metadata_address(local_site):
+    with pytest.raises(tapupload.UploadError):
+        tapupload.fetch_public_url(local_site + '/to-metadata')
+
+
+def test_url_fetch_stops_redirect_loops(local_site):
+    with pytest.raises(tapupload.UploadError):
+        tapupload.fetch_public_url(local_site + '/loop')
+
+
+def test_url_fetch_enforces_the_size_cap(local_site):
+    with pytest.raises(tapupload.UploadError):
+        tapupload.fetch_public_url(local_site + '/big', max_bytes=1000)
+
+
+def test_url_fetch_reports_http_errors(local_site):
+    with pytest.raises(tapupload.UploadError):
+        tapupload.fetch_public_url(local_site + '/missing')

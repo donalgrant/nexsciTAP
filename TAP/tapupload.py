@@ -124,10 +124,7 @@ def save_uploads(form, workdir, allow_url=False):
             if not allow_url:
                 raise UploadError('This service accepts inline uploads only (UPLOAD=<name>,param:<part>).')
 
-            import urllib.request
-
-            with urllib.request.urlopen(uri, timeout=60) as resp:
-                data = resp.read(MAX_UPLOAD_BYTES + 1)
+            data = fetch_public_url(uri)
 
         else:
             raise UploadError('Unsupported UPLOAD uri: ' + uri)
@@ -141,6 +138,135 @@ def save_uploads(form, workdir, allow_url=False):
         names.append(name.lower())
 
     return names
+
+
+# ---------------------------------------------------------------------------
+# Fetching an upload by URL
+# ---------------------------------------------------------------------------
+#
+# UPLOAD=<name>,<url> makes the server fetch something a client chose.  Left
+# unchecked, a client could aim that at the server's own network: other
+# hosts behind the firewall, services on localhost, or a cloud provider's
+# instance metadata address (169.254.169.254 on AWS), which can hand out the
+# service's credentials.  So:
+#
+#   - only http and https, and no user:password@ in the URL;
+#   - the host is resolved once and every address must be publicly routable;
+#   - the connection is made to that resolved address, not to the name, so a
+#     second DNS answer cannot redirect it after the check ("DNS rebinding");
+#   - redirects are followed by hand, each target checked the same way.
+
+MAX_URL_REDIRECTS = 3
+URL_TIMEOUT = 60
+
+
+def _public_addresses(host, port):
+    """
+    Resolve host and return its addresses, all of which must be public.
+    Raises UploadError if any is private, loopback, link-local or reserved.
+    """
+
+    import ipaddress
+    import socket
+
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except Exception:
+        raise UploadError('Cannot resolve upload host: ' + host)
+
+    addresses = []
+
+    for info in infos:
+
+        text = info[4][0].split('%')[0]              # drop an IPv6 zone id
+        ip = ipaddress.ip_address(text)
+
+        if getattr(ip, 'ipv4_mapped', None) is not None:
+            ip = ip.ipv4_mapped
+
+        if not ip.is_global:
+            raise UploadError('Upload URLs must point to a public address.')
+
+        addresses.append(str(ip))
+
+    if not addresses:
+        raise UploadError('Cannot resolve upload host: ' + host)
+
+    return addresses
+
+
+def fetch_public_url(url, max_bytes=MAX_UPLOAD_BYTES):
+    """Fetch url, refusing anything that is not on the public Internet."""
+
+    import http.client
+    import socket
+    import ssl
+    from urllib.parse import urljoin, urlsplit
+
+    for _ in range(MAX_URL_REDIRECTS + 1):
+
+        parts = urlsplit(url)
+        scheme = parts.scheme.lower()
+
+        if scheme not in ('http', 'https'):
+            raise UploadError('Upload URLs must be http or https.')
+
+        if parts.username is not None or parts.password is not None:
+            raise UploadError('Upload URLs must not contain credentials.')
+
+        host = parts.hostname
+
+        if not host:
+            raise UploadError('Upload URL has no host.')
+
+        try:
+            port = parts.port or (443 if scheme == 'https' else 80)
+        except ValueError:
+            raise UploadError('Upload URL has an invalid port.')
+
+        address = _public_addresses(host, port)[0]
+
+        # Connect to the address that was checked, keeping the original name
+        # for the Host header and for TLS certificate verification.
+        sock = socket.create_connection((address, port), timeout=URL_TIMEOUT)
+
+        if scheme == 'https':
+            sock = ssl.create_default_context().wrap_socket(sock, server_hostname=host)
+            conn = http.client.HTTPSConnection(host, port, timeout=URL_TIMEOUT)
+        else:
+            conn = http.client.HTTPConnection(host, port, timeout=URL_TIMEOUT)
+
+        conn.sock = sock
+
+        try:
+            path = parts.path or '/'
+            if parts.query:
+                path += '?' + parts.query
+
+            conn.request('GET', path, headers={'User-Agent': 'nexsciTAP-upload', 'Accept': '*/*'})
+            resp = conn.getresponse()
+
+            if resp.status in (301, 302, 303, 307, 308):
+                location = resp.getheader('Location')
+                if not location:
+                    raise UploadError('Upload URL redirected without a location.')
+                url = urljoin(url, location)
+                continue
+
+            if resp.status != 200:
+                raise UploadError('Upload URL returned HTTP status ' + str(resp.status) + '.')
+
+            data = resp.read(max_bytes + 1)
+
+            if len(data) > max_bytes:
+                raise UploadError('Uploaded table is larger than the service allows.')
+
+            return data
+
+        finally:
+            conn.close()
+
+    raise UploadError('Upload URL redirected too many times.')
 
 
 def find_uploads(workdir):
