@@ -34,8 +34,8 @@ RUN cd /src/SpatialIndex \
       '                extra_objects=["lib/sptQueryLib.o", "lib/libhtm.a"])' \
       'setup(name="spatial_index", version="1.1.0+local",' \
       '      ext_modules=cythonize(ext, compiler_directives={"language_level": "3str"}))' > _build.py \
- && python _build.py build_ext --inplace \
- && cp spatial_index*.so "$(python -c 'import site; print(site.getsitepackages()[0])')/"
+ && python _build.py build_ext \
+ && cp build/lib.*/spatial_index*.so "$(python -c 'import site; print(site.getsitepackages()[0])')/"
 
 COPY nexsciTAP /opt/nexsciTAP
 RUN cd /opt/nexsciTAP \
