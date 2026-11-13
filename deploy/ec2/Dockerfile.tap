@@ -1,0 +1,56 @@
+# nexsciTAP with the DuckDB backend, served by Apache as an nph CGI program.
+#
+# Build context: a directory holding two source trees,
+#   nexsciTAP/     this repository
+#   SpatialIndex/  https://github.com/Caltech-IPAC/SpatialIndex
+#
+# Python 3.12: nexsciTAP imports the cgi module, which Python 3.13 removed.
+
+FROM python:3.12-slim-bookworm
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends apache2 build-essential ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir cython numpy setuptools wheel configobj sqlparse \
+        astropy beautifulsoup4 lxml xmltodict duckdb pyarrow astropy-healpix \
+ && pip install --no-cache-dir --no-deps ADQL==1.0.6
+
+# spatial_index has no wheel for current Python and its setup.py no longer
+# runs, so build the C library with make and the Cython extension directly.
+COPY SpatialIndex /src/SpatialIndex
+RUN cd /src/SpatialIndex \
+ && (cd lib && make && make install) \
+ && printf '%s\n' \
+      'from setuptools import setup, Extension' \
+      'from Cython.Build import cythonize' \
+      'ext = Extension("spatial_index", sources=["spatial_index.pyx"], include_dirs=["lib/include"],' \
+      '                extra_objects=["lib/sptQueryLib.o", "lib/libhtm.a"])' \
+      'setup(name="spatial_index", version="1.1.0+local",' \
+      '      ext_modules=cythonize(ext, compiler_directives={"language_level": "3str"}))' > _build.py \
+ && python _build.py build_ext --inplace \
+ && cp spatial_index*.so "$(python -c 'import site; print(site.getsitepackages()[0])')/"
+
+COPY nexsciTAP /opt/nexsciTAP
+RUN cd /opt/nexsciTAP \
+ && python setup.py build_ext --inplace \
+ && mv writerecs*.so TAP/ \
+ && python -c "from TAP import writerecs, duckdbsupport, tapupload; from spatial_index import SpatialIndex; from ADQL.adql import ADQL"
+
+# DuckDB's S3 support, installed where the web server's user can load it.
+RUN mkdir -p /opt/duckdb_ext \
+ && python -c "import duckdb; c = duckdb.connect(); c.execute(\"SET extension_directory='/opt/duckdb_ext'\"); c.execute('INSTALL httpfs'); c.execute('INSTALL aws')"
+
+COPY nexsciTAP/deploy/ec2/tap-apache.conf /etc/apache2/sites-available/000-default.conf
+COPY nexsciTAP/deploy/ec2/tap-entrypoint.sh /opt/tap/entrypoint.sh
+COPY nexsciTAP/deploy/ec2/TAP.conf.template /opt/tap/TAP.conf.template
+COPY nexsciTAP/deploy/ec2/s3_init.sql /opt/tap/s3_init.sql
+
+RUN mkdir -p /opt/tap/cgi-bin /work /var/lib/tap \
+ && printf '%s\n' '#!/usr/local/bin/python' 'from TAP import tap' 'tap.Tap()' > /opt/tap/cgi-bin/nph-tap.py \
+ && chmod 755 /opt/tap/cgi-bin/nph-tap.py /opt/tap/entrypoint.sh \
+ && a2enmod cgid >/dev/null \
+ && chown -R www-data:www-data /work /var/lib/tap
+
+EXPOSE 80
+ENTRYPOINT ["/opt/tap/entrypoint.sh"]

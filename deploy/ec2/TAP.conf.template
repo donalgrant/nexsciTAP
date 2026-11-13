@@ -1,0 +1,24 @@
+[WEB]
+    TAP_WORKDIR=/work
+    TAP_WORKURL=/workspace
+    HTTP_URL=__PUBLIC_URL__
+    HTTP_PORT=80
+    CGI_PGM=TAP
+
+[DBMS]
+    DBMS=duckdb
+    DB=/opt/tap/catalog.duckdb
+    TAP_SCHEMA=tap_schema
+    INIT_SQL_FILE=/opt/tap/s3_init.sql
+    ALLOWED_DIRECTORIES=__CATALOG_PREFIX__
+    ALLOWED_PATHS=/etc/ssl/certs/ca-certificates.crt
+
+[SPTIND]
+    MODE=HPX
+    LEVEL=14
+    STORED_LEVEL=29
+    XCOL=x
+    YCOL=y
+    ZCOL=z
+    COLNAME=hpx29
+    ENCODING=BASE10
