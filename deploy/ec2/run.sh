@@ -20,7 +20,7 @@ docker run -d --name tap --network aiab --restart unless-stopped --memory 3g \
     -e PUBLIC_URL="$PUBLIC_URL" \
     -e CATALOG_PREFIX="s3://ipac-archive-in-a-box-pilot/catalogs/" \
     -e TABLES="allwise=allwise_k0_8/*.parquet euclid_q1=euclid_q1/*.parquet" \
-    -e AWS_REGION=us-west-2 -e DUCKDB_MEMORY=2GB -e DUCKDB_THREADS=2 \
+    -e AWS_REGION=us-west-2 -e DUCKDB_MEMORY=2GB -e DUCKDB_THREADS=8 \
     aiab-tap
 
 docker run -d --name firefly --network aiab --restart unless-stopped --memory 3g \
