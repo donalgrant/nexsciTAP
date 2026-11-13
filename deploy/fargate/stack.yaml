@@ -47,6 +47,28 @@ Parameters:
     Type: Number
     Default: 1
     Description: 0 stops the service (and its hourly cost) without deleting it.
+  ImagePrefix:
+    Type: String
+    Default: aiab
+    Description: ECR repositories <prefix>-tap, <prefix>-proxy and <prefix>-firefly must exist.
+  SourceRepo:
+    Type: String
+    Default: https://github.com/donalgrant/nexsciTAP.git
+    Description: Public git repository the build project clones.
+  SourceRef:
+    Type: String
+    Default: duckdb-backend
+    Description: Branch, tag or commit built when a build names none.
+  SpatialIndexRepo:
+    Type: String
+    Default: https://github.com/Caltech-IPAC/SpatialIndex.git
+  SpatialIndexRef:
+    Type: String
+    Default: 6b073ae6d7dd0c30dd24eb51a9353c089ab350fd
+  FireflySource:
+    Type: String
+    Default: ipac/firefly:2026.4.0
+    Description: Public Firefly image the build copies into ECR.
 
 Resources:
 
@@ -249,7 +271,87 @@ Resources:
           ContainerPort: 80
           TargetGroupArn: !Ref TargetGroup
 
+  # ---- Image build ----------------------------------------------------
+  # Start a build with:
+  #   aws codebuild start-build --project-name <stack>-build
+  # optionally adding
+  #   --environment-variables-override name=SOURCE_REF,value=<commit>
+  # It builds the images from source, pushes them, and restarts the service.
+
+  BuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: codebuild.amazonaws.com}
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: build-and-roll
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [logs:CreateLogGroup, logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${AWS::StackName}-build*
+              - Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:InitiateLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:CompleteLayerUpload
+                  - ecr:PutImage
+                  - ecr:BatchGetImage
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:DescribeImages
+                Resource: !Sub arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${ImagePrefix}-*
+              # May restart this one service; may not change what it is.
+              - Effect: Allow
+                Action: [ecs:UpdateService, ecs:DescribeServices]
+                Resource: !Ref Service
+
+  BuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub ${AWS::StackName}-build
+      Description: Builds the Archive in a Box images from source and restarts the service on them.
+      ServiceRole: !GetAtt BuildRole.Arn
+      Artifacts: {Type: NO_ARTIFACTS}
+      TimeoutInMinutes: 30
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_MEDIUM
+        Image: aws/codebuild/amazonlinux-x86_64-standard:5.0
+        PrivilegedMode: true   # needed to run Docker
+        EnvironmentVariables:
+          - {Name: SOURCE_REPO, Value: !Ref SourceRepo}
+          - {Name: SOURCE_REF, Value: !Ref SourceRef}
+          - {Name: SPATIAL_REPO, Value: !Ref SpatialIndexRepo}
+          - {Name: SPATIAL_REF, Value: !Ref SpatialIndexRef}
+          - {Name: FIREFLY_SOURCE, Value: !Ref FireflySource}
+          - {Name: IMAGE_PREFIX, Value: !Ref ImagePrefix}
+          - {Name: REGISTRY, Value: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com'}
+          - {Name: ECS_CLUSTER, Value: !Ref Cluster}
+          - {Name: ECS_SERVICE, Value: !GetAtt Service.Name}
+      Source:
+        Type: NO_SOURCE
+        # The steps themselves live in the repository being built.
+        BuildSpec: |
+          version: 0.2
+          phases:
+            build:
+              commands:
+                - git clone --quiet "$SOURCE_REPO" nexsciTAP
+                - git -C nexsciTAP checkout --quiet "$SOURCE_REF"
+                - bash nexsciTAP/deploy/fargate/build-images.sh
+
 Outputs:
+  BuildProject:
+    Value: !Ref BuildProject
   FireflyUrl:
     Value: !Sub 'http://${LoadBalancer.DNSName}/firefly/'
   TapUrl:
