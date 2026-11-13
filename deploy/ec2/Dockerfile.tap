@@ -18,8 +18,14 @@ RUN pip install --no-cache-dir cython numpy setuptools wheel configobj sqlparse 
 
 # spatial_index has no wheel for current Python and its setup.py no longer
 # runs, so build the C library with make and the Cython extension directly.
+#
+# sptQuery.h defines "int sptDebug;" in the header itself, so every file that
+# includes it gets its own copy.  Compilers that default to -fno-common (GCC 10
+# and later) refuse to link that.  Declare it extern and define it once.
 COPY SpatialIndex /src/SpatialIndex
 RUN cd /src/SpatialIndex \
+ && sed -i 's/^int sptDebug;/extern int sptDebug;/' lib/src/sptQuery.h \
+ && echo 'int sptDebug = 0;' >> lib/src/sptQueryLib.c \
  && (cd lib && make && make install) \
  && printf '%s\n' \
       'from setuptools import setup, Extension' \
