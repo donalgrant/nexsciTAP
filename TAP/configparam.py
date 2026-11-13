@@ -220,6 +220,9 @@ class configParam:
         self.dbport            = None
         self.socket            = None
         self.dbschema          = None
+        self.init_sql_file     = None
+        self.allowed_directories = None
+        self.allowed_paths     = None
 
         self.cookiename        = ''
         self.accesstbl         = ''
@@ -384,6 +387,67 @@ class configParam:
                 if 'key_columns_table' in confobj[self.db_connection]:
                     self.columns_table = confobj[self.db_connection]['key_columns_table']
 
+
+
+            # DUCKDB Connection
+            #
+            # DB is a DuckDB database file holding views over Parquet files
+            # (local or in S3) and, in a schema named by TAP_SCHEMA, the
+            # TAP_SCHEMA tables.  INIT_SQL_FILE optionally names a file of
+            # SQL statements run on every new connection (e.g. LOAD httpfs
+            # and CREATE SECRET for S3 access).  ALLOWED_DIRECTORIES lists
+            # where the Parquet files live; queries can read nothing else.
+
+            elif self.dbms == 'duckdb':
+
+                if 'DB' in confobj[self.db_connection]:
+                    self.db = confobj[self.db_connection]['DB']
+
+                if (self.db is None):
+                    self.status = 'error'
+                    self.msg = 'Failed to find DuckDB DB in config_file'
+                    raise Exception(self.msg)
+
+                self.tap_schema = 'tap_schema'
+
+                if 'TAP_SCHEMA' in confobj[self.db_connection]:
+                    self.tap_schema = confobj[self.db_connection]['TAP_SCHEMA']
+
+                if 'INIT_SQL_FILE' in confobj[self.db_connection]:
+                    self.init_sql_file = confobj[self.db_connection]['INIT_SQL_FILE']
+
+                # ALLOWED_DIRECTORIES: the only places queries may read
+                # from (comma-separated directories or URL prefixes).
+
+                if 'ALLOWED_DIRECTORIES' in confobj[self.db_connection]:
+                    self.allowed_directories = confobj[self.db_connection]['ALLOWED_DIRECTORIES']
+
+                # ALLOWED_PATHS: single files that must stay readable, such
+                # as the CA certificate bundle HTTPS access to S3 needs.
+
+                if 'ALLOWED_PATHS' in confobj[self.db_connection]:
+                    self.allowed_paths = confobj[self.db_connection]['ALLOWED_PATHS']
+
+                if 'SchemasTable' in confobj[self.db_connection]:
+                    self.schemas_table = confobj[self.db_connection]['SchemasTable']
+
+                if 'TablesTable' in confobj[self.db_connection]:
+                    self.tables_table = confobj[self.db_connection]['TablesTable']
+
+                if 'ColumnsTable' in confobj[self.db_connection]:
+                    self.columns_table = confobj[self.db_connection]['ColumnsTable']
+
+                if 'KeysTable' in confobj[self.db_connection]:
+                    self.keys_table = confobj[self.db_connection]['KeysTable']
+
+                if 'KeyColumnsTable' in confobj[self.db_connection]:
+                    self.key_columns_table = confobj[self.db_connection]['KeyColumnsTable']
+
+                if('RACOL' in confobj[self.db_connection]):
+                    self.racol = confobj[self.db_connection]['RACOL']
+
+                if('DECCOL' in confobj[self.db_connection]):
+                    self.deccol = confobj[self.db_connection]['DECCOL']
 
 
             # MYSQL Connection
@@ -592,6 +656,7 @@ class configParam:
         self.adqlparam['zcol']     = 'z'
         self.adqlparam['colname']  = 'spt_ind'
         self.adqlparam['encoding'] = 'BASE4'
+        self.adqlparam['stored_level'] = None
 
         if self.sptind_config:
 
@@ -616,6 +681,13 @@ class configParam:
 
             if('ZCOL' in confobj[self.sptind_config]):
                 self.adqlparam['zcol'] = confobj[self.sptind_config]['ZCOL']
+
+            # STORED_LEVEL: the HEALPix level of the indices actually stored
+            # in COLNAME, when deeper than the LEVEL used to plan searches
+            # (see duckdbsupport.rescale_index_constraint).
+
+            if('STORED_LEVEL' in confobj[self.sptind_config]):
+                self.adqlparam['stored_level'] = confobj[self.sptind_config]['STORED_LEVEL']
 
             if('ENCODING' in confobj[self.sptind_config]):
                 self.adqlparam['encoding'] = confobj[self.sptind_config]['ENCODING']
@@ -648,6 +720,9 @@ class configParam:
         self.connectInfo['port']              = self.dbport
         self.connectInfo['socket']            = self.socket
         self.connectInfo['dbschema']          = self.dbschema
+        self.connectInfo['init_sql_file']     = self.init_sql_file
+        self.connectInfo['allowed_directories'] = self.allowed_directories
+        self.connectInfo['allowed_paths']     = self.allowed_paths
         self.connectInfo['accesstbl']         = self.accesstbl
         self.connectInfo['usertbl']           = self.usertbl
 

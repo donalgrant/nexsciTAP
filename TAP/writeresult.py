@@ -13,7 +13,7 @@
 #
 import logging
 
-from TAP import compat, writerecs
+from TAP import compat, duckdbsupport, writerecs
 
 
 class writeResult:
@@ -480,6 +480,21 @@ class writeResult:
                     dbdatatype = 'DATE'
             #
             # } end mysql datatype
+            #
+
+
+            elif (self.dbms.lower() == 'duckdb'):
+            #
+            # { duckdb datatype from descriptor: col[1] is a DuckDB type
+            #   whose string form is the SQL type name (e.g. 'BIGINT').
+            #
+                dbdatatype = duckdbsupport.result_datatype(col[1])
+
+                if self.debug:
+                    logging.debug('')
+                    logging.debug(f'duckdb: dbdatatype = {dbdatatype:s}')
+            #
+            # } end duckdb datatype
             #
 
 

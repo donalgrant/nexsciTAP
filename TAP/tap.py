@@ -21,7 +21,7 @@ from ADQL.adql import ADQL
 from bs4 import BeautifulSoup
 from spatial_index import SpatialIndex
 
-from TAP import compat
+from TAP import compat, duckdbsupport
 from TAP.configparam import configParam
 from TAP.propfilter import _require_filterable, propFilter
 from TAP.tablenames import TableNames
@@ -1563,7 +1563,7 @@ class Tap:
                 logging.debug(f'dbms = {dbms:s}')
 
 
-            adql = ADQL(dbms=dbms, mode=mode, level=level, indxcol=colname,
+            adql = ADQL(dbms=duckdbsupport.adql_dialect(dbms), mode=mode, level=level, indxcol=colname,
                         encoding=encoding, racol=racol, deccol=deccol,
                         xcol=xcol, ycol=ycol, zcol=zcol)
 
@@ -1573,6 +1573,10 @@ class Tap:
 
 
             self.query = adql.sql(query_adql)
+
+            self.query = duckdbsupport.rescale_index_constraint(
+                self.query, colname, level,
+                self.config.adqlparam.get('stored_level'))
 
             if self.debug:
                 logging.debug('')

@@ -59,6 +59,7 @@ static PyObject *method_writerecs(PyObject *self, PyObject *args) {
     
     double  dblval = 0.0;
     int     intval = 0;
+    long long llval = 0;   /* int-like DATA values: 64-bit (e.g. survey object IDs) */
     int     istatus;
 
     const char *cptr_outpath = NULL;
@@ -1019,7 +1020,7 @@ static PyObject *method_writerecs(PyObject *self, PyObject *args) {
                      (strcasecmp (typearr[i], "longlong") == 0) ||
                      (strcasecmp (typearr[i], "integer" ) == 0)) {
 
-                sprintf (fmt, "%%-%s", fmtarr[i]);
+                sprintf (fmt, "%%-%dlld", atoi (fmtarr[i]));
                         
                 if ((debug1) && (fp_debug != (FILE *)NULL)) {
                     fprintf (fp_debug, "fmt= [%s]\n", fmt);
@@ -1027,12 +1028,12 @@ static PyObject *method_writerecs(PyObject *self, PyObject *args) {
                 }
                 strcpy (strval, "");
                 if (PyLong_Check (item)) {
-                    intval = PyLong_AsLong (item);
-                    sprintf (strval, fmt, intval);
+                    llval = PyLong_AsLongLong (item);
+                    sprintf (strval, fmt, llval);
                 }
 
                 if ((debug1) && (fp_debug != (FILE *)NULL)) {
-                    fprintf (fp_debug, "i= [%d] intval= [%d]\n", i, intval);
+                    fprintf (fp_debug, "i= [%d] intval= [%lld]\n", i, llval);
                     fprintf (fp_debug, "strval= [%s]\n", strval);
                     fflush (fp_debug);
                 }
@@ -1071,11 +1072,11 @@ static PyObject *method_writerecs(PyObject *self, PyObject *args) {
                 }
                 else if (strcasecmp (outfmt, "votable") == 0) {
                         
-                    sprintf (strval, "%d", intval);
+                    sprintf (strval, "%lld", llval);
                 
                     if ((debug1) && (fp_debug != (FILE *)NULL)) {
                         fprintf (fp_debug, "votable:\n");
-                        fprintf (fp_debug, "intval= [%d]\n", intval);
+                        fprintf (fp_debug, "intval= [%lld]\n", llval);
                         fprintf (fp_debug, "strval= [%s]\n", strval);
                         fflush (fp_debug);
                     }
@@ -1084,7 +1085,7 @@ static PyObject *method_writerecs(PyObject *self, PyObject *args) {
                 }
                 else if (strcasecmp (outfmt, "csv") == 0) {
 
-                    sprintf (strval, "%d", intval);
+                    sprintf (strval, "%lld", llval);
                     
                     if (i == ncols-1) {
                         fprintf (fp, "%s\n", strval);
@@ -1095,7 +1096,7 @@ static PyObject *method_writerecs(PyObject *self, PyObject *args) {
                 }
                 else if (strcasecmp (outfmt, "tsv") == 0) {
             
-                    sprintf (strval, "%d", intval);
+                    sprintf (strval, "%lld", llval);
                     
                     if (i == ncols-1) {
                         fprintf (fp, "%s\n", strval);
@@ -1106,7 +1107,7 @@ static PyObject *method_writerecs(PyObject *self, PyObject *args) {
                 }
                 else if (strcasecmp (outfmt, "json") == 0) {
             
-                   sprintf (strval, "%d", intval);
+                   sprintf (strval, "%lld", llval);
 
                    if (i == 0) 
                         fprintf (fp, "{");

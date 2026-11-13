@@ -10,6 +10,7 @@ import sys
 from ADQL.adql import ADQL
 from spatial_index import SpatialIndex
 
+from TAP import duckdbsupport
 from TAP.configparam import configParam
 from TAP.datadictionary import dataDictionary
 from TAP.tablenames import TableNames
@@ -227,6 +228,23 @@ class tapQuery:
                     logging.debug(f'tap_schema= {self.tap_schema:s}')
 
 
+            # DUCKDB
+
+            elif self.dbms.lower() == 'duckdb':
+
+                self.db = self.connectInfo.get('db')
+
+                if (self.db is None):
+                    self.msg = 'Failed to retrieve required input parameter'\
+                               ' [db]'
+                    self.status = 'error'
+                    raise Exception(self.msg)
+
+                if self.debug:
+                    logging.debug(f'db= {self.db:s}')
+                    logging.debug(f'tap_schema= {self.tap_schema:s}')
+
+
             # MYSQL
 
             elif self.dbms.lower() == 'mysql':
@@ -407,6 +425,24 @@ class tapQuery:
 
                     self.status = 'error'
                     self.msg = 'Failed to connect to SQLite3 databases'
+
+                    raise Exception(self.msg)
+
+
+            # DUCKDB
+
+            elif self.dbms.lower() == 'duckdb':
+
+                try:
+                    self.conn = duckdbsupport.connect(self.connectInfo)
+
+                    if self.debug:
+                        logging.debug('connected to DuckDB, database ' + self.db)
+
+                except Exception as e:
+
+                    self.status = 'error'
+                    self.msg = 'Failed to connect to DuckDB database: ' + str(e)
 
                     raise Exception(self.msg)
 
@@ -816,7 +852,7 @@ def main():
         racol   = config.racol
         deccol  = config.deccol
 
-        level   = config.adqlparam['level']
+        level   = int(config.adqlparam['level'])
         colname = config.adqlparam['colname']
 
         encoding = SpatialIndex.BASE4
@@ -830,7 +866,7 @@ def main():
 
         # Set up ADQL translator
 
-        adql = ADQL(dbms=dbms, mode=mode, level=level, indxcol=colname,
+        adql = ADQL(dbms=duckdbsupport.adql_dialect(dbms), mode=mode, level=level, indxcol=colname,
                     encoding=encoding, racol=racol, deccol=deccol,
                     xcol=xcol, ycol=ycol, zcol=zcol)
 
@@ -844,6 +880,9 @@ def main():
 
     try:
         sql_string = adql.sql(adql_string)
+
+        sql_string = duckdbsupport.rescale_index_constraint(
+            sql_string, colname, level, config.adqlparam.get('stored_level'))
 
         if debug:
             logging.debug(f'ADQL string: {adql_string:s}')
