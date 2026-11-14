@@ -25,10 +25,15 @@ RUN pip install --no-cache-dir cython numpy setuptools wheel configobj sqlparse 
 # sptQuery.h defines "int sptDebug;" in the header itself, so every file that
 # includes it gets its own copy.  Compilers that default to -fno-common (GCC 10
 # and later) refuse to link that.  Declare it extern and define it once.
+#
+# Its Makefiles also pass -m64, which GCC accepts only on x86.  The flag is
+# the default there, so dropping it changes nothing on x86 and lets the
+# library build on ARM (an Apple-silicon laptop, or Graviton in AWS).
 COPY SpatialIndex /src/SpatialIndex
 RUN cd /src/SpatialIndex \
  && sed -i 's/^int sptDebug;/extern int sptDebug;/' lib/src/sptQuery.h \
  && echo 'int sptDebug = 0;' >> lib/src/sptQueryLib.c \
+ && grep -rl -- '-m64' lib --include='Makefile*' | xargs -r sed -i 's/ -m64//g' \
  && (cd lib && make && make install) \
  && printf '%s\n' \
       'from setuptools import setup, Extension' \
