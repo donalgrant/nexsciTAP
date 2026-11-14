@@ -309,3 +309,22 @@ def test_discover_picks_up_and_drops_folders_without_a_restart(tmp_path):
     assert _catalog(tmp_path, '--if-changed').returncode == 0
     assert _tables(duckdb, tmp_path) == ['second']
     assert not (tmp_path / 'c.duckdb.new').exists()
+
+
+def test_http_hosts_entry_can_carry_its_own_scheme(parquet_catalog, monkeypatch):
+    """Public address over HTTPS, an inside client over plain HTTP."""
+    from TAP.configparam import configParam
+
+    text = parquet_catalog.read_text()
+    text = text.replace('HTTP_URL=http://localhost', 'HTTP_URL=https://archive.example.org')
+    text = text.replace('HTTP_PORT=8080', 'HTTP_PORT=443')
+    parquet_catalog.write_text(text.replace('[WEB]', '[WEB]\n    HTTP_HOSTS=http://localhost, other.example.org', 1))
+
+    monkeypatch.delenv('HTTP_HOST', raising=False)
+    assert configParam(str(parquet_catalog)).httpurl == 'https://archive.example.org'
+
+    monkeypatch.setenv('HTTP_HOST', 'localhost')
+    assert configParam(str(parquet_catalog)).httpurl == 'http://localhost'
+
+    monkeypatch.setenv('HTTP_HOST', 'other.example.org')
+    assert configParam(str(parquet_catalog)).httpurl == 'https://other.example.org'

@@ -19,6 +19,16 @@ if ! aws cloudformation describe-stacks --stack-name "$STACK" >/dev/null 2>&1; t
     PASSWORD=("FireflyAdminPassword=$(head -c 18 /dev/urandom | base64 | tr -d '/+=')")
 fi
 
+# Likewise the secret CloudFront shows the load balancer: made once, then kept.
+if ! aws cloudformation describe-stacks --stack-name "$STACK" \
+        --query 'Stacks[0].Parameters[?ParameterKey==`OriginSecret`]' --output text 2>/dev/null | grep -q OriginSecret; then
+    PASSWORD+=("OriginSecret=$(head -c 30 /dev/urandom | base64 | tr -d '/+=')")
+fi
+
+PREFIX_LIST="$(aws ec2 describe-managed-prefix-lists \
+    --filters Name=prefix-list-name,Values=com.amazonaws.global.cloudfront.origin-facing \
+    --query 'PrefixLists[0].PrefixListId' --output text)"
+
 aws cloudformation deploy \
     --stack-name "$STACK" \
     --template-file "$HERE/stack.yaml" \
@@ -29,6 +39,7 @@ aws cloudformation deploy \
         "AllowedCidr1=${ALLOWED_CIDR_1:?}" "AllowedCidr2=${ALLOWED_CIDR_2:?}" \
         "TapImage=$TAP_IMAGE" "ProxyImage=$PROXY_IMAGE" "FireflyImage=$FIREFLY_IMAGE" \
         "CatalogBucket=${CATALOG_BUCKET:?}" "Tables=${TABLES:-}" \
+        "CloudFrontPrefixListId=$PREFIX_LIST" \
         "DesiredCount=$COUNT" ${PASSWORD[@]+"${PASSWORD[@]}"}
 
 aws cloudformation describe-stacks --stack-name "$STACK" \

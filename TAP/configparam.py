@@ -143,16 +143,29 @@ class configParam:
         # through the public address.  The request's Host header is used
         # only when it is on this list.
 
+        #
+        # An entry may say how it is reached ("http://localhost").  That
+        # matters when the public address is HTTPS, ended at a proxy or load
+        # balancer, while a client inside reaches the service over plain HTTP.
+        # Without a scheme an entry takes the one in HTTP_URL.
+
         hosts = confobj[self.web].get('HTTP_HOSTS', '')
         if isinstance(hosts, str):
             hosts = hosts.split(',')
-        hosts = [h.strip().lower() for h in hosts if h.strip()]
+
+        default_scheme = self.httpurl.split('://', 1)[0] if '://' in self.httpurl else 'http'
+        schemes = {}
+        for h in hosts:
+            h = h.strip().lower()
+            if not h:
+                continue
+            scheme, sep, host = h.partition('://')
+            schemes[host if sep else h] = scheme if sep else default_scheme
 
         request_host = os.environ.get('HTTP_HOST', '').strip().lower()
 
-        if request_host and request_host in hosts:
-            scheme = self.httpurl.split('://', 1)[0] if '://' in self.httpurl else 'http'
-            self.httpurl = scheme + '://' + request_host
+        if request_host and request_host in schemes:
+            self.httpurl = schemes[request_host] + '://' + request_host
 
 
         # CGIPGM

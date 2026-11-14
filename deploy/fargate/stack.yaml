@@ -2,7 +2,7 @@ AWSTemplateFormatVersion: '2010-09-09'
 Description: >
   Archive in a Box pilot on ECS Fargate.  One task holds three containers
   (TAP service, Firefly, nginx front door) behind an Application Load
-  Balancer.  The catalogs are Parquet files in S3, read through the task role.
+  Balancer, with CloudFront in front to provide HTTPS on an Amazon name.  The catalogs are Parquet files in S3, read through the task role.
   There are no servers to manage; deleting this stack removes everything in it.
 
 Parameters:
@@ -13,10 +13,22 @@ Parameters:
     Description: At least two public subnets in different zones.
   AllowedCidr1:
     Type: String
-    Description: First address range allowed to reach the service.
+    AllowedPattern: '^\d+\.\d+\.\d+\.\d+/\d+$'
+    Description: First IPv4 address range allowed to reach the service.
   AllowedCidr2:
     Type: String
-    Description: Second address range allowed to reach the service.
+    AllowedPattern: '^\d+\.\d+\.\d+\.\d+/\d+$'
+    Description: Second IPv4 address range allowed to reach the service.
+  CloudFrontPrefixListId:
+    Type: String
+    Description: >
+      Id of the managed prefix list com.amazonaws.global.cloudfront.origin-facing
+      in this region (aws ec2 describe-managed-prefix-lists).
+  OriginSecret:
+    Type: String
+    NoEcho: true
+    MinLength: 20
+    Description: Random value CloudFront sends to the load balancer, which refuses requests without it.
   TapImage:
     Type: String
   ProxyImage:
@@ -135,11 +147,11 @@ Resources:
   LoadBalancerSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: Archive in a Box pilot - who may reach the load balancer
+      GroupDescription: Archive in a Box pilot - load balancer accepts only CloudFront
       VpcId: !Ref VpcId
       SecurityGroupIngress:
-        - {IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: !Ref AllowedCidr1}
-        - {IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: !Ref AllowedCidr2}
+        # Who may use the service is decided at CloudFront (AccessFunction).
+        - {IpProtocol: tcp, FromPort: 80, ToPort: 80, SourcePrefixListId: !Ref CloudFrontPrefixListId}
 
   TaskSecurityGroup:
     Type: AWS::EC2::SecurityGroup
@@ -183,8 +195,89 @@ Resources:
       LoadBalancerArn: !Ref LoadBalancer
       Protocol: HTTP
       Port: 80
+      # The prefix list admits every CloudFront distribution, anyone's.  Only
+      # requests carrying this stack's secret header are passed on.
       DefaultActions:
+        - Type: fixed-response
+          FixedResponseConfig: {StatusCode: '403', ContentType: text/plain, MessageBody: Forbidden}
+
+  ListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref Listener
+      Priority: 1
+      Conditions:
+        - Field: http-header
+          HttpHeaderConfig: {HttpHeaderName: X-Origin-Secret, Values: [!Ref OriginSecret]}
+      Actions:
         - {Type: forward, TargetGroupArn: !Ref TargetGroup}
+
+  # ---- HTTPS front ----------------------------------------------------
+  # CloudFront serves the site at https://<id>.cloudfront.net with Amazon's
+  # certificate, so no domain has to be registered.  Nothing is cached.
+
+  AccessFunction:
+    Type: AWS::CloudFront::Function
+    Properties:
+      Name: !Sub ${AWS::StackName}-access
+      AutoPublish: true
+      FunctionConfig:
+        Comment: Admit only the allowed IPv4 address ranges
+        Runtime: cloudfront-js-2.0
+      FunctionCode: !Sub |
+        function toInt(ip) {
+            var p = ip.split('.');
+            if (p.length !== 4) { return null; }
+            return ((+p[0] << 24) | (+p[1] << 16) | (+p[2] << 8) | +p[3]) >>> 0;
+        }
+        function inRange(ip, cidr) {
+            var parts = cidr.split('/');
+            var bits = +parts[1];
+            var mask = bits === 0 ? 0 : (0xFFFFFFFF << (32 - bits)) >>> 0;
+            return ((ip & mask) >>> 0) === ((toInt(parts[0]) & mask) >>> 0);
+        }
+        function handler(event) {
+            var allowed = ['${AllowedCidr1}', '${AllowedCidr2}'];
+            var ip = toInt(event.viewer.ip);
+            if (ip !== null) {
+                for (var i = 0; i < allowed.length; i++) {
+                    if (inRange(ip, allowed[i])) { return event.request; }
+                }
+            }
+            return { statusCode: 403, statusDescription: 'Forbidden' };
+        }
+
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub ${AWS::StackName} - HTTPS front for the load balancer
+        HttpVersion: http2
+        IPV6Enabled: false          # the access check understands IPv4 only
+        PriceClass: PriceClass_100
+        Origins:
+          - Id: alb
+            DomainName: !GetAtt LoadBalancer.DNSName
+            CustomOriginConfig:
+              OriginProtocolPolicy: http-only
+              HTTPPort: 80
+              # The longest CloudFront waits for the service to start
+              # answering.  A synchronous query that runs longer is cut off;
+              # async jobs are not affected.
+              OriginReadTimeout: 60
+              OriginKeepaliveTimeout: 60
+            OriginCustomHeaders:
+              - {HeaderName: X-Origin-Secret, HeaderValue: !Ref OriginSecret}
+        DefaultCacheBehavior:
+          TargetOriginId: alb
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD, OPTIONS, PUT, PATCH, POST, DELETE]
+          Compress: false
+          CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad          # managed: CachingDisabled
+          OriginRequestPolicyId: 216adef6-5c7f-47e4-b989-5492eafa07d3  # managed: AllViewer
+          FunctionAssociations:
+            - {EventType: viewer-request, FunctionARN: !GetAtt AccessFunction.FunctionMetadata.FunctionARN}
 
   TaskDefinition:
     Type: AWS::ECS::TaskDefinition
@@ -206,8 +299,9 @@ Resources:
           Essential: true
           Memory: 3584
           Environment:
-            - {Name: PUBLIC_URL, Value: !Sub 'http://${LoadBalancer.DNSName}'}
-            - {Name: HTTP_HOSTS, Value: localhost}
+            - {Name: PUBLIC_URL, Value: !Sub 'https://${Distribution.DomainName}'}
+            # Firefly, beside it in the task, reaches it over plain HTTP.
+            - {Name: HTTP_HOSTS, Value: 'http://localhost'}
             - {Name: TAP_PORT, Value: '8081'}
             - {Name: CATALOG_PREFIX, Value: !Sub 's3://${CatalogBucket}/${CatalogPrefix}'}
             - {Name: TABLES, Value: !Ref Tables}
@@ -249,7 +343,9 @@ Resources:
           PortMappings:
             - {ContainerPort: 80}
           Environment:
-            - {Name: PUBLIC_HOST, Value: !GetAtt LoadBalancer.DNSName}
+            - {Name: PUBLIC_HOST, Value: !GetAtt Distribution.DomainName}
+            - {Name: PUBLIC_SCHEME, Value: https}
+            - {Name: PROXY_COOKIE_FLAGS, Value: '# not needed over HTTPS'}
             - {Name: HIPS_URL, Value: !Ref HipsUrl}
           LogConfiguration:
             LogDriver: awslogs
@@ -260,7 +356,7 @@ Resources:
 
   Service:
     Type: AWS::ECS::Service
-    DependsOn: Listener
+    DependsOn: ListenerRule
     Properties:
       ServiceName: !Ref AWS::StackName
       Cluster: !Ref Cluster
@@ -367,8 +463,8 @@ Outputs:
   BuildProject:
     Value: !Ref BuildProject
   FireflyUrl:
-    Value: !Sub 'http://${LoadBalancer.DNSName}/firefly/'
+    Value: !Sub 'https://${Distribution.DomainName}/firefly/'
   TapUrl:
-    Value: !Sub 'http://${LoadBalancer.DNSName}/TAP'
+    Value: !Sub 'https://${Distribution.DomainName}/TAP'
   LogGroup:
     Value: !Ref LogGroup
