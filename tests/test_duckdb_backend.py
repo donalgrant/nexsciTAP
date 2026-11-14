@@ -233,3 +233,79 @@ def test_http_hosts_lets_a_listed_host_name_the_service(parquet_catalog, monkeyp
 
     monkeypatch.delenv('HTTP_HOST')
     assert configParam(str(parquet_catalog)).httpurl == public
+
+
+def _make_parquet(duckdb, path, columns='a.ra, a.dec, 7 AS hpx29'):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    con = duckdb.connect()
+    con.execute(f"COPY (SELECT {columns} FROM (VALUES (10.0, -20.0), (11.0, -21.0)) a(ra, dec)) "
+                f"TO '{path}' (FORMAT parquet)")
+    con.close()
+
+
+def _catalog(tmp_path, *extra):
+    return subprocess.run([sys.executable, str(REPO / 'tools' / 'make_duckdb_catalog.py'),
+                           '--db', str(tmp_path / 'c.duckdb'), '--discover', str(tmp_path / 'cat'),
+                           '--require-column', 'hpx29', *extra], capture_output=True, text=True)
+
+
+def _tables(duckdb, tmp_path):
+    con = duckdb.connect(str(tmp_path / 'c.duckdb'), read_only=True)
+    try:
+        return sorted(r[0] for r in con.execute(
+            "SELECT table_name FROM tap_schema.tables WHERE schema_name = 'main'").fetchall())
+    finally:
+        con.close()
+
+
+def test_discover_serves_good_folders_and_skips_bad_ones(tmp_path):
+    duckdb = pytest.importorskip('duckdb')
+    cat = tmp_path / 'cat'
+
+    _make_parquet(duckdb, cat / 'good_one' / 'part-00.parquet')
+    _make_parquet(duckdb, cat / 'renamed_folder' / 'part-00.parquet')
+    _make_parquet(duckdb, cat / 'no_index' / 'part-00.parquet', columns='a.ra, a.dec')
+    _make_parquet(duckdb, cat / 'bad-name' / 'part-00.parquet')
+    _make_parquet(duckdb, cat / 'has_xyz' / 'part-00.parquet', columns='a.ra, a.dec, 7 AS hpx29, 1 AS x')
+    (cat / 'empty').mkdir()
+
+    run = _catalog(tmp_path, '--table', f"nice={cat}/renamed_folder/*.parquet")
+    assert run.returncode == 0, run.stderr
+
+    # The explicit name wins for its folder; the unusable folders are left out and said so.
+    assert _tables(duckdb, tmp_path) == ['good_one', 'nice']
+    for folder in ('no_index', 'bad-name', 'has_xyz'):
+        assert folder in run.stderr
+
+    con = duckdb.connect(str(tmp_path / 'c.duckdb'), read_only=True)
+    assert con.execute('SELECT count(*), min(x) IS NOT NULL FROM good_one').fetchone() == (2, True)
+    con.close()
+
+
+def test_discover_picks_up_and_drops_folders_without_a_restart(tmp_path):
+    duckdb = pytest.importorskip('duckdb')
+    import shutil
+    cat = tmp_path / 'cat'
+    db = tmp_path / 'c.duckdb'
+
+    _make_parquet(duckdb, cat / 'first' / 'part-00.parquet')
+    assert _catalog(tmp_path).returncode == 0
+    assert _tables(duckdb, tmp_path) == ['first']
+
+    # Nothing changed: the file is left alone.
+    stamp = db.stat().st_mtime_ns
+    run = _catalog(tmp_path, '--if-changed')
+    assert run.returncode == 0 and db.stat().st_mtime_ns == stamp
+
+    # A reader that already has the catalog open keeps working while it is replaced.
+    reader = duckdb.connect(str(db), read_only=True)
+    _make_parquet(duckdb, cat / 'second' / 'part-00.parquet')
+    assert _catalog(tmp_path, '--if-changed').returncode == 0
+    assert reader.execute('SELECT count(*) FROM first').fetchone() == (2,)
+    reader.close()
+    assert _tables(duckdb, tmp_path) == ['first', 'second']
+
+    shutil.rmtree(cat / 'first')
+    assert _catalog(tmp_path, '--if-changed').returncode == 0
+    assert _tables(duckdb, tmp_path) == ['second']
+    assert not (tmp_path / 'c.duckdb.new').exists()

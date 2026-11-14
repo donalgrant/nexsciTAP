@@ -4,6 +4,11 @@
 #   PUBLIC_URL      base URL clients use, no trailing slash  (http://host)
 #   CATALOG_PREFIX  where the Parquet catalogs live          (s3://bucket/catalogs/)
 #   TABLES          space-separated  name=relative/glob      (allwise=allwise_k0_8/*.parquet ...)
+#                   Optional when DISCOVER is on; use it to give a folder a different table name.
+#   DISCOVER        "true" (default) serves every folder of Parquet files under
+#                   CATALOG_PREFIX as a table named after the folder, and keeps
+#                   looking, so a folder uploaded later appears without a restart
+#   DISCOVER_INTERVAL  seconds between looks (default 300)
 #   AWS_REGION      region of the bucket
 #   DUCKDB_MEMORY, DUCKDB_THREADS   per-query limits
 #   TAP_PORT        port to listen on (default 80)
@@ -13,7 +18,13 @@
 #   MAXREC_LIMIT    most rows one query may return (default 2000000; 0 = no limit)
 set -euo pipefail
 
-: "${PUBLIC_URL:?}" "${CATALOG_PREFIX:?}" "${TABLES:?}"
+: "${PUBLIC_URL:?}" "${CATALOG_PREFIX:?}"
+TABLES="${TABLES:-}"
+DISCOVER="${DISCOVER:-true}"
+DISCOVER_INTERVAL="${DISCOVER_INTERVAL:-300}"
+if [ -z "$TABLES" ] && [ "$DISCOVER" != "true" ]; then
+    echo "Set TABLES, or leave DISCOVER on." >&2; exit 1
+fi
 AWS_REGION="${AWS_REGION:-us-west-2}"
 DUCKDB_MEMORY="${DUCKDB_MEMORY:-2GB}"
 DUCKDB_THREADS="${DUCKDB_THREADS:-2}"
@@ -43,8 +54,24 @@ as_tap python /opt/tap/refresh_secret.py /var/lib/tap/secrets "${AWS_REGION}"
           || echo "WARNING: could not refresh the S3 credentials" >&2
   done ) &
 
-as_tap python /opt/nexsciTAP/tools/make_duckdb_catalog.py --db /var/lib/tap/catalog.duckdb \
-       --init-sql-file /opt/tap/s3_init.sql "${args[@]}"
+if [ "$DISCOVER" = "true" ]; then
+    args+=(--discover "${CATALOG_PREFIX}" --require-column hpx29)
+fi
+
+build_catalog() {
+    as_tap python /opt/nexsciTAP/tools/make_duckdb_catalog.py --db /var/lib/tap/catalog.duckdb \
+           --init-sql-file /opt/tap/s3_init.sql "${args[@]}" "$@"
+}
+
+# The first build must succeed.  After that the catalog is rebuilt whenever
+# the folders or their files change; each request opens the catalog file
+# afresh, and the file is replaced in one step, so no restart is involved.
+build_catalog
+if [ "$DISCOVER" = "true" ]; then
+    ( while sleep "$DISCOVER_INTERVAL"; do
+          build_catalog --if-changed || echo "WARNING: could not refresh the table list" >&2
+      done ) &
+fi
 
 mkdir -p /work/TAP
 chown -R www-data:www-data /work

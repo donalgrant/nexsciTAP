@@ -30,7 +30,19 @@ Parameters:
     Default: catalogs/
   Tables:
     Type: String
-    Description: Space-separated name=relative/glob pairs under the prefix.
+    Default: ''
+    Description: >
+      Space-separated name=relative/glob pairs under the prefix.  Optional when
+      DiscoverTables is true; use it to give a folder a different table name.
+  DiscoverTables:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: Serve every folder of Parquet files under the prefix, and keep looking for new ones.
+  DiscoverInterval:
+    Type: Number
+    Default: 300
+    Description: Seconds between looks for new or removed folders.
   HipsUrl:
     Type: String
     Default: https://irsa.ipac.caltech.edu/data/hips/CDS/DSS2/color
@@ -199,6 +211,8 @@ Resources:
             - {Name: TAP_PORT, Value: '8081'}
             - {Name: CATALOG_PREFIX, Value: !Sub 's3://${CatalogBucket}/${CatalogPrefix}'}
             - {Name: TABLES, Value: !Ref Tables}
+            - {Name: DISCOVER, Value: !Ref DiscoverTables}
+            - {Name: DISCOVER_INTERVAL, Value: !Ref DiscoverInterval}
             - {Name: AWS_REGION, Value: !Ref AWS::Region}
             - {Name: DUCKDB_MEMORY, Value: 2GB}
             - {Name: DUCKDB_THREADS, Value: '8'}

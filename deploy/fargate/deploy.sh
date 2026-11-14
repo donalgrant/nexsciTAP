@@ -5,7 +5,7 @@
 #
 # Reads the deployment's choices from the environment:
 #   VPC_ID, SUBNET_IDS (comma-separated), ALLOWED_CIDR_1, ALLOWED_CIDR_2,
-#   CATALOG_BUCKET, TABLES, and optionally PROJECT_TAG.
+#   CATALOG_BUCKET, and optionally TABLES and PROJECT_TAG.
 # Uses whatever AWS credentials and region the aws CLI is configured with.
 set -euo pipefail
 
@@ -28,7 +28,7 @@ aws cloudformation deploy \
         "VpcId=${VPC_ID:?}" "SubnetIds=${SUBNET_IDS:?}" \
         "AllowedCidr1=${ALLOWED_CIDR_1:?}" "AllowedCidr2=${ALLOWED_CIDR_2:?}" \
         "TapImage=$TAP_IMAGE" "ProxyImage=$PROXY_IMAGE" "FireflyImage=$FIREFLY_IMAGE" \
-        "CatalogBucket=${CATALOG_BUCKET:?}" "Tables=${TABLES:?}" \
+        "CatalogBucket=${CATALOG_BUCKET:?}" "Tables=${TABLES:-}" \
         "DesiredCount=$COUNT" ${PASSWORD[@]+"${PASSWORD[@]}"}
 
 aws cloudformation describe-stacks --stack-name "$STACK" \
