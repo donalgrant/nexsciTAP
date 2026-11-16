@@ -90,3 +90,100 @@ def test_schema_file_overrides_guessed_types(tmp_path):
     assert declared['mag'] == 'FLOAT'
     assert declared['big'] == 'BIGINT'
     assert rows == [('1998-04-18', None, 2), ('2000-09-26', None, 9007199254740993)]
+
+
+# ---- what the columns mean ---------------------------------------------
+
+TOOLS = REPO / 'tools'
+
+
+def _tool(name, *args):
+    run = subprocess.run([sys.executable, str(TOOLS / name), *map(str, args)], capture_output=True, text=True)
+    assert run.returncode == 0, run.stderr
+    return run.stdout
+
+
+def _tap_schema(duckdb, tmp_path, folder, name='t', *extra):
+    db = tmp_path / f'{name}.duckdb'
+    _tool('make_duckdb_catalog.py', '--db', db, '--table', f'{name}={folder}/*.parquet', *extra)
+    con = duckdb.connect(str(db), read_only=True)
+    cols = {r[0]: r[1:] for r in con.execute(
+        'SELECT column_name, unit, ucd, description FROM tap_schema.columns WHERE table_name = ?', [name]).fetchall()}
+    table = con.execute('SELECT description FROM tap_schema.tables WHERE table_name = ?', [name]).fetchone()[0]
+    return cols, table
+
+
+def test_units_and_descriptions_reach_tap_schema(tmp_path):
+    """A schema file's unit, ucd and description columns end up in TAP_SCHEMA, by way of the Parquet files."""
+    duckdb = pytest.importorskip('duckdb')
+    pytest.importorskip('astropy_healpix')
+
+    src = tmp_path / 'in.csv'
+    src.write_text('RAJ2000,DEJ2000,Kmag,Name\n10.0,-5.0,12.5,a\n11.0,-6.0,13.5,b\n')
+    schema = tmp_path / 'schema.csv'
+    schema.write_text('description,column_name,unit,datatype,ucd\n'
+                      'Right ascension,RAJ2000,deg,double,pos.eq.ra;meta.main\n'
+                      'Declination,DEJ2000,deg,double,pos.eq.dec;meta.main\n'
+                      '"K\'s magnitude, <Vega> & all",Kmag,mag,float,phot.mag;em.IR.K\n')
+    out = tmp_path / 'out'
+    said = _tool('make_parquet_catalog.py', src, out, '--ra', 'RAJ2000', '--dec', 'DEJ2000',
+                 '--schema', schema, '--description', "The table's own description")
+    assert '3 of 4 columns have a description, 3 a unit' in said
+
+    cols, table = _tap_schema(duckdb, tmp_path, out)
+    assert table == "The table's own description"
+    assert cols['ra'] == ('deg', 'pos.eq.ra;meta.main', 'Right ascension')      # under its new name
+    assert cols['kmag'] == ('mag', 'phot.mag;em.IR.K', "K's magnitude, <Vega> & all")
+    assert cols['name'] == ('', None, '')                                       # nothing said, nothing invented
+    assert 'HEALPix' in cols['hpx29'][2]
+    assert 'unit vector' in cols['x'][2]
+
+    # The type column still does its first job.
+    con = duckdb.connect()
+    assert con.execute(f"SELECT typeof(kmag) FROM read_parquet('{out}/*.parquet') LIMIT 1").fetchone()[0] == 'FLOAT'
+
+    # --describe on the service side wins over what the files say.
+    _, table = _tap_schema(duckdb, tmp_path, out, 'u', '--describe', 'u=Operator text')
+    assert table == 'Operator text'
+
+
+def test_table_without_metadata_is_still_served(tmp_path):
+    duckdb = pytest.importorskip('duckdb')
+    con = duckdb.connect()
+    folder = tmp_path / 'plain'
+    folder.mkdir()
+    con.execute(f"COPY (SELECT 1.0 AS ra, 2.0 AS dec, 5 AS hpx29) TO '{folder}/a.parquet' (FORMAT parquet)")
+    cols, table = _tap_schema(duckdb, tmp_path, folder)
+    assert table == '' and cols['ra'] == ('', None, '')
+
+
+@pytest.mark.parametrize('fmt,ext', [('fits', 'fits'), ('votable', 'vot')])
+def test_fits_and_votable_input_keep_their_units(tmp_path, fmt, ext):
+    """These formats say what their columns mean; the conversion must not lose it."""
+    duckdb = pytest.importorskip('duckdb')
+    pytest.importorskip('astropy_healpix')
+    import astropy.units as u
+    import numpy as np
+    from astropy.table import Table
+
+    t = Table()
+    t['RA'] = np.array([10.0, 11.0, 12.0]) * u.deg
+    t['DEC'] = np.array([-5.0, -6.0, 7.0]) * u.deg
+    t['flux'] = np.array([1.5, np.nan, 3.5], dtype='f4') * u.mJy
+    t['flux'].description = 'Total flux density'
+    t['id'] = np.array([7, 8, 9], dtype='i8')
+    t['name'] = ['a', 'bb', 'ccc']
+    src = tmp_path / f'in.{ext}'
+    t.write(src, format=fmt)
+
+    out = tmp_path / 'out'
+    _tool('make_parquet_catalog.py', src, out, '--ra', 'RA', '--dec', 'DEC')
+
+    con = duckdb.connect()
+    rows = con.execute(f"SELECT id, name, ra, dec, flux FROM read_parquet('{out}/*.parquet') ORDER BY id").fetchall()
+    assert [r[:4] for r in rows] == [(7, 'a', 10.0, -5.0), (8, 'bb', 11.0, -6.0), (9, 'ccc', 12.0, 7.0)]
+    assert rows[0][4] == 1.5 and rows[2][4] == 3.5
+
+    cols, _ = _tap_schema(duckdb, tmp_path, out)
+    assert cols['ra'][0] == 'deg'
+    assert cols['flux'][0] == 'mJy' and cols['flux'][2] == 'Total flux density'

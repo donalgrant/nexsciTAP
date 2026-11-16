@@ -10,6 +10,11 @@ The file holds no catalog data.  For each --table it creates a view over the
 Parquet files (local path or s3:// URL, globs allowed) and registers the table
 and its columns in TAP_SCHEMA, taking names and types from the Parquet schema.
 
+Units, UCDs and descriptions of the columns, and the table's description, are
+taken from the Parquet files when they carry them the IVOA way (written by
+make_parquet_catalog.py; see votable_metadata.py).  --describe overrides the
+table description.
+
 Each view adds the unit-vector columns x, y, z that the ADQL translator's
 exact cone test needs, computed from the RA and Dec columns, so the Parquet
 files only have to carry RA, Dec and one spatial index column.
@@ -43,6 +48,7 @@ import re
 import sys
 
 import duckdb
+import votable_metadata
 
 
 def tap_type(duck_type):
@@ -130,7 +136,10 @@ def main():
             schema = con.execute("SELECT file_name, md5(string_agg(name || ':' || coalesce(type, '') || ':' || "
                                  "coalesce(logical_type, ''), ',' ORDER BY column_id)) "
                                  'FROM parquet_schema(?) GROUP BY 1 ORDER BY 1', [pattern]).fetchall()
-            return sizes, schema
+            # What the columns mean is served too, so a change to it counts.
+            meta = con.execute('SELECT file_name, md5(string_agg(md5(key) || md5(value), \',\' ORDER BY key)) '
+                               'FROM parquet_kv_metadata(?) GROUP BY 1 ORDER BY 1', [pattern]).fetchall()
+            return sizes, schema, meta
         except Exception as e:
             return str(e)
 
@@ -190,6 +199,11 @@ def main():
 
             cols = con.execute(f'DESCRIBE {name}').fetchall()
 
+            # Units and descriptions, from the first file that carries them.
+            row = con.execute('SELECT value FROM parquet_kv_metadata(?) WHERE key = ? ORDER BY file_name LIMIT 1',
+                              [path, votable_metadata.CONTENT_KEY.encode()]).fetchone()
+            about_table, about = votable_metadata.parse(bytes(row[0]).decode('utf-8', 'replace')) if row else ('', {})
+
             # String widths from a sample, so fixed-width (IPAC) output has room.
             strcols = [c[0] for c in cols if tap_type(c[1])[0] == 'char']
             widths = {}
@@ -209,7 +223,7 @@ def main():
 
         tindex += 1
         con.execute(f'INSERT INTO {ts}.tables VALUES (?, ?, ?, NULL, ?, ?)',
-                    ['main', name, 'table', descriptions.get(name, ''), tindex])
+                    ['main', name, 'table', descriptions.get(name, about_table), tindex])
 
         for i, c in enumerate(cols):
             cname, ctype = c[0], c[1]
@@ -219,8 +233,12 @@ def main():
             if cname in (ra, dec):
                 fmt = '14.8f'
             principal = 0 if cname in ('x', 'y', 'z') else 1
-            con.execute(f'INSERT INTO {ts}.columns VALUES (?, ?, ?, NULL, NULL, NULL, ?, NULL, ?, NULL, ?, ?, 0, ?, ?)',
-                        [name, cname, dtype, '', '', 0, principal, fmt, i + 1])
+            known = about.get(cname, {})
+            if cname in ('x', 'y', 'z'):
+                known = {'description': f'{cname} component of the unit vector of (ra, dec); computed by the service'}
+            con.execute(f'INSERT INTO {ts}.columns VALUES (?, ?, ?, NULL, NULL, NULL, ?, ?, ?, ?, ?, ?, 0, ?, ?)',
+                        [name, cname, dtype, known.get('description', ''), known.get('utype'),
+                         known.get('unit', ''), known.get('ucd'), 0, principal, fmt, i + 1])
 
         print(f'{name}: {len(cols)} columns from {path}' + ('  (discovered)' if discovered else ''))
 

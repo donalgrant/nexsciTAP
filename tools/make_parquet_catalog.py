@@ -7,7 +7,7 @@
 Convert a table of sky positions to the Parquet layout the DuckDB backend serves.
 
     make_parquet_catalog.py INPUT OUTPUT_DIR [--ra COL] [--dec COL] [--schema FILE]
-                            [--rows-per-file N] [--row-group N]
+                            [--description TEXT] [--rows-per-file N] [--row-group N]
 
 INPUT is a CSV, Parquet, FITS or VOTable file (CSV and Parquet may be a glob,
 and may be s3:// or https:// locations DuckDB can read).  OUTPUT_DIR receives
@@ -34,18 +34,30 @@ which is what "SELECT column_name, datatype FROM TAP_SCHEMA.columns WHERE
 table_name = '...'" returns from a TAP service.  Columns it does not list keep
 their guessed type.
 
+The same file says what the columns mean.  Further columns headed "unit",
+"ucd", "utype" and "description" (any of them, in any order; add them to the
+TAP_SCHEMA query above) are recorded in the Parquet files, and --description
+does the same for the table as a whole.  The service shows them to users, in
+its table listing and in the results it returns.  FITS tables and VOTables
+carry units and descriptions themselves, which are kept unless FILE says
+otherwise.  The metadata is stored the way the IVOA note "Parquet in the
+Virtual Observatory" lays out (see votable_metadata.py), so other tools that
+read Parquet can use it too.
+
 Rows are sorted by hpx29 and written in small row groups.  Parquet keeps the
 smallest and largest value of every column in each row group, so a positional
 search reads only the few groups whose hpx29 range it touches.
 """
 
 import argparse
+import csv
 import os
 import re
 import sys
 
 import duckdb
 import numpy as np
+import votable_metadata
 import pyarrow as pa
 from astropy_healpix import lonlat_to_healpix
 from astropy import units as u
@@ -59,50 +71,113 @@ TYPES = {'int': 'INTEGER', 'integer': 'INTEGER', 'short': 'SMALLINT', 'smallint'
          'unicodechar': 'VARCHAR', 'boolean': 'BOOLEAN'}
 
 
+NAME_HEADS = ('column_name', 'name', 'column')
+TYPE_HEADS = ('datatype', 'type')
+META_HEADS = ('unit', 'ucd', 'utype', 'description')
+
+
 def read_schema(path):
-    """{column name: DuckDB type} from a two-column CSV (name, type)."""
+    """
+    ({column name: DuckDB type}, {column name: {unit, ucd, utype, description}})
+    from a CSV with a header.  Columns are found by their headings; a file
+    whose headings are not recognized is read as name, type.
+    """
 
-    import csv
-
-    types = {}
     with open(path, newline='') as f:
         rows = list(csv.reader(f))
+    if not rows:
+        return {}, {}
+
+    heads = [h.strip().lower() for h in rows[0]]
+
+    def position(names, default):
+        return next((heads.index(n) for n in names if n in heads), default)
+
+    name_at = position(NAME_HEADS, 0)
+    type_at = position(TYPE_HEADS, 1 if not set(heads) & set(META_HEADS) else None)
+    meta_at = {h: heads.index(h) for h in META_HEADS if h in heads}
+
+    types, meta = {}, {}
     for row in rows[1:]:
-        if len(row) < 2 or not row[0].strip():
+        if len(row) <= name_at or not row[name_at].strip():
             continue
-        name, kind = row[0].strip(), row[1].strip().lower()
-        if kind not in TYPES:
-            sys.exit(f'{path}: unknown type "{row[1]}" for column "{name}" '
-                     f'(known: {", ".join(sorted(TYPES))})')
-        types[name] = TYPES[kind]
-    return types
+        name = row[name_at].strip()
+
+        kind = row[type_at].strip().lower() if type_at is not None and len(row) > type_at else ''
+        if kind:
+            if kind not in TYPES:
+                sys.exit(f'{path}: unknown type "{row[type_at]}" for column "{name}" '
+                         f'(known: {", ".join(sorted(TYPES))})')
+            types[name] = TYPES[kind]
+
+        found = {h: row[i].strip() for h, i in meta_at.items() if len(row) > i and row[i].strip()}
+        if found:
+            meta[name] = found
+
+    return types, meta
 
 
 def read_input(con, path, types=None):
-    """Return a DuckDB relation for the input table."""
+    """(DuckDB relation, {column: metadata the input itself carries}) for the input table."""
 
     low = path.lower()
 
     if low.endswith(('.parquet', '.pq')) or '.parquet' in low:
-        return con.sql(f"SELECT * FROM read_parquet('{path}')")
+        return con.sql(f"SELECT * FROM read_parquet('{path}')"), parquet_metadata(con, path)
 
     if low.endswith(('.csv', '.csv.gz', '.tsv', '.txt')):
         if types:
             # Only for columns the file has; read_csv refuses unknown names.
             have = con.sql(f"SELECT * FROM read_csv('{path}', all_varchar=true) LIMIT 0").columns
             decl = ', '.join(f"'{c}': '{t}'" for c, t in types.items() if c in have)
-            return con.sql(f"SELECT * FROM read_csv('{path}', sample_size=-1, types={{{decl}}})")
-        return con.sql(f"SELECT * FROM read_csv('{path}', sample_size=-1)")
+            return con.sql(f"SELECT * FROM read_csv('{path}', sample_size=-1, types={{{decl}}})"), {}
+        return con.sql(f"SELECT * FROM read_csv('{path}', sample_size=-1)"), {}
 
     # FITS tables and VOTables go through astropy.
     from astropy.table import Table
 
     table = Table.read(path)
-    arrow = pa.table({name: np.asarray(table[name].filled(np.nan) if hasattr(table[name], 'filled')
-                                       and table[name].dtype.kind == 'f' else table[name])
-                      for name in table.colnames})
+
+    def column(col):
+        """A pyarrow array for an astropy column: native byte order, text as text, blanks as nulls."""
+        mask = np.asarray(col.mask) if hasattr(col, 'mask') and np.ndim(col.mask) else None
+        data = np.asarray(col.filled() if hasattr(col, 'filled') else col)
+        if data.ndim != 1:
+            sys.exit(f'Column "{col.name}" holds arrays; only one value per row is supported.')
+        if data.dtype.kind == 'S':
+            data = np.char.decode(data, 'utf-8', 'replace')
+        if data.dtype.kind == 'U':
+            data = np.char.rstrip(data).astype(object)
+        elif not data.dtype.isnative:                      # FITS is big-endian
+            data = data.astype(data.dtype.newbyteorder('='))
+        if data.dtype.kind == 'f':
+            if mask is not None:
+                data = np.where(mask, np.nan, data)
+            mask = np.isnan(data)                          # a missing number is a null, as in CSV input
+        return pa.array(data, mask=mask if mask is not None and mask.any() else None)
+
+    arrow = pa.table({name: column(table[name]) for name in table.colnames})
     con.register('astropy_input', arrow)
-    return con.sql('SELECT * FROM astropy_input')
+
+    carried = {}
+    for name in table.colnames:
+        col = table[name]
+        found = {'unit': str(col.unit) if col.unit is not None else '',
+                 'description': col.description or '',
+                 'ucd': (col.meta or {}).get('ucd', '') or ''}
+        carried[name] = {k: v for k, v in found.items() if v}
+    return con.sql('SELECT * FROM astropy_input'), carried
+
+
+def parquet_metadata(con, path):
+    """Column metadata already in Parquet input that follows the IVOA note."""
+
+    try:
+        row = con.execute('SELECT value FROM parquet_kv_metadata(?) WHERE key = ? LIMIT 1',
+                          [path, votable_metadata.CONTENT_KEY.encode()]).fetchone()
+    except duckdb.Error:
+        return {}
+    return votable_metadata.parse(bytes(row[0]).decode('utf-8', 'replace'))[1] if row else {}
 
 
 def clean(name):
@@ -117,7 +192,9 @@ def main():
     p.add_argument('--ra', default='ra', help='input column holding right ascension in degrees')
     p.add_argument('--dec', default='dec', help='input column holding declination in degrees')
     p.add_argument('--schema', metavar='FILE',
-                   help='CSV of column name and type, to use instead of guessing types from the values')
+                   help='CSV of column name and type, to use instead of guessing types from the values; '
+                        'may also give unit, ucd, utype and description')
+    p.add_argument('--description', default='', help='what the table is, shown in the table listing')
     p.add_argument('--rows-per-file', type=int, default=5_000_000)
     p.add_argument('--row-group', type=int, default=100_000)
     args = p.parse_args()
@@ -125,8 +202,8 @@ def main():
     con = duckdb.connect()
     con.execute('SET preserve_insertion_order = true')
 
-    types = read_schema(args.schema) if args.schema else {}
-    rel = read_input(con, args.input, types)
+    types, declared = read_schema(args.schema) if args.schema else ({}, {})
+    rel, carried = read_input(con, args.input, types)  # noqa: F841  (rel is used by name in SQL)
 
     # Output names: cleaned, positions renamed, no collisions.
     names = {}
@@ -180,17 +257,34 @@ def main():
                 'row_number() OVER (ORDER BY idx.hpx29) - 1 AS _n '
                 'FROM src JOIN idx ON src.rowid = idx.rid')
 
+    # What the columns mean, under their output names: what the input
+    # carried, then what --schema says, which wins.
+    meta = {}
+    for old, new in names.items():
+        meta[new] = {**carried.get(old, {}), **declared.get(old, {})}
+    for pos in ('ra', 'dec'):
+        meta[pos].setdefault('unit', 'deg')
+    meta['hpx29'] = {'description': 'Nested HEALPix index of (ra, dec) at order 29, added on conversion; '
+                                    'the files are sorted by it'}
+    out_cols = [(r[0], r[1]) for r in con.execute('DESCRIBE SELECT * EXCLUDE (_n) FROM sorted').fetchall()]
+    votable = votable_metadata.build([(c, t, meta.get(c, {})) for c, t in out_cols], args.description)
+    kv = (f"KV_METADATA {{'{votable_metadata.VERSION_KEY}': '1.0', "
+          f"'{votable_metadata.CONTENT_KEY}': '{votable.replace(chr(39), chr(39) * 2)}'}}")
+
     for part in range(parts):
         out = os.path.join(args.output_dir, f'part-{part:02d}.parquet')
         a, b = part * args.rows_per_file, (part + 1) * args.rows_per_file
         con.execute(f"""COPY (SELECT * EXCLUDE (_n) FROM sorted WHERE _n >= {a} AND _n < {b} ORDER BY _n)
-                        TO '{out}' (FORMAT parquet, COMPRESSION zstd, ROW_GROUP_SIZE {args.row_group})""")
+                        TO '{out}' (FORMAT parquet, COMPRESSION zstd, ROW_GROUP_SIZE {args.row_group}, {kv})""")
 
     print(f'{kept:,} rows in {parts} file(s) under {args.output_dir}'
           + (f'  ({total_in - kept:,} rows without a position dropped)' if total_in != kept else ''))
     renamed = {o: n for o, n in names.items() if o != n}
     if renamed:
         print('renamed: ' + ', '.join(f'{o} -> {n}' for o, n in renamed.items()))
+    described = sum(1 for c in names.values() if meta[c].get('description'))
+    with_unit = sum(1 for c in names.values() if meta[c].get('unit'))
+    print(f'{described} of {len(names)} columns have a description, {with_unit} a unit')
 
 
 if __name__ == '__main__':
