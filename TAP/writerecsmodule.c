@@ -960,7 +960,7 @@ static PyObject *method_writerecs(PyObject *self, PyObject *args) {
 
                     if(flen > widtharr[i]+1)
                     {
-                        snprintf (msg, sizeof (msg), "Column %d [%s], row %d: Formatted value [%s](%s) -> %d characters,  overflows column width [%d char].",
+                        snprintf (msg, sizeof (msg), "Column %d [%s], row %d: Formatted value [%.60s](%s) -> %d characters,  overflows column width [%d char].",
                             i, namearr[i], l, sval, fmtarr[i], flen, widtharr[i]);
                     
                         if ((debug1) && (fp_debug != (FILE *)NULL)) {
@@ -1123,7 +1123,7 @@ static PyObject *method_writerecs(PyObject *self, PyObject *args) {
 
                     if(strlen(tempstr) > widtharr[i]+1)
                     {
-                        snprintf (msg, sizeof (msg), "Column %d [%s], row %d: Formatted value [%s](%s) -> %d characters,  overflows column width [%d char].",
+                        snprintf (msg, sizeof (msg), "Column %d [%s], row %d: Formatted value [%.60s](%s) -> %d characters,  overflows column width [%d char].",
                             i, namearr[i], l, strval, fmtarr[i], (int)strlen(tempstr), widtharr[i]);
                     
                         if ((debug1) && (fp_debug != (FILE *)NULL)) {
@@ -1271,7 +1271,7 @@ static PyObject *method_writerecs(PyObject *self, PyObject *args) {
 
                     if(strlen(tempstr) > widtharr[i]+1)
                     {
-                        snprintf (msg, sizeof (msg), "Column %d [%s], row %d: Formatted value [%s](%s) -> %d characters,  overflows column width [%d char].",
+                        snprintf (msg, sizeof (msg), "Column %d [%s], row %d: Formatted value [%.60s](%s) -> %d characters,  overflows column width [%d char].",
                             i, namearr[i], l, strval, fmtarr[i], (int)strlen(tempstr), widtharr[i]);
                     
                         if ((debug1) && (fp_debug != (FILE *)NULL)) {
