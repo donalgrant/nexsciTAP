@@ -343,3 +343,10 @@ def test_long_column_names_and_values_do_not_corrupt_memory(fork_server, fmt):
     assert r.status_code == 200, r.text[:300]
     assert LONG_NAME in r.text
     assert r.text.count(LONG_VALUE) == 6
+
+
+def test_sigterm_stops_the_server_promptly(fixture_root: Path):
+    """A container's first process must act on SIGTERM itself."""
+    proc, _, _ = _serve(fixture_root, "term")
+    proc.terminate()
+    assert proc.wait(timeout=5) == 0

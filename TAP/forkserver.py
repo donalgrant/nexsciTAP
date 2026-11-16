@@ -47,6 +47,7 @@ import os
 import pwd
 import re
 import shutil
+import signal
 import socketserver
 import sys
 import tempfile
@@ -390,6 +391,14 @@ def main():
     os.makedirs(os.path.join(Handler.workdir, 'TAP'), exist_ok=True)
 
     preload()
+
+    # As a container's first process this one is sent SIGTERM to stop, and
+    # the kernel delivers that to a first process only if it asked for it.
+    # Without this the container sat out its whole stop timeout every time.
+    def stop(signum, frame):
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGTERM, stop)
 
     print(f'nexsciTAP fork server: http://{args.host}:{port}/TAP  (conf {Handler.conf})', flush=True)
     server.serve_forever(poll_interval=0.5)
