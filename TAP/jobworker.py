@@ -102,6 +102,7 @@ def start(jobdir, beat=BEAT):
                 if aborted(jobdir):
                     # Asked to stop from another server, or the job was deleted.
                     logging.warning(f'{jobdir}: aborted or deleted; worker {os.getpid()} stopping')
+                    finished()
                     os._exit(1)
                 _beat(path)
             except Exception as e:
@@ -157,6 +158,12 @@ def stop(jobdir, pid):
 
     if pid > 0 and pid != os.getpid():
         os.kill(pid, signal.SIGKILL)
+
+    # The worker cannot say it is no longer running; say it for it.
+    try:
+        os.remove(os.path.join(os.path.dirname(jobdir), RUNNING, os.path.basename(jobdir)))
+    except OSError:
+        pass
 
 
 def mark_lost(jobdir, statuspath, stale=STALE):

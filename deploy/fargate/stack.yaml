@@ -73,6 +73,12 @@ Parameters:
     Description: >
       Number of copies of the task.  0 stops the service (and its hourly cost)
       without deleting it; more than 1 share the work area and the load.
+  QueryMemory:
+    Type: String
+    Default: 600MB
+    Description: >
+      Memory one query may use before it works from disk.  The TAP container
+      has 3.5 GB; several heavy queries at once each take this much.
   ClientLimit:
     Type: Number
     Default: 6
@@ -402,7 +408,7 @@ Resources:
             - {Name: DISCOVER, Value: !Ref DiscoverTables}
             - {Name: DISCOVER_INTERVAL, Value: !Ref DiscoverInterval}
             - {Name: AWS_REGION, Value: !Ref AWS::Region}
-            - {Name: DUCKDB_MEMORY, Value: 2GB}
+            - {Name: DUCKDB_MEMORY, Value: !Ref QueryMemory}
             - {Name: DUCKDB_THREADS, Value: '8'}
             - {Name: QUERY_TIMEOUT, Value: !Ref QueryTimeout}
             - {Name: MAXREC_LIMIT, Value: !Ref MaxRecLimit}

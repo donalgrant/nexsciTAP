@@ -10,7 +10,10 @@
 #                   looking, so a folder uploaded later appears without a restart
 #   DISCOVER_INTERVAL  seconds between looks (default 300)
 #   AWS_REGION      region of the bucket
-#   DUCKDB_MEMORY, DUCKDB_THREADS   per-query limits
+#   DUCKDB_MEMORY, DUCKDB_THREADS   per-query limits.  Every request in progress may
+#                   use DUCKDB_MEMORY, so the container needs about that times
+#                   the number of heavy queries expected at once
+#   DUCKDB_TEMP     disk one query may use for work that does not fit in memory (default 4GB)
 #   TAP_PORT        port to listen on (default 80)
 #   HTTP_HOSTS      other names the service answers under, e.g. localhost
 #   MAX_REQUESTS    requests handled at once (default 12)
@@ -36,7 +39,7 @@ AWS_REGION="${AWS_REGION:-us-west-2}"
 DUCKDB_MEMORY="${DUCKDB_MEMORY:-2GB}"
 DUCKDB_THREADS="${DUCKDB_THREADS:-2}"
 
-sed -i -e "s|__DUCKDB_MEMORY__|${DUCKDB_MEMORY}|" \
+sed -i -e "s|__DUCKDB_MEMORY__|${DUCKDB_MEMORY}|" -e "s|__DUCKDB_TEMP__|${DUCKDB_TEMP:-4GB}|" \
        -e "s|__DUCKDB_THREADS__|${DUCKDB_THREADS}|" /opt/tap/s3_init.sql
 
 sed -e "s|__PUBLIC_URL__|${PUBLIC_URL}|" -e "s|__CATALOG_PREFIX__|${CATALOG_PREFIX}|" \
@@ -57,6 +60,7 @@ export HOME=/var/lib/tap TAP_HOME=/var/lib/tap
 # The S3 credentials are resolved here, not in each request (see
 # refresh_secret.py), and again every few minutes since they are temporary.
 as_tap() { setpriv --reuid www-data --regid www-data --init-groups "$@"; }
+mkdir -p /var/lib/tap/tmp
 chown -R www-data:www-data /var/lib/tap
 as_tap python /opt/tap/refresh_secret.py /var/lib/tap/secrets "${AWS_REGION}"
 ( while sleep 300; do

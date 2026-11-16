@@ -178,3 +178,15 @@ def test_admit_does_not_count_jobs_that_ended_without_saying_so(tmp_path, monkey
 def test_no_limits_no_register(tmp_path):
     assert jobworker.admit(str(tmp_path), "tap_x", "alice") is None
     assert not (tmp_path / ".running").exists()
+
+
+def test_stopped_job_gives_up_its_place_at_once(tmp_path):
+    """A killed worker cannot unregister itself; the one stopping it does."""
+    jobdir = tmp_path / "tap_j"
+    jobdir.mkdir()
+    proc = _worker(jobdir)
+    (tmp_path / ".running").mkdir()
+    (tmp_path / ".running" / "tap_j").write_text("alice\n")
+    jobworker.stop(jobdir, 0)
+    proc.wait(timeout=5)
+    assert not (tmp_path / ".running" / "tap_j").exists()
