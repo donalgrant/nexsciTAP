@@ -16,22 +16,33 @@ or nothing.  And when a server goes away, the jobs it was running stay
 So each job's directory also holds a small file, "worker", written by the
 process that runs the job:
 
-    <host name> <process id>
+    <host name> <process id> <time of this writing>
 
-  * The worker touches it every few seconds for as long as it runs.  A
-    worker file that has not been touched for a while belongs to a job
-    whose server is gone; reading the job's status then records it as
-    failed (mark_lost).
+  * The worker rewrites it every few seconds for as long as it runs.  A
+    worker file whose time is long past belongs to a job whose server is
+    gone; reading the job's status then records it as failed (mark_lost).
+
+    The time is in the file, not taken from the file's modification time,
+    because of how network file systems behave: another machine sees a
+    file's attributes up to a minute late (they are cached), but opening a
+    file always checks it afresh.  For the same reason nothing here
+    replaces a file by renaming a new one over it; a machine that had the
+    old one open, or cached, would go on using it.
 
   * stop() kills the process only on the host that owns it.  Anywhere else
-    it leaves a file "abort" in the job's directory, which the worker
-    notices within a few seconds and exits.  The worker also exits when its
-    directory disappears (the job was deleted).
+    it leaves the worker to stop itself: every few seconds the worker reads
+    its job's status document, and exits if the job has been marked ABORTED
+    or the document is gone (the job was deleted).  stop() also leaves a
+    file "abort" in the job's directory, for the moment between the request
+    to stop and the status being written; a new file can take a while to
+    show on another machine, which is why the status document, an existing
+    file opened afresh each time, is the signal relied on.
 
 Jobs without a worker file (started by an older version, or not yet
 started) are handled as before: by process number, on this host.
 """
 
+import fcntl
 import html
 import logging
 import os
@@ -43,9 +54,11 @@ import time
 
 WORKER = 'worker'
 ABORT = 'abort'
+STATUS = 'status.xml'
+ABORTED = '<uws:phase>ABORTED</uws:phase>'
 
 BEAT = 3        # seconds between a worker's signs of life
-STALE = 60      # a worker silent this long is taken to be gone
+STALE = 90      # a worker silent this long is taken to be gone
 
 LOST_MESSAGE = 'The server running this job stopped before the job finished.  Submit it again.'
 
@@ -54,15 +67,18 @@ def _host():
     return socket.gethostname()
 
 
+def _beat(path):
+    with open(path, 'w') as f:
+        f.write(f'{_host()} {os.getpid()} {time.time():.0f}\n')
+
+
 def start(jobdir, beat=BEAT):
     """Called in the process that runs the job, once the job is published."""
 
     path = os.path.join(jobdir, WORKER)
-    abort = os.path.join(jobdir, ABORT)
 
     try:
-        with open(path, 'w') as f:
-            f.write(f'{_host()} {os.getpid()}\n')
+        _beat(path)
     except OSError as e:
         logging.error(f'Could not write {path}: {e}')
         return
@@ -70,11 +86,11 @@ def start(jobdir, beat=BEAT):
     def watch():
         while True:
             time.sleep(beat)
-            if os.path.exists(abort) or not os.path.isdir(jobdir):
+            if aborted(jobdir):
                 # Asked to stop from another server, or the job was deleted.
                 os._exit(1)
             try:
-                os.utime(path, None)
+                _beat(path)
             except OSError:
                 pass
 
@@ -82,17 +98,29 @@ def start(jobdir, beat=BEAT):
 
 
 def aborted(jobdir):
-    return os.path.exists(os.path.join(jobdir, ABORT))
+    """Has the job been aborted or deleted, here or from another server?"""
+
+    if os.path.exists(os.path.join(jobdir, ABORT)):
+        return True
+    try:
+        with open(os.path.join(jobdir, STATUS)) as f:
+            return ABORTED in f.read()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
 
 
 def owner(jobdir):
-    """(host, pid, seconds since last sign of life), or None if not recorded."""
+    """
+    (host, pid, seconds since last sign of life), or None if not recorded.
+    None too for a file caught half written; the next look will see it whole.
+    """
 
-    path = os.path.join(jobdir, WORKER)
     try:
-        with open(path) as f:
-            host, pid = f.read().split()
-        return host, int(pid), time.time() - os.stat(path).st_mtime
+        with open(os.path.join(jobdir, WORKER)) as f:
+            host, pid, when = f.read().split()
+        return host, int(pid), time.time() - float(when)
     except (OSError, ValueError):
         return None
 
@@ -128,26 +156,30 @@ def mark_lost(jobdir, statuspath, stale=STALE):
     if own is None or own[2] < stale:
         return False
 
+    # In place, under the lock the service's own status writes take.
     try:
-        with open(statuspath) as f:
+        with open(statuspath, 'r+') as f:
+            fcntl.lockf(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
             text = f.read()
-    except OSError:
-        return False
 
-    if '<uws:phase>EXECUTING</uws:phase>' not in text:
-        return False
+            if '<uws:phase>EXECUTING</uws:phase>' not in text:
+                return False
 
-    text = text.replace('<uws:phase>EXECUTING</uws:phase>', '<uws:phase>ERROR</uws:phase>', 1)
-    summary = ('    <uws:errorSummary type="transient" hasDetail="true">\n'
-               f'        <uws:message>{html.escape(LOST_MESSAGE)}</uws:message>\n'
-               '    </uws:errorSummary>\n')
-    text = re.sub(r'</uws:job>\s*$', summary + '</uws:job>\n', text, count=1)
+            # The worker may have spoken while we were getting here.
+            own = owner(jobdir)
+            if own is None or own[2] < stale:
+                return False
 
-    tmp = f'{statuspath}.{os.getpid()}.tmp'
-    try:
-        with open(tmp, 'w') as f:
+            text = text.replace('<uws:phase>EXECUTING</uws:phase>', '<uws:phase>ERROR</uws:phase>', 1)
+            summary = ('    <uws:errorSummary type="transient" hasDetail="true">\n'
+                       f'        <uws:message>{html.escape(LOST_MESSAGE)}</uws:message>\n'
+                       '    </uws:errorSummary>\n')
+            text = re.sub(r'</uws:job>\s*$', summary + '</uws:job>\n', text, count=1)
+
+            f.seek(0)
+            f.truncate()
             f.write(text)
-        os.replace(tmp, statuspath)
+
     except OSError as e:
         logging.error(f'Could not record the lost job in {statuspath}: {e}')
         return False

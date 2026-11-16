@@ -24,7 +24,8 @@ fork() is safe.  A child serves one request and exits, so nothing a request
 does can leak into the next one.
 
 The TAP endpoints appear under /TAP, and files in TAP_WORKDIR are served under
-TAP_WORKURL, except uploaded tables (upload_*.vot), which stay private.
+TAP_WORKURL, except uploaded tables (upload_*.vot) and the service's own
+bookkeeping files, which stay private.
 
 There is no TLS and no authentication:  run it behind a reverse proxy.
 """
@@ -42,7 +43,7 @@ import sys
 import tempfile
 from urllib.parse import unquote, urlsplit
 
-PRIVATE_FILES = ('upload_*.vot',)
+PRIVATE_FILES = ('upload_*.vot', 'worker', 'abort')
 
 # Imported on demand by the service; loading them here keeps that cost out of
 # the requests.  Missing optional packages are skipped.

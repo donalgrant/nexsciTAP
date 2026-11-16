@@ -26,6 +26,7 @@ time.sleep(30)
 
 
 def _worker(jobdir: Path) -> subprocess.Popen:
+    (jobdir / "status.xml").write_text(STATUS.format(phase="EXECUTING"))
     env = dict(os.environ, PYTHONPATH=str(Path(__file__).parent.parent))
     proc = subprocess.Popen([sys.executable, "-c", WORKER, str(jobdir)], env=env)
     for _ in range(100):
@@ -41,10 +42,10 @@ def test_worker_records_itself_and_shows_it_is_alive(tmp_path):
         host, pid, _ = jobworker.owner(tmp_path)
         assert (host, pid) == (jobworker._host(), proc.pid)
 
-        long_ago = time.time() - 3600
-        os.utime(tmp_path / "worker", (long_ago, long_ago))
-        time.sleep(0.5)
-        assert jobworker.owner(tmp_path)[2] < 60       # touched again
+        first = (tmp_path / "worker").read_text()
+        time.sleep(1.5)
+        assert (tmp_path / "worker").read_text() != first   # written again
+        assert jobworker.owner(tmp_path)[2] < 5
     finally:
         proc.kill()
         proc.wait()
@@ -80,8 +81,15 @@ def test_worker_exits_when_its_job_is_deleted(tmp_path):
     jobdir = tmp_path / "job"
     jobdir.mkdir()
     proc = _worker(jobdir)
-    (jobdir / "worker").unlink()
-    jobdir.rmdir()
+    import shutil
+    shutil.rmtree(jobdir)
+    assert proc.wait(timeout=5) == 1
+
+
+def test_worker_exits_when_its_status_says_aborted(tmp_path):
+    """The signal that works across machines: the status document itself."""
+    proc = _worker(tmp_path)
+    (tmp_path / "status.xml").write_text(STATUS.format(phase="ABORTED"))
     assert proc.wait(timeout=5) == 1
 
 
@@ -98,12 +106,17 @@ def test_mark_lost(tmp_path):
     # No worker file: nothing known, nothing changed.
     assert not jobworker.mark_lost(tmp_path, status)
 
-    (tmp_path / "worker").write_text("gone-host 4242\n")
+    (tmp_path / "worker").write_text(f"gone-host 4242 {time.time():.0f}\n")
     assert not jobworker.mark_lost(tmp_path, status)   # heard from just now
     assert "EXECUTING" in status.read_text()
 
+    # The file's own modification time is not what counts (it is cached on
+    # network file systems); the time written in it is.
     long_ago = time.time() - 3600
     os.utime(tmp_path / "worker", (long_ago, long_ago))
+    assert not jobworker.mark_lost(tmp_path, status)
+
+    (tmp_path / "worker").write_text(f"gone-host 4242 {long_ago:.0f}\n")
     assert jobworker.mark_lost(tmp_path, status)
     text = status.read_text()
     assert "<uws:phase>ERROR</uws:phase>" in text

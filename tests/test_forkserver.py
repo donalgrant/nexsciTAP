@@ -246,9 +246,7 @@ def test_job_whose_server_is_gone_is_reported_as_failed(fork_server, second_serv
     status = jobdir / "status.xml"
     status.write_text(status.read_text().replace("<uws:phase>COMPLETED</uws:phase>",
                                                  "<uws:phase>EXECUTING</uws:phase>"))
-    (jobdir / "worker").write_text("a-host-that-is-gone 4242\n")
-    long_ago = time.time() - 3600
-    os.utime(jobdir / "worker", (long_ago, long_ago))
+    (jobdir / "worker").write_text(f"a-host-that-is-gone 4242 {time.time() - 3600:.0f}\n")
 
     other = _elsewhere(job, second_server)
     assert requests.get(other + "/phase").text.strip() == "ERROR"
