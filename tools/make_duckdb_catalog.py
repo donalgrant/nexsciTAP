@@ -30,7 +30,8 @@ bad upload does not take the other tables down.
 
 The database is written beside its final name and moved into place, so a
 service reading it never sees it half built.  With --if-changed the work is
-skipped when the tables and their files are the same as last time, which makes
+skipped when the tables and their files (names, sizes, row counts and column
+types) are the same as last time, which makes
 the tool cheap to run on a timer:  new folders then appear in the service, and
 removed ones disappear, without a restart.
 """
@@ -120,7 +121,20 @@ def main():
             tables.append((folder, prefix + folder + '/*.parquet', True))
 
     # What is being served: the tables and every file behind them.
-    listing = [(name, path, files_of(path)) for name, path, _ in tables]
+    # Sizes, row counts and column types come from each file's footer, so
+    # a file replaced under the same name is noticed too.
+    def footers_of(pattern):
+        try:
+            sizes = con.execute('SELECT file_name, num_rows, file_size_bytes, footer_size '
+                                'FROM parquet_file_metadata(?) ORDER BY 1', [pattern]).fetchall()
+            schema = con.execute("SELECT file_name, md5(string_agg(name || ':' || coalesce(type, '') || ':' || "
+                                 "coalesce(logical_type, ''), ',' ORDER BY column_id)) "
+                                 'FROM parquet_schema(?) GROUP BY 1 ORDER BY 1', [pattern]).fetchall()
+            return sizes, schema
+        except Exception as e:
+            return str(e)
+
+    listing = [(name, path, files_of(path), footers_of(path)) for name, path, _ in tables]
     signature = hashlib.sha256(repr(listing).encode()).hexdigest()
     signature_file = args.db + '.files'
 

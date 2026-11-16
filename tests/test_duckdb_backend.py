@@ -5,6 +5,7 @@ build a tiny Parquet catalog and are skipped when duckdb is not installed.
 """
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -328,3 +329,79 @@ def test_http_hosts_entry_can_carry_its_own_scheme(parquet_catalog, monkeypatch)
 
     monkeypatch.setenv('HTTP_HOST', 'other.example.org')
     assert configParam(str(parquet_catalog)).httpurl == 'https://other.example.org'
+
+
+def test_discover_notices_a_file_replaced_under_the_same_name(tmp_path):
+    duckdb = pytest.importorskip('duckdb')
+    cat = tmp_path / 'cat'
+    f = cat / 'first' / 'part-00.parquet'
+
+    def datatype(column):
+        con = duckdb.connect(str(tmp_path / 'c.duckdb'), read_only=True)
+        try:
+            return con.execute("SELECT datatype FROM tap_schema.columns WHERE table_name = 'first' "
+                               "AND column_name = ?", [column]).fetchone()
+        finally:
+            con.close()
+
+    _make_parquet(duckdb, f, columns="a.ra, a.dec, 7 AS hpx29, 'text' AS flux")
+    assert _catalog(tmp_path).returncode == 0
+    assert datatype('flux') == ('char',)
+
+    f.unlink()
+    _make_parquet(duckdb, f, columns='a.ra, a.dec, 7 AS hpx29, 1.5 AS flux')
+    assert _catalog(tmp_path, '--if-changed').returncode == 0
+    assert datatype('flux') == ('double',)
+
+
+# ---- BOX and POLYGON: the index constraint is rebuilt from the edge conditions ----
+
+def _triangle_sql(index_clause):
+    # The octant x, y, z >= 0, written the way the translator writes a polygon's edges.
+    return ('SELECT a FROM t WHERE ((1.000000000000*x)+(0.000000000000*y)+(0.000000000000*z)>=0. AND '
+            '(0.000000000000*x)+(1.000000000000*y)+(0.000000000000*z)>=0. AND '
+            '(0.000000000000*x)+(0.000000000000*y)+(1.000000000000*z)>=0.)' + index_clause)
+
+
+def test_region_cover_holds_every_point_of_the_region():
+    pytest.importorskip('astropy_healpix')
+    import random
+
+    import astropy.units as u
+    from astropy_healpix import lonlat_to_healpix
+    from TAP import duckdbsupport
+
+    sql = _triangle_sql(' AND ((hpx29 BETWEEN 5 AND 6) OR (hpx29 = 9))')
+    adql = "SELECT a FROM t WHERE CONTAINS(POINT('ICRS',ra,dec),POLYGON('ICRS',0,0,90,0,0,90))=1"
+    out = duckdbsupport.replace_region_cover(sql, adql, 'hpx29', 29)
+
+    assert 'hpx29 BETWEEN 5 AND 6' not in out and '(hpx29 = 9)' not in out     # the library's cells are gone
+    assert out.count('>=0.') == 3                                              # the geometry test is untouched
+    ranges = [(int(a), int(b)) for a, b in re.findall(r'hpx29 BETWEEN (\d+) AND (\d+)', out)]
+    assert 0 < len(ranges) <= duckdbsupport.MAX_REGION_RANGES
+
+    rng = random.Random(1)
+    for _ in range(2000):
+        lon, lat = rng.uniform(0, 90), rng.uniform(0, 90)                      # inside the octant
+        cell = int(lonlat_to_healpix(lon * u.deg, lat * u.deg, 2 ** 29, order='nested'))
+        assert any(lo <= cell <= hi for lo, hi in ranges), (lon, lat)
+
+
+def test_region_cover_falls_back_to_a_scan_when_unsure():
+    from TAP import duckdbsupport
+
+    clause = ' AND ((hpx29 BETWEEN 5 AND 6) OR (hpx29 = 9))'
+    box = "SELECT a FROM t WHERE CONTAINS(POINT('ICRS',ra,dec),BOX('ICRS',1,2,3,4))=1"
+
+    # Edge conditions it cannot read: no index constraint at all, rather than a wrong one.
+    odd = 'SELECT a FROM t WHERE (something_else(x, y, z))' + clause
+    assert duckdbsupport.replace_region_cover(odd, box, 'hpx29', 29) == 'SELECT a FROM t WHERE (something_else(x, y, z))'
+
+    # Two geometry constraints in one query.
+    two = box + " AND CONTAINS(POINT('ICRS',ra,dec),CIRCLE('ICRS',1,2,3))=1"
+    assert 'hpx29' not in duckdbsupport.replace_region_cover(_triangle_sql(clause), two, 'hpx29', 29)
+
+    # A cone search is left exactly as it was.
+    cone = "SELECT a FROM t WHERE CONTAINS(POINT('ICRS',ra,dec),CIRCLE('ICRS',1,2,3))=1"
+    sql = 'SELECT a FROM t WHERE ((0.5*x)+(0.5*y)+(0.7*z)>=9.99e-01)' + clause
+    assert duckdbsupport.replace_region_cover(sql, cone, 'hpx29', 29) == sql

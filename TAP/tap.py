@@ -1609,6 +1609,11 @@ class Tap:
                 self.query, colname, level,
                 self.config.adqlparam.get('stored_level'))
 
+            if dbms == 'duckdb':
+                self.query = duckdbsupport.replace_region_cover(
+                    self.query, query_adql, colname,
+                    self.config.adqlparam.get('stored_level') or level)
+
             self.query = tapupload.finish(self.query, upload_context)
 
             if self.debug:

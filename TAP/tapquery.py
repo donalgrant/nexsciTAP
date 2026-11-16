@@ -888,6 +888,11 @@ def main():
         sql_string = duckdbsupport.rescale_index_constraint(
             sql_string, colname, level, config.adqlparam.get('stored_level'))
 
+        if config.connectInfo.get('dbms') == 'duckdb':
+            sql_string = duckdbsupport.replace_region_cover(
+                sql_string, adql_string, colname,
+                config.adqlparam.get('stored_level') or level)
+
         if debug:
             logging.debug(f'ADQL string: {adql_string:s}')
             logging.debug(f' SQL string: {sql_string:s}')

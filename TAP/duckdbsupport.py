@@ -343,3 +343,142 @@ def rescale_index_constraint(sql, colname, level, stored_level):
     sql = re.sub(r'\(' + col + r' = (\d+)\)', equal, sql)
 
     return sql
+
+
+_REGION = re.compile(r"\b(BOX|POLYGON)\s*\(\s*'([^']*)'\s*,([^()]*)\)", re.I)
+MAX_REGION_RANGES = 300
+
+
+def _index_clause(colname):
+    col = re.escape(colname)
+    term = r'\(' + col + r'\s+(?:BETWEEN\s+\d+\s+AND\s+\d+|=\s*\d+)\)'
+    return re.compile(r'\s+AND\s+\(\s*' + term + r'(?:\s+OR\s+' + term + r')*\s*\)')
+
+
+_HALF_SPACE = re.compile(r'\(([-+\d.eE]+)\*\w+\)\+\(([-+\d.eE]+)\*\w+\)\+\(([-+\d.eE]+)\*\w+\)\s*>=\s*0\.?(?![\d])')
+
+
+def _bounding_cap(sql):
+    """
+    Center (lon, lat) and radius, in degrees, of a cap holding the region the
+    translated query tests for.
+
+    The translator turns a BOX or POLYGON into one condition per edge,
+    "(a*x)+(b*y)+(c*z)>=0.", a half-space through the origin.  The region's
+    corners are where consecutive edges meet, so they are read off the SQL
+    itself rather than re-derived from the ADQL, whatever convention the
+    translator used to build them.
+    """
+    import math
+
+    normals = [tuple(float(v) for v in m) for m in _HALF_SPACE.findall(sql)]
+    if len(normals) < 3:
+        return None
+
+    def cross(a, b):
+        return (a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0])
+
+    def dot(a, b):
+        return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+    corners = []
+    for k in range(len(normals)):
+        v = cross(normals[k], normals[(k + 1) % len(normals)])
+        norm = math.sqrt(dot(v, v))
+        if norm < 1e-12:
+            return None
+        v = tuple(c / norm for c in v)
+        inside = [w for w in (v, tuple(-c for c in v)) if all(dot(n, w) >= -1e-9 for n in normals)]
+        if len(inside) != 1:
+            return None
+        corners.append(inside[0])
+
+    c = tuple(sum(v[i] for v in corners) for i in range(3))
+    norm = math.sqrt(dot(c, c))
+    if norm < 1e-9:
+        return None
+    c = tuple(x / norm for x in c)
+    radius = max(math.degrees(math.acos(max(-1.0, min(1.0, dot(c, v))))) for v in corners)
+
+    # Edges are great-circle arcs, which stay inside a cap that holds their
+    # ends only while the cap is smaller than a hemisphere.
+    if radius >= 60.0:
+        return None
+
+    lon = math.degrees(math.atan2(c[1], c[0])) % 360.0
+    lat = math.degrees(math.asin(max(-1.0, min(1.0, c[2]))))
+    return lon, lat, radius * 1.01 + 1e-4
+
+
+def _cap_ranges(lon, lat, radius, index_level):
+    """Ranges of the nested index at `index_level` covering a cap, a few hundred at most."""
+    import math
+
+    import astropy.units as u
+    from astropy_healpix import HEALPix
+
+    # Cells about a tenth of the radius across: a few hundred of them.
+    order = int(math.floor(math.log2(58.6 / max(radius / 10.0, 1e-6))))
+    order = max(0, min(order, int(index_level), 14))
+
+    while True:
+        cells = sorted(int(c) for c in HEALPix(nside=2 ** order, order='nested')
+                       .cone_search_lonlat(lon * u.deg, lat * u.deg, radius * u.deg))
+        ranges = []
+        for c in cells:
+            if ranges and c == ranges[-1][1] + 1:
+                ranges[-1][1] = c
+            else:
+                ranges.append([c, c])
+        if len(ranges) <= MAX_REGION_RANGES or order == 0:
+            break
+        order -= 1
+
+    shift = 2 * (int(index_level) - order)
+    return [(lo << shift, ((hi + 1) << shift) - 1) for lo, hi in ranges]
+
+
+def replace_region_cover(sql, adql, colname, index_level):
+    """
+    Replace the spatial-index constraint of a BOX or POLYGON search.
+
+    For those two shapes the spatial index library returns, in HPX mode, a list
+    of cells that covers only part of the region, so sources in the rest are
+    never looked at even though the exact geometry test would accept them.
+    (Cone searches are not affected.)  This takes the library's cells out and
+    puts in ranges covering a cap that holds the whole region, computed with
+    astropy_healpix.  The exact geometry test in the query is untouched, so
+    the answer is decided by it alone and the ranges only limit what is read.
+
+    `sql` is the translated query, after rescale_index_constraint; `index_level`
+    is the HEALPix level of the values in the index column.
+
+    Anything this does not fully understand (two geometry constraints, edge
+    conditions it cannot read, a region wider than about a third of the sky)
+    loses its index constraint altogether:  the query then scans the table
+    and is still answered correctly.
+    """
+
+    regions = _REGION.findall(adql or '')
+    if not regions:
+        return sql
+
+    clause = _index_clause(colname)
+    if not clause.search(sql):
+        return sql
+
+    ranges = None
+    geometry = len(re.findall(r'\bCONTAINS\s*\(', adql, re.I)) + len(re.findall(r'\bINTERSECTS\s*\(', adql, re.I))
+
+    if len(regions) == 1 and geometry == 1:
+        cap = _bounding_cap(sql)
+        if cap:
+            ranges = _cap_ranges(*cap, index_level)
+
+    if ranges is None:
+        return clause.sub('', sql)
+
+    cover = ' AND (' + ' OR '.join('(' + colname + ' BETWEEN ' + str(lo) + ' AND ' + str(hi) + ')'
+                                   for lo, hi in ranges) + ')'
+    return clause.sub(lambda m: cover, sql, count=1)
+

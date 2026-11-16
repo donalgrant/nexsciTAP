@@ -55,3 +55,38 @@ def test_missing_position_column_is_reported(tmp_path):
                          capture_output=True, text=True)
     assert run.returncode != 0
     assert 'No column "ra"' in run.stderr
+
+
+def test_schema_file_overrides_guessed_types(tmp_path):
+    """Types a CSV cannot convey: an empty column, date-like text, single precision."""
+    duckdb = pytest.importorskip('duckdb')
+    pytest.importorskip('astropy_healpix')
+
+    src = tmp_path / 'in.csv'
+    src.write_text('name,ra,dec,empty,obsdate,mag,big\n'
+                   'a,10.0,-5.0,,2000-09-26,12.5,9007199254740993\n'
+                   'b,11.0,-6.0,,1998-04-18,13.25,2\n')
+    schema = tmp_path / 'schema.csv'
+    schema.write_text('column_name,datatype\nname,char\nra,double\ndec,double\nempty,int\n'
+                      'obsdate,char\nmag,float\nbig,long\nnot_in_file,int\n')
+
+    def types(extra):
+        out = tmp_path / ('out' + str(len(extra)))
+        run = subprocess.run([sys.executable, str(REPO / 'tools' / 'make_parquet_catalog.py'), str(src), str(out), *extra],
+                             capture_output=True, text=True)
+        assert run.returncode == 0, run.stderr
+        con = duckdb.connect()
+        desc = {r[0]: r[1] for r in con.execute(f"DESCRIBE SELECT * FROM read_parquet('{out}/*.parquet')").fetchall()}
+        rows = con.execute(f"SELECT obsdate, sum(empty), big FROM read_parquet('{out}/*.parquet') "
+                           "GROUP BY ALL ORDER BY big").fetchall() if extra else None
+        return desc, rows
+
+    guessed, _ = types([])
+    assert guessed['empty'] == 'VARCHAR' and guessed['obsdate'] == 'DATE'      # what goes wrong unaided
+
+    declared, rows = types(['--schema', str(schema)])
+    assert declared['empty'] == 'INTEGER'
+    assert declared['obsdate'] == 'VARCHAR'
+    assert declared['mag'] == 'FLOAT'
+    assert declared['big'] == 'BIGINT'
+    assert rows == [('1998-04-18', None, 2), ('2000-09-26', None, 9007199254740993)]
