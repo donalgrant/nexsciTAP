@@ -363,6 +363,8 @@ Resources:
       LaunchType: FARGATE
       DesiredCount: !Ref DesiredCount
       TaskDefinition: !Ref TaskDefinition
+      # Tasks carry the service's tags, so their cost can be reported by tag.
+      PropagateTags: SERVICE
       # One task at a time: the work area is not shared.
       DeploymentConfiguration:
         MinimumHealthyPercent: 0
