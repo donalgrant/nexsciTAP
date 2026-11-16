@@ -27,6 +27,14 @@ The TAP endpoints appear under /TAP, and files in TAP_WORKDIR are served under
 TAP_WORKURL, except uploaded tables (upload_*.vot) and the service's own
 bookkeeping files, which stay private.
 
+CLIENT_LIMIT in the configuration's [WEB] section is the most requests one
+client may have in progress at once; one more is refused with status 429 and
+a Retry-After header, so that a single client cannot take every place and
+shut the others out.  A client is the address the connection comes from, or,
+behind a reverse proxy, the value of the header named by CLIENT_HEADER, which
+the proxy must set itself (never pass on what the client sent).  Addresses in
+UNLIMITED_CLIENTS are exempt.
+
 There is no TLS and no authentication:  run it behind a reverse proxy.
 """
 
@@ -37,6 +45,7 @@ import http.server
 import mimetypes
 import os
 import pwd
+import re
 import shutil
 import socketserver
 import sys
@@ -86,6 +95,55 @@ class Handler(http.server.BaseHTTPRequestHandler):
     # Seconds a request may take to arrive; large uploads over slow links.
     timeout = 900
 
+    client_header = ''
+    client_limit = 0
+    unlimited_clients = ()
+    rundir = ''
+    _place = None
+
+    def _client(self):
+        """Who is asking: the proxy's word for it if configured, else the peer address."""
+        named = self.headers.get(self.client_header, '') if self.client_header else ''
+        named = re.sub(r'[^0-9A-Za-z.:_-]', '', named.split(',')[-1])[:64]
+        return named or self.client_address[0]
+
+    def _admit(self, client):
+        """Take a place for this request, unless the client has its share already."""
+        if self.client_limit <= 0 or client in self.unlimited_clients:
+            return True
+
+        # One file per request in progress, named by its process.
+        places = os.path.join(self.rundir, client.replace(':', '_'))
+        os.makedirs(places, exist_ok=True)
+        mine = os.path.join(places, str(os.getpid()))
+        with open(mine, 'w'):
+            pass
+
+        held = 0
+        for name in os.listdir(places):
+            try:
+                os.kill(int(name), 0)
+                held += 1
+            except (OSError, ValueError):
+                try:                    # that request is over
+                    os.remove(os.path.join(places, name))
+                except OSError:
+                    pass
+
+        if held > self.client_limit:
+            os.remove(mine)
+            return False
+
+        Handler._place = mine
+        return True
+
+    def _release(self):
+        if self._place:
+            try:
+                os.remove(self._place)
+            except OSError:
+                pass
+
     def do_GET(self):
         self._dispatch()
 
@@ -123,7 +181,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         full = os.path.realpath(os.path.join(root, rel))
         name = os.path.basename(full)
 
-        if (not full.startswith(root + os.sep) or not os.path.isfile(full)
+        hidden = any(part.startswith('.') for part in full[len(root):].split(os.sep))
+
+        if (not full.startswith(root + os.sep) or not os.path.isfile(full) or hidden
                 or any(fnmatch.fnmatch(name, p) for p in PRIVATE_FILES)):
             return self.send_error(404)
 
@@ -149,6 +209,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         if length < 0:
             return self.send_error(400)
+
+        client = self._client()
+        if not self._admit(client):
+            body = (f'Too many requests in progress from {client} '
+                    f'(this service handles {self.client_limit} at once for one client).  Try again shortly.\n').encode()
+            self.send_response(429)
+            self.send_header('Retry-After', '5')
+            self.send_header('Content-Type', 'text/plain')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
 
         # The request body becomes standard input.  It is spooled to an
         # unnamed file because part of it is already in this handler's
@@ -178,6 +250,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             'PATH_INFO': path_info,
             'SCRIPT_NAME': '/TAP',
             'REMOTE_ADDR': self.client_address[0],
+            'TAP_CLIENT': client,
             'CONTENT_TYPE': self.headers.get('Content-Type', ''),
             'CONTENT_LENGTH': str(length),
             'HTTP_HOST': self.headers.get('Host', ''),
@@ -228,6 +301,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             sys.stderr.flush()
         except (OSError, ValueError):
             pass
+
+        self._release()
+        _tap.jobworker.finished()
 
         os._exit(status)
 
@@ -290,6 +366,13 @@ def main():
     Handler.workdir = web['TAP_WORKDIR']
     Handler.workurl = web.get('TAP_WORKURL', '/workspace')
 
+    Handler.client_header = str(web.get('CLIENT_HEADER', '')).strip()
+    Handler.client_limit = int(str(web.get('CLIENT_LIMIT', '') or 0).strip() or 0)
+    unlimited = web.get('UNLIMITED_CLIENTS', '')
+    if isinstance(unlimited, str):
+        unlimited = unlimited.split(',')
+    Handler.unlimited_clients = tuple(u.strip() for u in unlimited if u.strip())
+
     Server.max_children = args.max_children
 
     port = args.port or int(web.get('HTTP_PORT', 8080))
@@ -297,6 +380,10 @@ def main():
 
     if args.user:
         drop_privileges(args.user)
+
+    # Places held by requests in progress (see Handler._admit); made after
+    # the switch of user, so the request processes can write here.
+    Handler.rundir = tempfile.mkdtemp(prefix='tap_clients_')
 
     # tap.py expects <workdir>/TAP to exist for VOSI and async requests.
     os.makedirs(os.path.join(Handler.workdir, 'TAP'), exist_ok=True)

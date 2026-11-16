@@ -16,6 +16,12 @@
 #   MAX_REQUESTS    requests handled at once (default 12)
 #   QUERY_TIMEOUT   seconds before a query is cancelled (default 300; 0 = never)
 #   MAXREC_LIMIT    most rows one query may return (default 2000000; 0 = no limit)
+#   CLIENT_LIMIT    requests one client may have in progress at once (default 0 = no limit)
+#   CLIENT_HEADER   header in which the proxy in front names the client; without it
+#                   the client is the address the connection comes from
+#   ASYNC_LIMIT, ASYNC_CLIENT_LIMIT   async jobs running at once, in all and
+#                   for one client (default 0 = no limit)
+#   UNLIMITED_CLIENTS  comma-separated clients the per-client limits skip
 #   WORK_RETENTION_DAYS  days results and uploads are kept in /work (default 7; 0 = for ever)
 set -euo pipefail
 
@@ -36,6 +42,9 @@ sed -i -e "s|__DUCKDB_MEMORY__|${DUCKDB_MEMORY}|" \
 sed -e "s|__PUBLIC_URL__|${PUBLIC_URL}|" -e "s|__CATALOG_PREFIX__|${CATALOG_PREFIX}|" \
     -e "s|__HTTP_HOSTS__|${HTTP_HOSTS:-}|" \
     -e "s|__QUERY_TIMEOUT__|${QUERY_TIMEOUT:-300}|" -e "s|__MAXREC_LIMIT__|${MAXREC_LIMIT:-2000000}|" \
+    -e "s|__CLIENT_HEADER__|${CLIENT_HEADER:-}|" -e "s|__CLIENT_LIMIT__|${CLIENT_LIMIT:-0}|" \
+    -e "s|__ASYNC_LIMIT__|${ASYNC_LIMIT:-0}|" -e "s|__ASYNC_CLIENT_LIMIT__|${ASYNC_CLIENT_LIMIT:-0}|" \
+    -e "s|__UNLIMITED_CLIENTS__|${UNLIMITED_CLIENTS:-}|" \
     /opt/tap/TAP.conf.template > /opt/tap/TAP.conf
 
 args=()

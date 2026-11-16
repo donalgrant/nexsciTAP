@@ -251,3 +251,64 @@ def test_job_whose_server_is_gone_is_reported_as_failed(fork_server, second_serv
     other = _elsewhere(job, second_server)
     assert requests.get(other + "/phase").text.strip() == "ERROR"
     assert "stopped before the job finished" in requests.get(other).text
+
+
+# ---- one client cannot take every place ---------------------------------
+
+@pytest.fixture(scope="module")
+def fair_server(fixture_root: Path):
+    proc, base, _ = _serve(fixture_root, "fair", "CLIENT_LIMIT=2\nCLIENT_HEADER=X-Client\nUNLIMITED_CLIENTS=portal")
+    try:
+        yield base
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
+
+
+def _stalled_request(base: str, client: str):
+    """A request that has arrived but not finished: its body never comes."""
+    import socket
+    host, port = base.replace("http://", "").split(":")
+    s = socket.create_connection((host, int(port)))
+    s.sendall(f"POST /TAP/sync HTTP/1.1\r\nHost: {host}\r\nX-Client: {client}\r\n"
+              "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: 50\r\n\r\n".encode())
+    return s
+
+
+def test_client_limit(fair_server):
+    base = fair_server
+    ask = {"query": "select l0filename from data_l0", "format": "ipac"}
+    held = [_stalled_request(base, "alice"), _stalled_request(base, "alice")]
+    try:
+        time.sleep(0.5)
+
+        r = requests.post(base + "/TAP/sync", data=ask, headers={"X-Client": "alice"})
+        assert r.status_code == 429 and r.headers["Retry-After"]
+        assert "alice" in r.text
+
+        # Someone else is not affected, and neither is an exempt client.
+        assert requests.post(base + "/TAP/sync", data=ask, headers={"X-Client": "bob"}).status_code == 200
+        more = [_stalled_request(base, "portal") for _ in range(3)]
+        time.sleep(0.3)
+        assert requests.post(base + "/TAP/sync", data=ask, headers={"X-Client": "portal"}).status_code == 200
+        for s in more:
+            s.close()
+    finally:
+        for s in held:
+            s.close()
+
+    # The places come back when the requests end.
+    for _ in range(50):
+        r = requests.post(base + "/TAP/sync", data=ask, headers={"X-Client": "alice"})
+        if r.status_code == 200:
+            break
+        time.sleep(0.1)
+    assert r.status_code == 200
+
+
+def test_register_of_running_jobs_is_not_served(fork_server):
+    base, workdir = fork_server
+    hidden = workdir / "TAP" / ".running"
+    hidden.mkdir(exist_ok=True)
+    (hidden / "tap_x").write_text("10.1.2.3\n")
+    assert requests.get(base + "/workspace/TAP/.running/tap_x").status_code == 404

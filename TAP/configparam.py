@@ -191,6 +191,29 @@ class configParam:
             self.maxrec_limit = int(confobj[self.web]['MAXREC_LIMIT'])
 
 
+        # Async jobs running at once: ASYNC_LIMIT in the whole work area,
+        # ASYNC_CLIENT_LIMIT for any one client.  A job submitted beyond
+        # either fails at once with a message saying so.  Unset or 0: no
+        # limit.  UNLIMITED_CLIENTS (comma-separated addresses) are held
+        # only to the overall limit; use it for a portal on the same host,
+        # whose requests all come from one address.  (CLIENT_LIMIT and
+        # CLIENT_HEADER, also in this section, are read by TAP/forkserver.py.)
+
+        def _number(key):
+            value = confobj[self.web].get(key, '')
+            return int(value) if str(value).strip() else 0
+
+        def _names(key):
+            value = confobj[self.web].get(key, '')
+            if isinstance(value, str):
+                value = value.split(',')
+            return tuple(v.strip() for v in value if v.strip())
+
+        self.async_limit = _number('ASYNC_LIMIT')
+        self.async_client_limit = _number('ASYNC_CLIENT_LIMIT')
+        self.unlimited_clients = _names('UNLIMITED_CLIENTS')
+
+
         # INFOMSG
 
         self.infomsg = ''

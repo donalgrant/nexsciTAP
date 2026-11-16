@@ -126,3 +126,55 @@ def test_mark_lost(tmp_path):
     status.write_text(STATUS.format(phase="COMPLETED"))
     assert not jobworker.mark_lost(tmp_path, status)
     assert "COMPLETED" in status.read_text()
+
+
+# ---- how many jobs at once -----------------------------------------------
+
+def _running(tapdir: Path, jobid: str, client: str, age: float = 0):
+    """A job as its worker leaves it while running."""
+    (tapdir / jobid).mkdir()
+    (tapdir / jobid / "worker").write_text(f"some-host 1 {time.time() - age:.0f}\n")
+    (tapdir / ".running").mkdir(exist_ok=True)
+    (tapdir / ".running" / jobid).write_text(client + "\n")
+
+
+def test_admit_holds_each_client_and_the_service_to_their_limits(tmp_path, monkeypatch):
+    monkeypatch.setattr(jobworker, "_registered", None)
+    _running(tmp_path, "tap_a1", "alice")
+    _running(tmp_path, "tap_a2", "alice")
+    _running(tmp_path, "tap_b1", "bob")
+
+    said = jobworker.admit(str(tmp_path), "tap_new", "alice", total=10, per_client=2)
+    assert said and "2 jobs running" in said
+    assert not (tmp_path / ".running" / "tap_new").exists()
+
+    # Another client still gets in, and is then counted.
+    assert jobworker.admit(str(tmp_path), "tap_c1", "carol", total=10, per_client=2) is None
+    assert (tmp_path / ".running" / "tap_c1").read_text().strip() == "carol"
+    (tmp_path / "tap_c1").mkdir()
+    (tmp_path / "tap_c1" / "worker").write_text(f"some-host 2 {time.time():.0f}\n")
+
+    said = jobworker.admit(str(tmp_path), "tap_d1", "dave", total=4, per_client=2)
+    assert said and "running 4 jobs" in said
+
+    # An exempt client is held to the overall limit only.
+    assert jobworker.admit(str(tmp_path), "tap_a3", "alice", total=10, per_client=2, exempt=("alice",)) is None
+    jobworker.finished()
+    assert not (tmp_path / ".running" / "tap_a3").exists()
+
+
+def test_admit_does_not_count_jobs_that_ended_without_saying_so(tmp_path, monkeypatch):
+    """A killed worker, or one whose server went away, must not hold its place for ever."""
+    monkeypatch.setattr(jobworker, "_registered", None)
+    _running(tmp_path, "tap_dead1", "alice", age=3600)
+    _running(tmp_path, "tap_dead2", "alice", age=3600)
+    (tmp_path / ".running" / "tap_deleted").write_text("alice\n")     # its directory is gone
+
+    assert jobworker.admit(str(tmp_path), "tap_new", "alice", total=2, per_client=2) is None
+    assert sorted(p.name for p in (tmp_path / ".running").iterdir()) == ["tap_new"]
+    jobworker.finished()
+
+
+def test_no_limits_no_register(tmp_path):
+    assert jobworker.admit(str(tmp_path), "tap_x", "alice") is None
+    assert not (tmp_path / ".running").exists()

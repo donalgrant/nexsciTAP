@@ -40,8 +40,16 @@ process that runs the job:
 
 Jobs without a worker file (started by an older version, or not yet
 started) are handled as before: by process number, on this host.
+
+The work area also holds a register of the jobs running now, one small
+file per job under "<workdir>/TAP/.running", naming the client that
+submitted it.  admit() counts them to hold a client, and the service as a
+whole, to a number of jobs at once.  Being files in the shared area, the
+count covers every server; it can be a little out of date between
+machines, so the limits are close rather than exact.
 """
 
+import atexit
 import fcntl
 import html
 import logging
@@ -59,6 +67,10 @@ ABORTED = '<uws:phase>ABORTED</uws:phase>'
 
 BEAT = 3        # seconds between a worker's signs of life
 STALE = 90      # a worker silent this long is taken to be gone
+
+RUNNING = '.running'
+
+_registered = None
 
 LOST_MESSAGE = 'The server running this job stopped before the job finished.  Submit it again.'
 
@@ -185,3 +197,82 @@ def mark_lost(jobdir, statuspath, stale=STALE):
         return False
 
     return True
+
+
+def admit(tapdir, jobid, client, total=0, per_client=0, exempt=()):
+    """
+    Called by a job's worker before it runs the query.  Returns None and
+    registers the job as running, or the message to fail the job with.
+
+    total       most jobs running at once in this work area   (0: no limit)
+    per_client  most jobs one client may have running at once  (0: no limit)
+    exempt      clients the per-client limit does not apply to
+    """
+
+    global _registered
+
+    if total <= 0 and per_client <= 0:
+        return None
+
+    register = os.path.join(tapdir, RUNNING)
+
+    try:
+        os.makedirs(register, exist_ok=True)
+        names = os.listdir(register)
+    except OSError as e:
+        logging.error(f'Could not read {register}: {e}')
+        return None                 # a limit that cannot be checked does not stop the service
+
+    everyone = mine = 0
+
+    for name in names:
+        if name == jobid:
+            continue
+        entry = os.path.join(register, name)
+        own = owner(os.path.join(tapdir, name))
+        if own is None or own[2] >= STALE:
+            # Finished without saying so (killed), or its server is gone.
+            try:
+                os.remove(entry)
+            except OSError:
+                pass
+            continue
+        everyone += 1
+        try:
+            with open(entry) as f:
+                mine += f.read().strip() == client
+        except OSError:
+            pass
+
+    if per_client > 0 and client not in exempt and mine >= per_client:
+        return (f'You have {mine} jobs running, the most this service runs for one client at once.  '
+                'Submit this one again when one of them has finished.')
+
+    if total > 0 and everyone >= total:
+        return (f'The service is running {everyone} jobs, the most it runs at once.  '
+                'Submit this one again shortly.')
+
+    entry = os.path.join(register, jobid)
+    try:
+        with open(entry, 'w') as f:
+            f.write(client + '\n')
+    except OSError as e:
+        logging.error(f'Could not write {entry}: {e}')
+        return None
+
+    _registered = entry
+    atexit.register(finished)
+    return None
+
+
+def finished():
+    """The job this process registered as running is over."""
+
+    global _registered
+
+    if _registered:
+        try:
+            os.remove(_registered)
+        except OSError:
+            pass
+        _registered = None

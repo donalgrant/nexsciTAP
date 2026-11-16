@@ -3073,6 +3073,20 @@ class Tap:
         self.asyncWorker = True
         jobworker.start(self.userWorkdir)
 
+        # The limits on jobs running at once.  The client was sent to the
+        # job's status before this point, so a job over the limit shows
+        # there as failed, with the reason.
+        refused = jobworker.admit(
+            self.workdir + '/TAP', self.workspace,
+            os.environ.get('TAP_CLIENT') or os.environ.get('REMOTE_ADDR', ''),
+            total=getattr(self.config, 'async_limit', 0),
+            per_client=getattr(self.config, 'async_client_limit', 0),
+            exempt=getattr(self.config, 'unlimited_clients', ()))
+
+        if refused:
+            self.__writeAsyncError__(refused, self.statuspath,
+                                     self.statdict, self.param)
+
         return
         #
         # } end child

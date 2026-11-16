@@ -73,6 +73,18 @@ Parameters:
     Description: >
       Number of copies of the task.  0 stops the service (and its hourly cost)
       without deleting it; more than 1 share the work area and the load.
+  ClientLimit:
+    Type: Number
+    Default: 6
+    Description: Requests one client address may have in progress at once, per task (0 = no limit).
+  AsyncLimit:
+    Type: Number
+    Default: 8
+    Description: Async jobs running at once, over all tasks (0 = no limit).
+  AsyncClientLimit:
+    Type: Number
+    Default: 3
+    Description: Async jobs one client address may have running at once (0 = no limit).
   WorkRetentionDays:
     Type: Number
     Default: 7
@@ -313,7 +325,12 @@ Resources:
             var ip = toInt(event.viewer.ip);
             if (ip !== null) {
                 for (var i = 0; i < allowed.length; i++) {
-                    if (inRange(ip, allowed[i])) { return event.request; }
+                    if (inRange(ip, allowed[i])) {
+                        // Tell the service who is asking, for its per-client
+                        // limits.  Set here, so a client cannot choose it.
+                        event.request.headers['x-viewer-ip'] = { value: event.viewer.ip };
+                        return event.request;
+                    }
                 }
             }
             return { statusCode: 403, statusDescription: 'Forbidden' };
@@ -390,6 +407,14 @@ Resources:
             - {Name: QUERY_TIMEOUT, Value: !Ref QueryTimeout}
             - {Name: MAXREC_LIMIT, Value: !Ref MaxRecLimit}
             - {Name: WORK_RETENTION_DAYS, Value: !Ref WorkRetentionDays}
+            # Who a request is from is what CloudFront says (AccessFunction).
+            # Firefly, in this task, sends no such header; all its users
+            # come from one address, so only the overall limits apply to it.
+            - {Name: CLIENT_HEADER, Value: X-Viewer-IP}
+            - {Name: UNLIMITED_CLIENTS, Value: '127.0.0.1'}
+            - {Name: CLIENT_LIMIT, Value: !Ref ClientLimit}
+            - {Name: ASYNC_LIMIT, Value: !Ref AsyncLimit}
+            - {Name: ASYNC_CLIENT_LIMIT, Value: !Ref AsyncClientLimit}
           MountPoints:
             - {SourceVolume: work, ContainerPath: /work}
           LogConfiguration:
