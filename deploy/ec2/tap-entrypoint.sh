@@ -16,6 +16,7 @@
 #   MAX_REQUESTS    requests handled at once (default 12)
 #   QUERY_TIMEOUT   seconds before a query is cancelled (default 300; 0 = never)
 #   MAXREC_LIMIT    most rows one query may return (default 2000000; 0 = no limit)
+#   WORK_RETENTION_DAYS  days results and uploads are kept in /work (default 7; 0 = for ever)
 set -euo pipefail
 
 : "${PUBLIC_URL:?}" "${CATALOG_PREFIX:?}"
@@ -73,8 +74,22 @@ if [ "$DISCOVER" = "true" ]; then
       done ) &
 fi
 
+# /work may be a network file system shared with other copies of this
+# container, already holding other jobs: own the top of it, not every file.
 mkdir -p /work/TAP
-chown -R www-data:www-data /work
+chown www-data:www-data /work /work/TAP 2>/dev/null || true
+
+# Jobs older than the retention period are removed, here because nothing
+# else would: results in a shared work area outlive the container.  Every
+# copy does this; removing what another already removed is harmless.
+WORK_RETENTION_DAYS="${WORK_RETENTION_DAYS:-7}"
+if [ "$WORK_RETENTION_DAYS" -gt 0 ]; then
+    ( while true; do
+          as_tap find /work/TAP -mindepth 1 -maxdepth 1 -type d -name 'tap_*' \
+                 -mtime "+${WORK_RETENTION_DAYS}" -exec rm -rf {} + 2>/dev/null || true
+          sleep 3600
+      done ) &
+fi
 
 # One pre-loaded process that forks per request (TAP/forkserver.py).
 cd /opt/nexsciTAP

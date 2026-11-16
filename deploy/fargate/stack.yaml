@@ -10,7 +10,7 @@ Parameters:
     Type: AWS::EC2::VPC::Id
   SubnetIds:
     Type: List<AWS::EC2::Subnet::Id>
-    Description: At least two public subnets in different zones.
+    Description: Two public subnets in different zones.
   AllowedCidr1:
     Type: String
     AllowedPattern: '^\d+\.\d+\.\d+\.\d+/\d+$'
@@ -70,7 +70,13 @@ Parameters:
   DesiredCount:
     Type: Number
     Default: 1
-    Description: 0 stops the service (and its hourly cost) without deleting it.
+    Description: >
+      Number of copies of the task.  0 stops the service (and its hourly cost)
+      without deleting it; more than 1 share the work area and the load.
+  WorkRetentionDays:
+    Type: Number
+    Default: 7
+    Description: Days a query's results and uploads are kept in the work area.
   ImagePrefix:
     Type: String
     Default: aiab
@@ -143,6 +149,15 @@ Resources:
               - Effect: Allow
                 Action: s3:GetObject
                 Resource: !Sub arn:aws:s3:::${CatalogBucket}/${CatalogPrefix}*
+        - PolicyName: use-work-area
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [elasticfilesystem:ClientMount, elasticfilesystem:ClientWrite]
+                Resource: !GetAtt WorkFileSystem.Arn
+                Condition:
+                  StringEquals: {'elasticfilesystem:AccessPointArn': !GetAtt WorkAccessPoint.Arn}
 
   LoadBalancerSecurityGroup:
     Type: AWS::EC2::SecurityGroup
@@ -163,6 +178,57 @@ Resources:
           FromPort: 80
           ToPort: 80
           SourceSecurityGroupId: !Ref LoadBalancerSecurityGroup
+
+  # ---- Work area -------------------------------------------------------
+  # Async results and uploaded tables live on a network file system rather
+  # than inside the task, so they outlast a restart and every copy of the
+  # task sees the same jobs.  Old jobs are removed by the service itself
+  # (WorkRetentionDays).
+
+  WorkFileSystem:
+    Type: AWS::EFS::FileSystem
+    Properties:
+      Encrypted: true
+      PerformanceMode: generalPurpose
+      ThroughputMode: elastic
+      FileSystemTags:
+        - {Key: Name, Value: !Sub '${AWS::StackName}-work'}
+
+  WorkSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Archive in a Box pilot - work area accepts only the task
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 2049
+          ToPort: 2049
+          SourceSecurityGroupId: !Ref TaskSecurityGroup
+
+  WorkMountTarget1:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref WorkFileSystem
+      SubnetId: !Select [0, !Ref SubnetIds]
+      SecurityGroups: [!Ref WorkSecurityGroup]
+
+  WorkMountTarget2:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref WorkFileSystem
+      SubnetId: !Select [1, !Ref SubnetIds]
+      SecurityGroups: [!Ref WorkSecurityGroup]
+
+  # Everything is done as the service's own user (www-data, 33), in one
+  # directory of the file system.
+  WorkAccessPoint:
+    Type: AWS::EFS::AccessPoint
+    Properties:
+      FileSystemId: !Ref WorkFileSystem
+      PosixUser: {Uid: '33', Gid: '33'}
+      RootDirectory:
+        Path: /work
+        CreationInfo: {OwnerUid: '33', OwnerGid: '33', Permissions: '0755'}
 
   LoadBalancer:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
@@ -188,6 +254,12 @@ Resources:
       HealthyThresholdCount: 2
       TargetGroupAttributes:
         - {Key: deregistration_delay.timeout_seconds, Value: '30'}
+        # With more than one task, a browser stays with the task holding
+        # its Firefly session.  TAP needs no such thing: its state is in
+        # the shared work area.
+        - {Key: stickiness.enabled, Value: 'true'}
+        - {Key: stickiness.type, Value: lb_cookie}
+        - {Key: stickiness.lb_cookie.duration_seconds, Value: '86400'}
 
   Listener:
     Type: AWS::ElasticLoadBalancingV2::Listener
@@ -290,9 +362,14 @@ Resources:
       ExecutionRoleArn: !GetAtt ExecutionRole.Arn
       TaskRoleArn: !GetAtt TaskRole.Arn
       Volumes:
-        # Async results and uploads.  Lives as long as the task; more than
-        # one task would need shared storage (EFS) here instead.
+        # Async results and uploads, on the shared file system.
         - Name: work
+          EFSVolumeConfiguration:
+            FilesystemId: !Ref WorkFileSystem
+            TransitEncryption: ENABLED
+            AuthorizationConfig:
+              AccessPointId: !Ref WorkAccessPoint
+              IAM: ENABLED
       ContainerDefinitions:
         - Name: tap
           Image: !Ref TapImage
@@ -312,6 +389,7 @@ Resources:
             - {Name: DUCKDB_THREADS, Value: '8'}
             - {Name: QUERY_TIMEOUT, Value: !Ref QueryTimeout}
             - {Name: MAXREC_LIMIT, Value: !Ref MaxRecLimit}
+            - {Name: WORK_RETENTION_DAYS, Value: !Ref WorkRetentionDays}
           MountPoints:
             - {SourceVolume: work, ContainerPath: /work}
           LogConfiguration:
@@ -356,7 +434,7 @@ Resources:
 
   Service:
     Type: AWS::ECS::Service
-    DependsOn: ListenerRule
+    DependsOn: [ListenerRule, WorkMountTarget1, WorkMountTarget2]
     Properties:
       ServiceName: !Ref AWS::StackName
       Cluster: !Ref Cluster
@@ -365,10 +443,11 @@ Resources:
       TaskDefinition: !Ref TaskDefinition
       # Tasks carry the service's tags, so their cost can be reported by tag.
       PropagateTags: SERVICE
-      # One task at a time: the work area is not shared.
+      # A restart starts the new task before stopping the old one, so the
+      # service stays up; the two share the work area meanwhile.
       DeploymentConfiguration:
-        MinimumHealthyPercent: 0
-        MaximumPercent: 100
+        MinimumHealthyPercent: 100
+        MaximumPercent: 200
       HealthCheckGracePeriodSeconds: 300
       NetworkConfiguration:
         AwsvpcConfiguration:

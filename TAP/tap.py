@@ -21,7 +21,7 @@ from ADQL.adql import ADQL
 from bs4 import BeautifulSoup
 from spatial_index import SpatialIndex
 
-from TAP import compat, duckdbsupport, tapupload
+from TAP import compat, duckdbsupport, jobworker, tapupload
 from TAP.configparam import configParam
 from TAP.propfilter import _require_filterable, propFilter
 from TAP.tablenames import TableNames
@@ -1153,7 +1153,9 @@ class Tap:
                         logging.debug(f'pid = {pid:d}')
 
                     try:
-                        os.kill (pid, signal.SIGKILL)
+                        # The job may be running on another server that
+                        # shares the work area (TAP/jobworker.py).
+                        jobworker.stop (self.userWorkdir, pid)
 
                     except Exception:
 
@@ -2216,6 +2218,10 @@ class Tap:
 
         isExist = os.path.exists(self.statuspath)
 
+        # A job whose server went away is still "EXECUTING" on disk.
+        if isExist:
+            jobworker.mark_lost(os.path.dirname(self.statuspath), self.statuspath)
+
         if(isExist == 0):
             msg = 'Status file: status.xml does not exist.'
             self.__printError ('votable', msg)
@@ -2866,8 +2872,7 @@ class Tap:
 
             if (job.get('uws:phase') == 'EXECUTING'):
                 pid = int(job.get('uws:runId') or 0)
-                if (pid > 0) and (pid != os.getpid()):
-                    os.kill(pid, signal.SIGKILL)
+                jobworker.stop(self.userWorkdir, pid)
 
         except Exception as e:
 
@@ -3062,6 +3067,12 @@ class Tap:
             logging.debug('')
             logging.debug(f'async worker detached: pid= {self.pid:d}')
 
+        # Say which server runs the job and keep saying it is alive, so
+        # that another server sharing the work area can stop the job or
+        # tell that it was lost.
+        self.asyncWorker = True
+        jobworker.start(self.userWorkdir)
+
         return
         #
         # } end child
@@ -3111,6 +3122,11 @@ class Tap:
             logging.debug('')
             logging.debug('Enter writeStatusMsg')
             logging.debug(f'phase= {statdict["phase"]:s}')
+
+        # A worker asked to stop from another server must not write its
+        # result over the ABORTED status that server recorded.
+        if getattr(self, 'asyncWorker', False) and jobworker.aborted(os.path.dirname(statuspath)):
+            os._exit(1)
 
         #
         # { TAP status result always written in XML format

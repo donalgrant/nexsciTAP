@@ -19,11 +19,11 @@ from _helpers import row_count_from_ipac
 from conftest import FIXTURES, STUBS, TESTS_DIR, _free_port
 
 
-def _serve(fixture_root: Path, name: str, web_extra: str = ""):
-    """Start a fork server with its own work directory and configuration."""
+def _serve(fixture_root: Path, name: str, web_extra: str = "", workdir: Path | None = None):
+    """Start a fork server with its own configuration and (unless given one) work directory."""
     port = _free_port()
-    workdir = fixture_root / f"{name}-workdir"
-    (workdir / "TAP").mkdir(parents=True)
+    workdir = workdir or fixture_root / f"{name}-workdir"
+    (workdir / "TAP").mkdir(parents=True, exist_ok=True)
 
     text = (FIXTURES / "TAP.conf.template").read_text().format(
         TEST_WORKDIR=str(workdir),
@@ -188,3 +188,68 @@ def test_work_files_served_but_uploads_private(fork_server):
     assert requests.get(base + "/workspace/TAP/tap_static/upload_mine.vot").status_code == 404
     assert requests.get(base + "/workspace/../TAP.conf").status_code == 404
     assert requests.get(base + "/elsewhere").status_code == 404
+
+
+# ---- two servers sharing one work area --------------------------------
+
+@pytest.fixture(scope="module")
+def second_server(fixture_root: Path, fork_server):
+    """Another server on the first one's work directory, as with a shared file system."""
+    _, workdir = fork_server
+    proc, base, _ = _serve(fixture_root, "second", workdir=workdir)
+    try:
+        yield base
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
+
+
+def _elsewhere(job_url: str, base: str) -> str:
+    return base + job_url[job_url.index("/TAP/"):]
+
+
+def test_job_submitted_to_one_server_is_served_by_the_other(fork_server, second_server):
+    base, _ = fork_server
+    r = requests.post(base + "/TAP/async",
+                      data={"query": "select l0filename from data_l0", "format": "ipac", "phase": "RUN"},
+                      allow_redirects=False)
+    assert r.status_code == 303, r.text[:500]
+    job = _elsewhere(r.headers["Location"], second_server)
+
+    phase = ""
+    for _ in range(100):
+        phase = requests.get(job + "/phase").text.strip()
+        if phase in ("COMPLETED", "ERROR", "ABORTED"):
+            break
+        time.sleep(0.1)
+    assert phase == "COMPLETED"
+
+    result = requests.get(job + "/results/result")
+    assert result.status_code == 200, result.text[:500]
+    assert row_count_from_ipac(result.text) == 6
+
+
+def test_job_whose_server_is_gone_is_reported_as_failed(fork_server, second_server):
+    """A job left EXECUTING by a server that stopped must not look alive for ever."""
+    base, workdir = fork_server
+    r = requests.post(base + "/TAP/async",
+                      data={"query": "select l0filename from data_l0", "format": "ipac", "phase": "RUN"},
+                      allow_redirects=False)
+    job = r.headers["Location"]
+    for _ in range(100):
+        if requests.get(job + "/phase").text.strip() == "COMPLETED":
+            break
+        time.sleep(0.1)
+
+    # Put the job back as its server would have left it on dying mid-query.
+    jobdir = workdir / "TAP" / job.rsplit("/", 1)[1]
+    status = jobdir / "status.xml"
+    status.write_text(status.read_text().replace("<uws:phase>COMPLETED</uws:phase>",
+                                                 "<uws:phase>EXECUTING</uws:phase>"))
+    (jobdir / "worker").write_text("a-host-that-is-gone 4242\n")
+    long_ago = time.time() - 3600
+    os.utime(jobdir / "worker", (long_ago, long_ago))
+
+    other = _elsewhere(job, second_server)
+    assert requests.get(other + "/phase").text.strip() == "ERROR"
+    assert "stopped before the job finished" in requests.get(other).text
