@@ -3121,7 +3121,13 @@ class Tap:
         try:
             os.dup2(devnull, 0)
             os.dup2(devnull, 1)
-            os.dup2(devnull, 2)
+
+            # Under CGI, standard error is a pipe to the web server and has
+            # to be let go.  A server whose standard error is its own log
+            # (TAP/forkserver.py) says so, and the worker keeps it: what
+            # goes wrong in a job is otherwise recorded nowhere.
+            if os.environ.get('TAP_ASYNC_STDERR') != 'keep':
+                os.dup2(devnull, 2)
 
         finally:
             if (devnull > 2):

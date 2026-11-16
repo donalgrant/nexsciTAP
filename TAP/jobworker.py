@@ -98,13 +98,15 @@ def start(jobdir, beat=BEAT):
     def watch():
         while True:
             time.sleep(beat)
-            if aborted(jobdir):
-                # Asked to stop from another server, or the job was deleted.
-                os._exit(1)
             try:
+                if aborted(jobdir):
+                    # Asked to stop from another server, or the job was deleted.
+                    logging.warning(f'{jobdir}: aborted or deleted; worker {os.getpid()} stopping')
+                    os._exit(1)
                 _beat(path)
-            except OSError:
-                pass
+            except Exception as e:
+                # Keep going: one failed sign of life is not the end of the job.
+                logging.error(f'{jobdir}: worker {os.getpid()} could not report: {e!r}')
 
     threading.Thread(target=watch, name='job-watch', daemon=True).start()
 

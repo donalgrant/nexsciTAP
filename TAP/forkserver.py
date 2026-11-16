@@ -251,6 +251,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             'SCRIPT_NAME': '/TAP',
             'REMOTE_ADDR': self.client_address[0],
             'TAP_CLIENT': client,
+            'TAP_ASYNC_STDERR': 'keep',
             'CONTENT_TYPE': self.headers.get('Content-Type', ''),
             'CONTENT_LENGTH': str(length),
             'HTTP_HOST': self.headers.get('Host', ''),
