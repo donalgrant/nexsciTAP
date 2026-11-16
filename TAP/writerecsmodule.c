@@ -11,6 +11,41 @@
 #include <ctype.h>
 #include <string.h>
 
+/*
+    Text of any length.  Column names, units, descriptions and string values
+    come from the catalog and from the query (a result column is named by its
+    expression unless the query gives it an alias), so none of them has a
+    length this code can assume.  They used to be copied into fixed buffers,
+    and a longer one wrote past the end.
+*/
+static char *dup_text (const char *text)
+{
+    const char *from = (text == NULL) ? "" : text;
+    char *copy = (char *)malloc (strlen (from) + 1);
+
+    if (copy != NULL)
+        strcpy (copy, from);
+
+    return copy;
+}
+
+static int grow_text (char **buf, size_t *cap, size_t need)
+{
+    char *bigger;
+
+    if (need <= *cap)
+        return 1;
+
+    bigger = (char *)realloc (*buf, need);
+    if (bigger == NULL)
+        return 0;
+
+    *buf = bigger;
+    *cap = need;
+    return 1;
+}
+
+
 static PyObject *method_writerecs(PyObject *self, PyObject *args) {
 
     PyObject *ddlist = NULL;
@@ -53,9 +88,15 @@ static PyObject *method_writerecs(PyObject *self, PyObject *args) {
     char    nullval[20];
     char    nullval_ipac[20];
     char    strval[1024];
-    char    jsonstr[4096];
     char    tempstr[4096];
     char    substr[40];
+
+    char    *sval = NULL;      /* a string value, whatever its length */
+    size_t  sval_cap = 0;
+    char    *jbuf = NULL;      /* the same, escaped for JSON */
+    size_t  jbuf_cap = 0;
+    const char *ddval = NULL;
+    int     flen;
     
     double  dblval = 0.0;
     int     intval = 0;
@@ -109,14 +150,14 @@ static PyObject *method_writerecs(PyObject *self, PyObject *args) {
         return NULL;
     }
 
-    strcpy (filepath, cptr_outpath);
+    snprintf (filepath, sizeof (filepath), "%s", cptr_outpath);
 
     if (cptr_format == (char *)NULL) {
         PyErr_SetString (PyExc_Exception, "Input format string empty");
         return NULL;
     }
 
-    strcpy (outfmt, cptr_format);
+    snprintf (outfmt, sizeof (outfmt), "%s", cptr_format);
 
     if ((debug) && (fp_debug != (FILE *)NULL)) {
         fprintf (fp_debug, "filepath= %s\n", filepath);
@@ -333,27 +374,23 @@ static PyObject *method_writerecs(PyObject *self, PyObject *args) {
        
                 item = PySequence_GetItem (ddarr, i); 
 
-                strcpy (strval, "");
-                if (!PyUnicode_Check (item)) {
-                
-                    if ((debug1) && (fp_debug != (FILE *)NULL)) {
-                        fprintf (fp_debug, "here1-2\n");
-                        fprintf (fp_debug, "strval= %s\n", strval);
-                        fflush (fp_debug);
-                    }
-                }
-                else {
+                ddval = "";
+                if (PyUnicode_Check (item)) {
                     item_bytes 
                         = PyUnicode_AsEncodedString (item, "UTF-8", "strict");
 
                     if (item_bytes != NULL) {
-                        cptr = PyBytes_AS_STRING (item_bytes);
-                        strcpy (strval, cptr);
+                        ddval = PyBytes_AS_STRING (item_bytes);
                     }
                 }
 
                 if (l == 0) {
-                    strcpy (namearr[i], strval);
+                    free (namearr[i]);
+                    namearr[i] = dup_text (ddval);
+                    if (namearr[i] == (char *)NULL) {
+                        PyErr_SetString (PyExc_Exception, "Failed to malloc namearr");
+                        return NULL;
+                    }
 
                     for(j=0; j<(int)strlen(namearr[i]); ++j)
                        namearr[i][j] = tolower(namearr[i][j]);
@@ -368,13 +405,18 @@ static PyObject *method_writerecs(PyObject *self, PyObject *args) {
 /*
     typearr: date and timestamp output file type is char
 */  
-                    if ((strcasecmp (strval, "date") == 0) ||
-                        (strcasecmp (strval, "timestamp") == 0)) {
+                    free (typearr[i]);
+                    if ((strcasecmp (ddval, "date") == 0) ||
+                        (strcasecmp (ddval, "timestamp") == 0)) {
                         
-                        strcpy (typearr[i], "char");
+                        typearr[i] = dup_text ("char");
                     }
                     else {
-                        strcpy (typearr[i], strval);
+                        typearr[i] = dup_text (ddval);
+                    }
+                    if (typearr[i] == (char *)NULL) {
+                        PyErr_SetString (PyExc_Exception, "Failed to malloc typearr");
+                        return NULL;
                     }
 
                     if ((debug) && (fp_debug != (FILE *)NULL)) {
@@ -387,7 +429,12 @@ static PyObject *method_writerecs(PyObject *self, PyObject *args) {
 /*
     dbtypearr
 */  
-                    strcpy (dbtypearr[i], strval);
+                    free (dbtypearr[i]);
+                    dbtypearr[i] = dup_text (ddval);
+                    if (dbtypearr[i] == (char *)NULL) {
+                        PyErr_SetString (PyExc_Exception, "Failed to malloc dbtypearr");
+                        return NULL;
+                    }
                     if ((debug) && (fp_debug != (FILE *)NULL)) {
                         fprintf (fp_debug, "dbtypearr[%d]= [%s]\n", 
                             i, dbtypearr[i]);
@@ -395,7 +442,12 @@ static PyObject *method_writerecs(PyObject *self, PyObject *args) {
                     }
                 }
                 else if (l == 3) {
-                    strcpy (fmtarr[i], strval);
+                    free (fmtarr[i]);
+                    fmtarr[i] = dup_text (ddval);
+                    if (fmtarr[i] == (char *)NULL) {
+                        PyErr_SetString (PyExc_Exception, "Failed to malloc fmtarr");
+                        return NULL;
+                    }
                     if ((debug) && (fp_debug != (FILE *)NULL)) {
                         fprintf (fp_debug, "fmtarr[%d]= [%s]\n", 
                             i, fmtarr[i]);
@@ -403,7 +455,12 @@ static PyObject *method_writerecs(PyObject *self, PyObject *args) {
                     }
                 }
                 else if (l == 4) {
-                    strcpy (unitsarr[i], strval);
+                    free (unitsarr[i]);
+                    unitsarr[i] = dup_text (ddval);
+                    if (unitsarr[i] == (char *)NULL) {
+                        PyErr_SetString (PyExc_Exception, "Failed to malloc unitsarr");
+                        return NULL;
+                    }
                     if ((debug1) && (fp_debug != (FILE *)NULL)) {
                         fprintf (fp_debug, "unitsarr[%d]= [%s]\n", 
                             i, unitsarr[i]);
@@ -411,7 +468,12 @@ static PyObject *method_writerecs(PyObject *self, PyObject *args) {
                     }
                 }
                 else if (l == 5) {
-                    strcpy (descarr[i], strval);
+                    free (descarr[i]);
+                    descarr[i] = dup_text (ddval);
+                    if (descarr[i] == (char *)NULL) {
+                        PyErr_SetString (PyExc_Exception, "Failed to malloc descarr");
+                        return NULL;
+                    }
                     if ((debug1) && (fp_debug != (FILE *)NULL)) {
                         fprintf (fp_debug, "descarr[%d]= [%s]\n", 
                             i, descarr[i]);
@@ -464,7 +526,7 @@ static PyObject *method_writerecs(PyObject *self, PyObject *args) {
 
     if (fp == (FILE *)NULL) {
 
-        sprintf (msg, "Failed to open filepath: [%s](errno:%d)", filepath, errno);
+        snprintf (msg, sizeof (msg), "Failed to open filepath: [%s](errno:%d)", filepath, errno);
         
         if ((debug) && (fp_debug != (FILE *)NULL)) {
             fprintf (fp_debug, "msg= [%s]\n", msg);
@@ -505,7 +567,7 @@ static PyObject *method_writerecs(PyObject *self, PyObject *args) {
 
             fprintf (fp, "|");
             for (i=0; i<ncols; i++) {
-                sprintf (fmt, "%%-%ds|", widtharr[i]);
+                snprintf (fmt, sizeof (fmt), "%%-%ds|", widtharr[i]);
                 fprintf (fp, fmt, namearr[i]); 
             }
             fprintf (fp, "\n");
@@ -513,7 +575,7 @@ static PyObject *method_writerecs(PyObject *self, PyObject *args) {
 
             fprintf (fp, "|");
             for (i=0; i<ncols; i++) {
-                sprintf (fmt, "%%-%ds|", widtharr[i]);
+                snprintf (fmt, sizeof (fmt), "%%-%ds|", widtharr[i]);
                 fprintf (fp, fmt, typearr[i]); 
             }
             fprintf (fp, "\n");
@@ -521,7 +583,7 @@ static PyObject *method_writerecs(PyObject *self, PyObject *args) {
 
             fprintf (fp, "|");
             for (i=0; i<ncols; i++) {
-                sprintf (fmt, "%%-%ds|", widtharr[i]);
+                snprintf (fmt, sizeof (fmt), "%%-%ds|", widtharr[i]);
                 fprintf (fp, fmt, unitsarr[i]); 
             }
             fprintf (fp, "\n");
@@ -529,7 +591,7 @@ static PyObject *method_writerecs(PyObject *self, PyObject *args) {
 
             fprintf (fp, "|");
             for (i=0; i<ncols; i++) {
-                sprintf (fmt, "%%-%ds|", widtharr[i]);
+                snprintf (fmt, sizeof (fmt), "%%-%ds|", widtharr[i]);
                 fprintf (fp, fmt, nullval_ipac); 
             }
             fprintf (fp, "\n");
@@ -794,7 +856,7 @@ static PyObject *method_writerecs(PyObject *self, PyObject *args) {
 
             if (item == Py_None) {
         
-                sprintf (fmt, "%%-%ds ", widtharr[i]);
+                snprintf (fmt, sizeof (fmt), "%%-%ds ", widtharr[i]);
             
                 if ((debug1) && (fp_debug != (FILE *)NULL)) {
                     fprintf (fp_debug, "i= [%d] PyNone\n", i);
@@ -860,7 +922,7 @@ static PyObject *method_writerecs(PyObject *self, PyObject *args) {
                      (strcasecmp (typearr[i],   "date") == 0) ||
                      (strcasecmp (dbtypearr[i], "timestamp") == 0)) {
 
-                strcpy (strval, "");
+                cptr = "";
                 if (PyUnicode_Check (item)) {
                 
                     if ((debug1) && (fp_debug != (FILE *)NULL)) {
@@ -873,26 +935,33 @@ static PyObject *method_writerecs(PyObject *self, PyObject *args) {
 
                     if (item_bytes != NULL) {
                         cptr = PyBytes_AS_STRING (item_bytes);
-                        strcpy (strval, cptr);
                     }
                 }
                 
                 
+                inlen = strlen (cptr);
+                if (!grow_text (&sval, &sval_cap, (size_t)inlen + 1) ||
+                    !grow_text (&jbuf, &jbuf_cap, 2 * (size_t)inlen + 1)) {
+                    PyErr_SetString (PyExc_Exception, "Failed to malloc string value");
+                    return NULL;
+                }
+                strcpy (sval, cptr);
+
                 if ((debug1) && (fp_debug != (FILE *)NULL)) {
-                    fprintf (fp_debug, "i= [%d] strval= [%s]\n", i, strval);
+                    fprintf (fp_debug, "i= [%d] sval= [%s]\n", i, sval);
                     fflush (fp_debug);
                 }
 
                 if (strcasecmp (outfmt, "ipac") == 0) {
                     
-                    sprintf (fmt, "%%-%s ", fmtarr[i]);
+                    snprintf (fmt, sizeof (fmt), "%%-%s ", fmtarr[i]);
 
-                    sprintf(tempstr, fmt, strval);
+                    flen = snprintf (NULL, 0, fmt, sval);
 
-                    if(strlen(tempstr) > widtharr[i]+1)
+                    if(flen > widtharr[i]+1)
                     {
-                        sprintf (msg, "Column %d [%s], row %d: Formatted value [%s](%s) -> %d characters,  overflows column width [%d char].",
-                            i, namearr[i], l, strval, fmtarr[i], (int)strlen(tempstr), widtharr[i]);
+                        snprintf (msg, sizeof (msg), "Column %d [%s], row %d: Formatted value [%s](%s) -> %d characters,  overflows column width [%d char].",
+                            i, namearr[i], l, sval, fmtarr[i], flen, widtharr[i]);
                     
                         if ((debug1) && (fp_debug != (FILE *)NULL)) {
                             fprintf (fp_debug, "ERROR: %s\n", msg);
@@ -908,7 +977,7 @@ static PyObject *method_writerecs(PyObject *self, PyObject *args) {
                         fflush (fp_debug);
                     }
                     
-                    fprintf (fp, fmt, strval);
+                    fprintf (fp, fmt, sval);
                 
                     if (i == ncols-1) {
                         fprintf (fp, "\n");
@@ -923,24 +992,24 @@ static PyObject *method_writerecs(PyObject *self, PyObject *args) {
                 }
                 else if (strcasecmp (outfmt, "votable") == 0) {
        
-                    fprintf (fp, "        <TD><![CDATA[%s]]></TD>\n", strval);
+                    fprintf (fp, "        <TD><![CDATA[%s]]></TD>\n", sval);
                 }
                 else if (strcasecmp (outfmt, "csv") == 0) {
 
                     if (i == ncols-1) {
-                        fprintf (fp, "\"%s\"\n", strval);
+                        fprintf (fp, "\"%s\"\n", sval);
                     }
                     else {
-                        fprintf (fp, "\"%s\",", strval);
+                        fprintf (fp, "\"%s\",", sval);
                     }
                 }
                 else if (strcasecmp (outfmt, "tsv") == 0) {
             
                     if (i == ncols-1) {
-                        fprintf (fp, "%s\n", strval);
+                        fprintf (fp, "%s\n", sval);
                     }
                     else {
-                        fprintf (fp, "%s\t", strval);
+                        fprintf (fp, "%s\t", sval);
                     }
                 } 
                 else if (strcasecmp (outfmt, "json") == 0) {
@@ -951,64 +1020,64 @@ static PyObject *method_writerecs(PyObject *self, PyObject *args) {
                     // JSON strings have to be encoded to escape some
                     // stuff (mostly the double quote character)
 
-                    inlen = strlen(strval);
+                    inlen = strlen(sval);
 
                     m=0;
                     for (k=0; k<inlen; ++k) {
 
-                       charval = strval[k];
+                       charval = sval[k];
 
                        if(charval == '\b') {
-                          jsonstr[m] = '\\';
-                          jsonstr[m+1] = 'b';
+                          jbuf[m] = '\\';
+                          jbuf[m+1] = 'b';
                           m += 2;
                        }
 
                        else if(charval == '\f') {
-                          jsonstr[m] = '\\';
-                          jsonstr[m+1] = 'f';
+                          jbuf[m] = '\\';
+                          jbuf[m+1] = 'f';
                           m += 2;
                        }
 
                        else if(charval == '\n') {
-                          jsonstr[m] = '\\';
-                          jsonstr[m+1] = 'n';
+                          jbuf[m] = '\\';
+                          jbuf[m+1] = 'n';
                           m += 2;
                        }
 
                        else if(charval == '\r') {
-                          jsonstr[m] = '\\';
-                          jsonstr[m+1] = 'r';
+                          jbuf[m] = '\\';
+                          jbuf[m+1] = 'r';
                           m += 2;
                        }
 
                        else if(charval == '\t') {
-                          jsonstr[m] = '\\';
-                          jsonstr[m+1] = 't';
+                          jbuf[m] = '\\';
+                          jbuf[m+1] = 't';
                           m += 2;
                        }
 
                        else if(charval == '"') {
-                          jsonstr[m] = '\\';
-                          jsonstr[m+1] = '"';
+                          jbuf[m] = '\\';
+                          jbuf[m+1] = '"';
                           m += 2;
                        }
 
                        else if(charval == '\\') {
-                          jsonstr[m] = '\\';
-                          jsonstr[m+1] = '\\';
+                          jbuf[m] = '\\';
+                          jbuf[m+1] = '\\';
                           m += 2;
                        }
 
                        else {
-                          jsonstr[m] = charval;
+                          jbuf[m] = charval;
                           ++m;
                        }
                     }
 
-                    jsonstr[m] = '\0';
+                    jbuf[m] = '\0';
 
-                    fprintf (fp, "\"%s\": \"%s\"", namearr[i], jsonstr);
+                    fprintf (fp, "\"%s\": \"%s\"", namearr[i], jbuf);
 
                    if (i < ncols-1)
                         fprintf (fp, ",\n");
@@ -1028,7 +1097,7 @@ static PyObject *method_writerecs(PyObject *self, PyObject *args) {
                      (strcasecmp (typearr[i], "longlong") == 0) ||
                      (strcasecmp (typearr[i], "integer" ) == 0)) {
 
-                sprintf (fmt, "%%-%dlld", atoi (fmtarr[i]));
+                snprintf (fmt, sizeof (fmt), "%%-%dlld", atoi (fmtarr[i]));
                         
                 if ((debug1) && (fp_debug != (FILE *)NULL)) {
                     fprintf (fp_debug, "fmt= [%s]\n", fmt);
@@ -1037,7 +1106,7 @@ static PyObject *method_writerecs(PyObject *self, PyObject *args) {
                 strcpy (strval, "");
                 if (PyLong_Check (item)) {
                     llval = PyLong_AsLongLong (item);
-                    sprintf (strval, fmt, llval);
+                    snprintf (strval, sizeof (strval), fmt, llval);
                 }
 
                 if ((debug1) && (fp_debug != (FILE *)NULL)) {
@@ -1048,13 +1117,13 @@ static PyObject *method_writerecs(PyObject *self, PyObject *args) {
                     
                 if (strcasecmp (outfmt, "ipac") == 0) {
                     
-                    sprintf(colfmt, "%%-%ds ", widtharr[i]);
+                    snprintf (colfmt, sizeof (colfmt), "%%-%ds ", widtharr[i]);
 
-                    sprintf(tempstr, colfmt, strval);
+                    snprintf (tempstr, sizeof (tempstr), colfmt, strval);
 
                     if(strlen(tempstr) > widtharr[i]+1)
                     {
-                        sprintf (msg, "Column %d [%s], row %d: Formatted value [%s](%s) -> %d characters,  overflows column width [%d char].",
+                        snprintf (msg, sizeof (msg), "Column %d [%s], row %d: Formatted value [%s](%s) -> %d characters,  overflows column width [%d char].",
                             i, namearr[i], l, strval, fmtarr[i], (int)strlen(tempstr), widtharr[i]);
                     
                         if ((debug1) && (fp_debug != (FILE *)NULL)) {
@@ -1080,7 +1149,7 @@ static PyObject *method_writerecs(PyObject *self, PyObject *args) {
                 }
                 else if (strcasecmp (outfmt, "votable") == 0) {
                         
-                    sprintf (strval, "%lld", llval);
+                    snprintf (strval, sizeof (strval), "%lld", llval);
                 
                     if ((debug1) && (fp_debug != (FILE *)NULL)) {
                         fprintf (fp_debug, "votable:\n");
@@ -1093,7 +1162,7 @@ static PyObject *method_writerecs(PyObject *self, PyObject *args) {
                 }
                 else if (strcasecmp (outfmt, "csv") == 0) {
 
-                    sprintf (strval, "%lld", llval);
+                    snprintf (strval, sizeof (strval), "%lld", llval);
                     
                     if (i == ncols-1) {
                         fprintf (fp, "%s\n", strval);
@@ -1104,7 +1173,7 @@ static PyObject *method_writerecs(PyObject *self, PyObject *args) {
                 }
                 else if (strcasecmp (outfmt, "tsv") == 0) {
             
-                    sprintf (strval, "%lld", llval);
+                    snprintf (strval, sizeof (strval), "%lld", llval);
                     
                     if (i == ncols-1) {
                         fprintf (fp, "%s\n", strval);
@@ -1115,7 +1184,7 @@ static PyObject *method_writerecs(PyObject *self, PyObject *args) {
                 }
                 else if (strcasecmp (outfmt, "json") == 0) {
             
-                   sprintf (strval, "%lld", llval);
+                   snprintf (strval, sizeof (strval), "%lld", llval);
 
                    if (i == 0) 
                         fprintf (fp, "{");
@@ -1143,7 +1212,7 @@ static PyObject *method_writerecs(PyObject *self, PyObject *args) {
                     fflush (fp_debug);
                 }
 
-                sprintf (fmt, "%%-%s", fmtarr[i]);
+                snprintf (fmt, sizeof (fmt), "%%-%s", fmtarr[i]);
                 
                 if ((debug1) && (fp_debug != (FILE *)NULL)) {
                     fprintf (fp_debug, "fmt= [%s]\n", fmt);
@@ -1157,8 +1226,8 @@ static PyObject *method_writerecs(PyObject *self, PyObject *args) {
 */
                     cptr1 = strchr (fmt, '.');
                     if (cptr1 != (char *)NULL) {
-                        strcpy (substr, cptr1);
-                        sprintf (fmt, "%%%s", substr);
+                        snprintf (substr, sizeof (substr), "%s", cptr1);
+                        snprintf (fmt, sizeof (fmt), "%%%s", substr);
                     }
                 }
                 
@@ -1171,7 +1240,7 @@ static PyObject *method_writerecs(PyObject *self, PyObject *args) {
                 if (PyFloat_Check (item)) {
                     
                     dblval = PyFloat_AsDouble (item);
-                    sprintf (strval, fmt, dblval);
+                    snprintf (strval, sizeof (strval), fmt, dblval);
                     
                     if ((debug1) && (fp_debug != (FILE *)NULL)) {
                         fprintf (fp_debug, 
@@ -1184,7 +1253,7 @@ static PyObject *method_writerecs(PyObject *self, PyObject *args) {
                
                     intval = PyLong_AsLong (item);
                     dblval = (float)intval;
-                    sprintf (strval, fmt, dblval);
+                    snprintf (strval, sizeof (strval), fmt, dblval);
                 
                     if ((debug1) && (fp_debug != (FILE *)NULL)) {
                         fprintf (fp_debug, "i= [%d] intval= [%d]\n", i, intval);
@@ -1196,13 +1265,13 @@ static PyObject *method_writerecs(PyObject *self, PyObject *args) {
 
                 if (strcasecmp (outfmt, "ipac") == 0) {
         
-                    sprintf(colfmt, "%%-%ds ", widtharr[i]);
+                    snprintf (colfmt, sizeof (colfmt), "%%-%ds ", widtharr[i]);
 
-                    sprintf(tempstr, colfmt, strval);
+                    snprintf (tempstr, sizeof (tempstr), colfmt, strval);
 
                     if(strlen(tempstr) > widtharr[i]+1)
                     {
-                        sprintf (msg, "Column %d [%s], row %d: Formatted value [%s](%s) -> %d characters,  overflows column width [%d char].",
+                        snprintf (msg, sizeof (msg), "Column %d [%s], row %d: Formatted value [%s](%s) -> %d characters,  overflows column width [%d char].",
                             i, namearr[i], l, strval, fmtarr[i], (int)strlen(tempstr), widtharr[i]);
                     
                         if ((debug1) && (fp_debug != (FILE *)NULL)) {
@@ -1332,6 +1401,8 @@ static PyObject *method_writerecs(PyObject *self, PyObject *args) {
     free (descarr);
     free (unitsarr);
     free (widtharr);
+    free (sval);
+    free (jbuf);
 
     istatus = 0;    
     return PyLong_FromLong (istatus);

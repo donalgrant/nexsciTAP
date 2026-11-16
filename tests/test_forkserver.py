@@ -312,3 +312,34 @@ def test_register_of_running_jobs_is_not_served(fork_server):
     hidden.mkdir(exist_ok=True)
     (hidden / "tap_x").write_text("10.1.2.3\n")
     assert requests.get(base + "/workspace/TAP/.running/tap_x").status_code == 404
+
+
+# ---- text longer than the result writer's old fixed buffers ---------------
+
+LONG_NAME = "a_column_name_" + "x" * 300          # names were copied into 40 bytes
+LONG_VALUE = "v" * 5000                           # string values into 1024
+
+
+@pytest.mark.parametrize("fmt", ["csv", "ipac", "votable", "json", "tsv"])
+def test_long_column_names_and_values_do_not_corrupt_memory(fork_server, fmt):
+    """
+    A result column is named by its expression unless the query gives an
+    alias, so the client chooses its length; the writer wrote past its
+    buffers and the process died (seen as 502, or a lost async job).
+    """
+    base, _ = fork_server
+    r = requests.post(base + "/TAP/sync", data={
+        "query": f"select l0filename as {LONG_NAME}, '{LONG_VALUE}' as longtext from data_l0",
+        "format": fmt})
+    if fmt == "ipac":
+        # Fixed-width output has no room for the value and says so; with
+        # the name alone it is written.
+        assert r.status_code == 400 and "overflows column width" in r.text
+        r = requests.post(base + "/TAP/sync", data={
+            "query": f"select l0filename as {LONG_NAME} from data_l0", "format": fmt})
+        assert r.status_code == 200 and LONG_NAME in r.text
+        return
+
+    assert r.status_code == 200, r.text[:300]
+    assert LONG_NAME in r.text
+    assert r.text.count(LONG_VALUE) == 6
