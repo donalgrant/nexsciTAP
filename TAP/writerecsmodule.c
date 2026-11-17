@@ -996,11 +996,25 @@ static PyObject *method_writerecs(PyObject *self, PyObject *args) {
                 }
                 else if (strcasecmp (outfmt, "csv") == 0) {
 
+                    /* A quote inside a quoted CSV field is written twice
+                       (RFC 4180); left single, it ends the field early for
+                       whoever reads the file. */
+                    m = 0;
+                    for (k=0; k<inlen; ++k) {
+                        if (sval[k] == '"') {
+                            jbuf[m] = '"';
+                            ++m;
+                        }
+                        jbuf[m] = sval[k];
+                        ++m;
+                    }
+                    jbuf[m] = '\0';
+
                     if (i == ncols-1) {
-                        fprintf (fp, "\"%s\"\n", sval);
+                        fprintf (fp, "\"%s\"\n", jbuf);
                     }
                     else {
-                        fprintf (fp, "\"%s\",", sval);
+                        fprintf (fp, "\"%s\",", jbuf);
                     }
                 }
                 else if (strcasecmp (outfmt, "tsv") == 0) {

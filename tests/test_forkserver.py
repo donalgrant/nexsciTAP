@@ -350,3 +350,17 @@ def test_sigterm_stops_the_server_promptly(fixture_root: Path):
     proc, _, _ = _serve(fixture_root, "term")
     proc.terminate()
     assert proc.wait(timeout=5) == 0
+
+
+def test_csv_doubles_quotes_inside_a_value(fork_server):
+    """A value holding a quote must come back as that value from any CSV reader."""
+    import csv
+    import io
+    base, _ = fork_server
+    r = requests.post(base + "/TAP/sync", data={
+        "query": "select 'J 20mag/sq.\" isophotal, with a comma' as descr, l0filename from data_l0", "format": "csv"})
+    assert r.status_code == 200, r.text[:300]
+    rows = list(csv.DictReader(io.StringIO(r.text)))
+    assert len(rows) == 6
+    assert all(row["descr"] == 'J 20mag/sq." isophotal, with a comma' for row in rows)
+    assert all(row["l0filename"] for row in rows)
