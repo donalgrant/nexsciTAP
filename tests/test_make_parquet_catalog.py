@@ -187,3 +187,21 @@ def test_fits_and_votable_input_keep_their_units(tmp_path, fmt, ext):
     cols, _ = _tap_schema(duckdb, tmp_path, out)
     assert cols['ra'][0] == 'deg'
     assert cols['flux'][0] == 'mJy' and cols['flux'][2] == 'Total flux density'
+
+
+def test_text_columns_declare_their_width(tmp_path):
+    """astropy's reader of the metadata needs a width for text, not 'any length'."""
+    duckdb = pytest.importorskip('duckdb')
+    pytest.importorskip('astropy_healpix')
+    sys.path.insert(0, str(TOOLS))
+    import votable_metadata
+
+    src = tmp_path / 'in.csv'
+    src.write_text('ra,dec,name\n10.0,-5.0,abc\n11.0,-6.0,abcdefg\n')
+    out = tmp_path / 'out'
+    _tool('make_parquet_catalog.py', src, out)
+    con = duckdb.connect()
+    value = con.execute('SELECT value FROM parquet_kv_metadata(?) WHERE key = ?',
+                        [f'{out}/part-00.parquet', votable_metadata.CONTENT_KEY.encode()]).fetchall()[0][0]
+    text = bytes(value).decode()
+    assert '<FIELD name="name" datatype="char" arraysize="7"' in text

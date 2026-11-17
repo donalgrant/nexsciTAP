@@ -267,6 +267,11 @@ def main():
     meta['hpx29'] = {'description': 'Nested HEALPix index of (ra, dec) at order 29, added on conversion; '
                                     'the files are sorted by it'}
     out_cols = [(r[0], r[1]) for r in con.execute('DESCRIBE SELECT * EXCLUDE (_n) FROM sorted').fetchall()]
+    text_cols = [c for c, t in out_cols if t.upper() == 'VARCHAR']
+    if text_cols:
+        widths = con.execute('SELECT ' + ', '.join(f'max(length("{c}"))' for c in text_cols) + ' FROM sorted').fetchone()
+        for c, w in zip(text_cols, widths):
+            meta.setdefault(c, {})['width'] = max(1, w or 1)
     votable = votable_metadata.build([(c, t, meta.get(c, {})) for c, t in out_cols], args.description)
     kv = (f"KV_METADATA {{'{votable_metadata.VERSION_KEY}': '1.0', "
           f"'{votable_metadata.CONTENT_KEY}': '{votable.replace(chr(39), chr(39) * 2)}'}}")

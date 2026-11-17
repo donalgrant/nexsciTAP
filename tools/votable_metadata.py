@@ -46,7 +46,10 @@ def build(columns, table_description=''):
         ET.SubElement(table, 'DESCRIPTION').text = table_description
 
     for name, duck_type, meta in columns:
-        datatype, arraysize = VOTYPES.get(duck_type.upper(), ('char', '*'))
+        # Text gets the width of its longest value when the caller knows it:
+        # astropy's reader of this metadata cannot combine a column declared
+        # of any length ("*") with the text it then reads from the file.
+        datatype, arraysize = VOTYPES.get(duck_type.upper(), ('char', str(meta.get('width') or '*')))
         attrs = {'name': name, 'datatype': datatype}
         if arraysize:
             attrs['arraysize'] = arraysize
