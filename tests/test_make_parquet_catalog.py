@@ -205,3 +205,35 @@ def test_text_columns_declare_their_width(tmp_path):
                         [f'{out}/part-00.parquet', votable_metadata.CONTENT_KEY.encode()]).fetchall()[0][0]
     text = bytes(value).decode()
     assert '<FIELD name="name" datatype="char" arraysize="7"' in text
+
+
+def test_describe_adds_metadata_and_leaves_the_data_alone(tmp_path):
+    """A catalog converted without metadata gets it later, file for file, with nothing else changed."""
+    duckdb = pytest.importorskip('duckdb')
+    pytest.importorskip('astropy_healpix')
+
+    src = tmp_path / 'in.csv'
+    src.write_text('ra,dec,kmag,name\n' + ''.join(f'{10 + i * 0.01},{-5 + i * 0.01},{12 + i % 7},n{i}\n' for i in range(950)))
+    old = tmp_path / 'old'
+    _tool('make_parquet_catalog.py', src, old, '--rows-per-file', '400', '--row-group', '100')
+    schema = tmp_path / 'schema.csv'
+    schema.write_text('column_name,datatype,unit,description\nKMAG,char,mag,K magnitude\nabsent,int,,not there\n')
+
+    new = tmp_path / 'new'
+    said = _tool('describe_parquet_catalog.py', old, new, '--schema', schema, '--description', 'A described table')
+    assert '2 of 5 columns have a description, 3 a unit' in said and '1 columns in' in said
+
+    con = duckdb.connect()
+    assert sorted(p.name for p in new.iterdir()) == sorted(p.name for p in old.iterdir()) and len(list(new.iterdir())) == 3
+    for part in sorted(p.name for p in old.iterdir()):
+        a = con.execute(f"SELECT * FROM read_parquet('{old}/{part}')").fetchall()
+        b = con.execute(f"SELECT * FROM read_parquet('{new}/{part}')").fetchall()
+        assert a == b                                              # same rows, same order
+        groups = lambda d: con.execute(f"SELECT row_group_id, row_group_num_rows FROM parquet_metadata('{d}/{part}') "
+                                       'GROUP BY ALL ORDER BY 1').fetchall()
+        assert groups(old) == groups(new)
+    assert con.execute(f"SELECT typeof(kmag) FROM read_parquet('{new}/*.parquet') LIMIT 1").fetchone()[0] == 'BIGINT'
+
+    cols, table = _tap_schema(duckdb, tmp_path, new)
+    assert table == 'A described table'
+    assert cols['kmag'] == ('mag', None, 'K magnitude') and cols['ra'][0] == 'deg' and 'HEALPix' in cols['hpx29'][2]
