@@ -364,3 +364,78 @@ def test_csv_doubles_quotes_inside_a_value(fork_server):
     assert len(rows) == 6
     assert all(row["descr"] == 'J 20mag/sq." isophotal, with a comma' for row in rows)
     assert all(row["l0filename"] for row in rows)
+
+
+def _records(log: Path, word: str):
+    import json
+    return [json.loads(line.split(" ", 1)[1]) for line in log.read_text().splitlines()
+            if line.startswith(word + " ")]
+
+
+def test_every_request_leaves_a_record(fixture_root: Path):
+    """What an administrator counts queries from: one TAPQ line a request, one TAPV line at start."""
+    log = fixture_root / "record-server.log"
+    port = _free_port()
+    workdir = fixture_root / "record-workdir"
+    (workdir / "TAP").mkdir(parents=True, exist_ok=True)
+    conf = fixture_root / "TAP-record.conf"
+    conf.write_text((FIXTURES / "TAP.conf.template").read_text().format(
+        TEST_WORKDIR=str(workdir), TEST_HTTP_HOST="127.0.0.1", TEST_HTTP_PORT=str(port),
+        TEST_DB_PATH=str(fixture_root / "test_data.db"), TEST_TAP_SCHEMA=str(fixture_root / "tap_schema.db")))
+
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(TESTS_DIR.parent), str(STUBS)] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
+
+    with open(log, "w") as err:
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "TAP.forkserver", "--conf", str(conf), "--port", str(port)],
+            env=env, cwd=str(fixture_root), stderr=err)
+    base = f"http://127.0.0.1:{port}"
+
+    try:
+        for _ in range(100):
+            try:
+                requests.get(base + "/nothing", timeout=1)
+                break
+            except requests.ConnectionError:
+                assert proc.poll() is None
+                time.sleep(0.1)
+
+        ok = requests.post(base + "/TAP/sync", data={"query": "select l0filename\n from   data_l0", "format": "csv"})
+        assert ok.status_code == 200
+        bad = requests.post(base + "/TAP/sync", data={"query": "select nothing from nowhere", "format": "csv"})
+        assert bad.status_code != 200
+
+        r = requests.post(base + "/TAP/async",
+                          data={"query": "select l1filename from data_l1", "format": "ipac", "phase": "RUN"},
+                          allow_redirects=False)
+        job = r.headers["Location"]
+        for _ in range(100):
+            if requests.get(job + "/phase").text.strip() in ("COMPLETED", "ERROR", "ABORTED"):
+                break
+            time.sleep(0.1)
+        time.sleep(0.5)
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
+
+    versions = _records(log, "TAPV")
+    assert len(versions) == 1 and versions[0]["python"]
+
+    recs = _records(log, "TAPQ")
+    sync = [r for r in recs if r["path"] == "/sync"]
+    assert len(sync) == 2
+
+    good, failed = sync
+    assert good["phase"] == "COMPLETED" and good["rows"] == 6 and good["fmt"] == "csv"
+    assert good["q"] == "select l0filename from data_l0"          # white space folded to one line
+    assert good["client"] == "127.0.0.1" and good["ms"] >= 0 and good["job"] is False
+    assert failed["phase"] == "ERROR" and failed["err"] and "rows" not in failed
+
+    done = [r for r in recs if r["job"]]
+    assert len(done) == 1 and done[0]["phase"] == "COMPLETED" and done[0]["rows"] == 10
+
+    # Looking at a job is a request too, but not a query.
+    looks = [r for r in recs if r["path"].endswith("/phase")]
+    assert looks and all("q" not in r and "phase" not in r for r in looks)

@@ -1,0 +1,296 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Archive in a Box - the administrator's control panel, stage 1 (views only).
+  A static page and one Lambda function behind CloudFront, beside the service's
+  stack and independent of it:  deleting this stack leaves the service as it is.
+
+# Deploy with deploy/panel/deploy.sh, which packages the function's code.
+#
+# Nothing here runs unless the page asks or the canary's timer fires, so the
+# stack costs close to nothing and is still there when the service has no task.
+
+Parameters:
+  ServiceStack:
+    Type: String
+    Default: aiab-fargate
+    Description: Name of the service's stack (deploy/fargate), which is also its ECS cluster and service.
+  ServiceUrl:
+    Type: String
+    Description: The service's public address, e.g. https://dxxxxxxxx.cloudfront.net
+  PanelSecret:
+    Type: String
+    NoEcho: true
+    Default: ''
+    Description: >-
+      The same value as the service stack's PanelSecret.  The functions send it to get
+      through the service's access check.  Empty:  the canary and the table details wait.
+  AdminCidr:
+    Type: String
+    AllowedPattern: '^\d+\.\d+\.\d+\.\d+/\d+$'
+    Description: The one IPv4 range admitted to the panel, e.g. 203.0.113.7/32.
+  CatalogBucket:
+    Type: String
+  CatalogPrefix:
+    Type: String
+    Default: catalogs
+  ImagePrefix:
+    Type: String
+    Default: aiab
+  BuildProject:
+    Type: String
+    Default: aiab-fargate-build
+  TaskCap:
+    Type: Number
+    Default: 3
+  CanaryMinutes:
+    Type: Number
+    Default: 5
+    Description: Minutes between canary runs.
+
+Resources:
+
+  # The page under site/, the functions' own state under state/.  Private.
+  Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        {BlockPublicAcls: true, BlockPublicPolicy: true, IgnorePublicAcls: true, RestrictPublicBuckets: true}
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: {SSEAlgorithm: AES256}
+
+  BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref Bucket
+      PolicyDocument:
+        Statement:
+          - Sid: PageThroughCloudFrontOnly
+            Effect: Allow
+            Principal: {Service: cloudfront.amazonaws.com}
+            Action: s3:GetObject
+            Resource: !Sub ${Bucket.Arn}/site/*
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub arn:aws:cloudfront::${AWS::AccountId}:distribution/${Distribution}
+
+  # ---- the functions ------------------------------------------------------
+
+  FunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - {Effect: Allow, Principal: {Service: lambda.amazonaws.com}, Action: sts:AssumeRole}
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: read-the-service
+          PolicyDocument:
+            Statement:
+              # Stage 1 reads.  Nothing here can change the service.
+              - Effect: Allow
+                Action: ecs:DescribeServices
+                Resource: !Sub arn:aws:ecs:${AWS::Region}:${AWS::AccountId}:service/${ServiceStack}/*
+              - Effect: Allow
+                Action:
+                  - ecs:DescribeTaskDefinition
+                  - cloudwatch:GetMetricData
+                  - elasticfilesystem:DescribeFileSystems
+                  - ce:GetCostAndUsage
+                  - ce:GetCostForecast
+                  - budgets:ViewBudget
+                Resource: '*'
+              - Effect: Allow
+                Action: cloudwatch:PutMetricData
+                Resource: '*'
+                Condition:
+                  StringEquals: {cloudwatch:namespace: ArchiveInABox/Panel}
+              - Effect: Allow
+                Action: [cloudformation:DescribeStacks, cloudformation:ListStackResources]
+                Resource: !Sub arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${ServiceStack}/*
+              - Effect: Allow
+                Action: logs:FilterLogEvents
+                Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/ecs/${ServiceStack}:*
+              - Effect: Allow
+                Action: ecr:DescribeImages
+                Resource: !Sub arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${ImagePrefix}-*
+              - Effect: Allow
+                Action: [codebuild:ListBuildsForProject, codebuild:BatchGetBuilds]
+                Resource: !Sub arn:aws:codebuild:${AWS::Region}:${AWS::AccountId}:project/${BuildProject}
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: !Sub arn:aws:s3:::${CatalogBucket}
+                Condition:
+                  StringLike: {s3:prefix: !Sub '${CatalogPrefix}/*'}
+        - PolicyName: own-state
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action: [s3:GetObject, s3:PutObject]
+                Resource: !Sub ${Bucket.Arn}/state/*
+
+  Function:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Archive in a Box control panel - views and canary
+      Runtime: python3.12
+      Handler: panel.handler
+      Code: functions/
+      Role: !GetAtt FunctionRole.Arn
+      Timeout: 60
+      MemorySize: 512
+      Environment:
+        Variables:
+          SERVICE_STACK: !Ref ServiceStack
+          SERVICE_URL: !Ref ServiceUrl
+          PANEL_SECRET: !Ref PanelSecret
+          CATALOG_BUCKET: !Ref CatalogBucket
+          CATALOG_PREFIX: !Ref CatalogPrefix
+          STATE_BUCKET: !Ref Bucket
+          ECR_PREFIX: !Ref ImagePrefix
+          BUILD_PROJECT: !Ref BuildProject
+          TASK_CAP: !Ref TaskCap
+
+  FunctionLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${Function}
+      RetentionInDays: 30
+
+  # Only CloudFront may call it:  requests must be signed by this distribution.
+  FunctionUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      TargetFunctionArn: !GetAtt Function.Arn
+      AuthType: AWS_IAM
+
+  FunctionUrlPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt Function.Arn
+      Action: lambda:InvokeFunctionUrl
+      Principal: cloudfront.amazonaws.com
+      FunctionUrlAuthType: AWS_IAM
+      SourceArn: !Sub arn:aws:cloudfront::${AWS::AccountId}:distribution/${Distribution}
+
+  FunctionInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt Function.Arn
+      Action: lambda:InvokeFunction
+      Principal: cloudfront.amazonaws.com
+      SourceArn: !Sub arn:aws:cloudfront::${AWS::AccountId}:distribution/${Distribution}
+
+  # ---- the canary's timer -------------------------------------------------
+
+  CanaryRule:
+    Type: AWS::Events::Rule
+    DependsOn: FunctionLogs
+    Properties:
+      Description: Archive in a Box control panel - run the canary
+      ScheduleExpression: !Sub rate(${CanaryMinutes} minutes)
+      Targets:
+        - {Id: canary, Arn: !GetAtt Function.Arn, Input: '{"canary": true}'}
+
+  CanaryPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt Function.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt CanaryRule.Arn
+
+  # ---- the door -----------------------------------------------------------
+
+  AccessFunction:
+    Type: AWS::CloudFront::Function
+    Properties:
+      Name: !Sub ${AWS::StackName}-access
+      AutoPublish: true
+      FunctionConfig:
+        Comment: Admit the administrator's address only
+        Runtime: cloudfront-js-2.0
+      FunctionCode: !Sub |
+        function toInt(ip) {
+            var p = ip.split('.');
+            if (p.length !== 4) { return null; }
+            return ((+p[0] << 24) | (+p[1] << 16) | (+p[2] << 8) | +p[3]) >>> 0;
+        }
+        function handler(event) {
+            var parts = '${AdminCidr}'.split('/');
+            var bits = +parts[1];
+            var mask = bits === 0 ? 0 : (0xFFFFFFFF << (32 - bits)) >>> 0;
+            var ip = toInt(event.viewer.ip);
+            if (ip !== null && ((ip & mask) >>> 0) === ((toInt(parts[0]) & mask) >>> 0)) {
+                return event.request;
+            }
+            return { statusCode: 403, statusDescription: 'Forbidden' };
+        }
+
+  PageAccess:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub ${AWS::StackName}-page
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  FunctionAccess:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub ${AWS::StackName}-functions
+        OriginAccessControlOriginType: lambda
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub ${AWS::StackName} - Archive in a Box control panel
+        HttpVersion: http2
+        IPV6Enabled: false          # the access check understands IPv4 only
+        PriceClass: PriceClass_100
+        DefaultRootObject: index.html
+        Origins:
+          - Id: page
+            DomainName: !GetAtt Bucket.RegionalDomainName
+            OriginPath: /site
+            S3OriginConfig: {OriginAccessIdentity: ''}
+            OriginAccessControlId: !Ref PageAccess
+          - Id: functions
+            DomainName: !Select [2, !Split ['/', !GetAtt FunctionUrl.FunctionUrl]]
+            CustomOriginConfig:
+              OriginProtocolPolicy: https-only
+              OriginReadTimeout: 60
+            OriginAccessControlId: !Ref FunctionAccess
+        DefaultCacheBehavior:
+          TargetOriginId: page
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD]
+          Compress: true
+          CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad            # managed: CachingDisabled
+          FunctionAssociations:
+            - {EventType: viewer-request, FunctionARN: !GetAtt AccessFunction.FunctionMetadata.FunctionARN}
+        CacheBehaviors:
+          - PathPattern: /api/*
+            TargetOriginId: functions
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [GET, HEAD]
+            Compress: true
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad          # managed: CachingDisabled
+            OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac  # managed: AllViewerExceptHostHeader
+            FunctionAssociations:
+              - {EventType: viewer-request, FunctionARN: !GetAtt AccessFunction.FunctionMetadata.FunctionARN}
+
+Outputs:
+  PanelUrl:
+    Value: !Sub https://${Distribution.DomainName}/
+  Bucket:
+    Value: !Ref Bucket
+  Function:
+    Value: !Ref Function

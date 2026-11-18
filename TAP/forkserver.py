@@ -42,6 +42,7 @@ import argparse
 import fnmatch
 import grp
 import http.server
+import json
 import mimetypes
 import os
 import pwd
@@ -51,6 +52,7 @@ import signal
 import socketserver
 import sys
 import tempfile
+import time
 from urllib.parse import unquote, urlsplit
 
 PRIVATE_FILES = ('upload_*.vot', 'worker', 'abort')
@@ -286,15 +288,41 @@ class Handler(http.server.BaseHTTPRequestHandler):
         _tap.Tap.debugfname = '/tmp/tap_' + str(os.getpid()) + '.debug'
         _tap.Tap.form = _cgi.FieldStorage()
 
+        started = time.time()
+        request_pid = os.getpid()
+        seen = []
+
+        class Request(_tap.Tap):
+            # The service does its work in the constructor and usually leaves
+            # it by SystemExit, so this is the only hold on the object.
+            def __new__(cls, *args, **kwargs):
+                seen.append(super().__new__(cls))
+                return seen[0]
+
+            # The message of a failed query is not kept on the object.
+            def __printError__(self, fmt, errmsg, **kwargs):
+                self.said = errmsg
+                return super().__printError__(fmt, errmsg, **kwargs)
+
+            def __writeAsyncError__(self, errmsg, *args, **kwargs):
+                self.said = errmsg
+                return super().__writeAsyncError__(errmsg, *args, **kwargs)
+
         status = 0
         try:
-            _tap.Tap()
+            Request()
         except SystemExit:
             pass
         except BaseException:
             import traceback
             traceback.print_exc()
             status = 1
+
+        try:
+            log_query(self.command, path_info, client, started, status,
+                      seen[0] if seen else None, os.getpid() != request_pid)
+        except Exception as e:                      # a record, never a reason to fail
+            sys.stderr.write(f'query record failed: {e!r}\n')
 
         # Leave here: the socket server's own clean-up expects a connection
         # this process no longer holds.
@@ -308,6 +336,83 @@ class Handler(http.server.BaseHTTPRequestHandler):
         _tap.jobworker.finished()
 
         os._exit(status)
+
+
+QUERY_RECORD = 'TAPQ'
+VERSION_RECORD = 'TAPV'
+QUERY_TEXT_LIMIT = 4000
+
+
+def log_query(method, path_info, client, started, status, tap, is_job):
+    """
+    One line on standard error for each request the service handled, as JSON
+    after the word TAPQ, for whoever counts queries from the log:
+
+        t       when the request arrived (seconds since 1970)
+        ms      how long this process spent on it
+        client  who asked (see Handler._client)
+        m, path the request
+        job     true for the line an async job's own process writes when the
+                query is over; the request that submitted or started the job
+                has a line of its own
+        phase   COMPLETED or ERROR for a query that ran; absent otherwise
+        rows    rows returned, for a query that completed
+        fmt, q  the output format and the query as the client sent it
+        err     the service's message, for a query that failed
+    """
+
+    rec = {'t': round(started, 3), 'ms': int((time.time() - started) * 1000),
+           'client': client, 'm': method, 'path': path_info or '/', 'job': bool(is_job)}
+
+    if status:
+        rec['phase'] = 'ERROR'
+        rec['err'] = 'internal error'
+
+    if tap is not None:
+        query = getattr(tap, 'query', '') or ''
+        phase = getattr(tap, 'phase', '') or ''
+
+        if query:
+            rec['q'] = ' '.join(str(query).split())[:QUERY_TEXT_LIMIT]
+            rec['fmt'] = getattr(tap, 'format', '') or ''
+
+        said = getattr(tap, 'said', None)
+
+        if said is not None:
+            rec['phase'] = 'ERROR'
+            rec['err'] = ' '.join(str(said).split())[:500]
+        elif phase == 'COMPLETED' and (query or is_job):
+            rec['phase'] = phase
+            rec['rows'] = int(getattr(tap, 'ntot', 0) or 0)
+
+    sys.stderr.write(QUERY_RECORD + ' ' + json.dumps(rec, separators=(',', ':')) + '\n')
+    sys.stderr.flush()
+
+
+def log_versions():
+    """One line at start-up naming what this server is made of (TAPV + JSON)."""
+
+    import platform
+
+    rec = {'python': platform.python_version()}
+
+    try:
+        from importlib import metadata
+        rec['nexsciTAP'] = metadata.version('nexsciTAP')
+    except Exception:
+        pass
+
+    for name in ('duckdb', 'pyarrow', 'astropy'):
+        try:
+            rec[name] = __import__(name).__version__
+        except Exception:
+            pass
+
+    if os.environ.get('TAP_COMMIT'):
+        rec['commit'] = os.environ['TAP_COMMIT']
+
+    sys.stderr.write(VERSION_RECORD + ' ' + json.dumps(rec, separators=(',', ':')) + '\n')
+    sys.stderr.flush()
 
 
 class _Closed:
@@ -400,6 +505,7 @@ def main():
 
     signal.signal(signal.SIGTERM, stop)
 
+    log_versions()
     print(f'nexsciTAP fork server: http://{args.host}:{port}/TAP  (conf {Handler.conf})', flush=True)
     server.serve_forever(poll_interval=0.5)
 

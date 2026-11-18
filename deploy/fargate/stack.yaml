@@ -29,6 +29,14 @@ Parameters:
     NoEcho: true
     MinLength: 20
     Description: Random value CloudFront sends to the load balancer, which refuses requests without it.
+  PanelSecret:
+    Type: String
+    NoEcho: true
+    Default: ''
+    Description: >-
+      Lets the control panel's functions (deploy/panel) reach the service from outside
+      the allowed address ranges, by sending this value in the X-Panel-Secret header.
+      Empty closes that door.
   TapImage:
     Type: String
   ProxyImage:
@@ -328,6 +336,14 @@ Resources:
         }
         function handler(event) {
             var allowed = ['${AllowedCidr1}', '${AllowedCidr2}'];
+            // The control panel's test queries come from AWS's own addresses.
+            var panel = '${PanelSecret}';
+            var sent = event.request.headers['x-panel-secret'];
+            delete event.request.headers['x-panel-secret'];
+            if (panel !== '' && sent && sent.value === panel) {
+                event.request.headers['x-viewer-ip'] = { value: 'panel' };
+                return event.request;
+            }
             var ip = toInt(event.viewer.ip);
             if (ip !== null) {
                 for (var i = 0; i < allowed.length; i++) {

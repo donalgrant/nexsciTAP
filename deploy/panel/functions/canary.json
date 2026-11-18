@@ -1,0 +1,14 @@
+{
+  "comment": "Queries the canary runs every five minutes, with the answer each must give.  The answers hold for the pilot's four catalogs as of 2026-11-18;  change them when a catalog is replaced.",
+  "checks": [
+    {"name": "row count, servs_cdfs",
+     "query": "SELECT count(*) AS n FROM servs_cdfs",
+     "expected": 243248},
+    {"name": "cone, allwise (58.6 million rows)",
+     "query": "SELECT count(*) AS n FROM allwise WHERE CONTAINS(POINT('ICRS',ra,dec),CIRCLE('ICRS',45.0,-30.0,0.2))=1",
+     "expected": 2030},
+    {"name": "cone, fp_xsc",
+     "query": "SELECT count(*) AS n FROM fp_xsc WHERE CONTAINS(POINT('ICRS',ra,dec),CIRCLE('ICRS',180.0,0.0,2.0))=1",
+     "expected": 600}
+  ]
+}

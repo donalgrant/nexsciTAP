@@ -1,0 +1,373 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Archive in a Box control panel</title>
+<style>
+:root {
+  --bg: #f6f5f2; --card: #ffffff; --ink: #1c1b19; --quiet: #6b6963; --rule: #e4e2dc; --edge: #cfccc4;
+  --accent: #2f6fd0; --accent-soft: #e4edfb; --good: #1f9d55; --good-soft: #e2f4e8;
+  --warn: #c77700; --warn-soft: #fbf0db; --bad: #c0392b; --bad-soft: #fbe6e3; --idle: #8a8780;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #171716; --card: #1f1f1d; --ink: #ecebe7; --quiet: #a09d95; --rule: #2e2d2a; --edge: #3c3b37;
+    --accent: #6ea3f2; --accent-soft: #1d2b42; --good: #4cc27e; --good-soft: #17301f;
+    --warn: #e2a13c; --warn-soft: #382a10; --bad: #ee7b6c; --bad-soft: #3a1b17; --idle: #7d7a73;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink);
+       font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+header { background: var(--card); border-bottom: 1px solid var(--rule); padding: 14px 24px 0; }
+.top { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+h1 { font-size: 17px; margin: 0; font-weight: 600; flex: 1; min-width: 220px; }
+.pill { border-radius: 999px; padding: 3px 12px; font-size: 12.5px; font-weight: 600; border: 1px solid; white-space: nowrap; }
+.pill.running { color: var(--good); background: var(--good-soft); border-color: var(--good); }
+.pill.standby, .pill.unknown { color: var(--idle); background: transparent; border-color: var(--edge); }
+.pill.starting { color: var(--warn); background: var(--warn-soft); border-color: var(--warn); }
+.pill.down, .pill.failing { color: var(--bad); background: var(--bad-soft); border-color: var(--bad); }
+.stage { font-size: 12px; color: var(--quiet); }
+button, select, input { font: inherit; color: inherit; background: var(--card); border: 1px solid var(--edge);
+       border-radius: 6px; padding: 4px 10px; }
+button { cursor: pointer; }
+button:hover { border-color: var(--accent); }
+nav { display: flex; gap: 22px; margin-top: 12px; overflow-x: auto; }
+nav a { padding: 6px 0 9px; color: var(--quiet); text-decoration: none; border-bottom: 2.5px solid transparent; cursor: pointer; white-space: nowrap; }
+nav a.on { color: var(--ink); font-weight: 600; border-bottom-color: var(--accent); }
+main { padding: 20px 24px 40px; max-width: 1180px; margin: 0 auto; }
+.grid { display: grid; gap: 16px; }
+.g4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.g2 { grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); }
+.g11 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+@media (max-width: 820px) { .g4 { grid-template-columns: repeat(2, minmax(0, 1fr)); } .g2, .g11 { grid-template-columns: minmax(0, 1fr); } }
+.card { background: var(--card); border: 1px solid var(--rule); border-radius: 10px; padding: 14px 16px; min-width: 0; }
+.card h2 { font-size: 14px; margin: 0 0 10px; font-weight: 600; }
+.label { font-size: 12.5px; color: var(--quiet); }
+.big { font-size: 24px; font-weight: 600; margin: 2px 0; display: flex; align-items: center; gap: 8px; }
+.dot { width: 11px; height: 11px; border-radius: 50%; display: inline-block; background: var(--idle); }
+.dot.ok { background: var(--good); } .dot.bad { background: var(--bad); } .dot.warn { background: var(--warn); }
+.note { font-size: 12.5px; color: var(--quiet); }
+.gap { margin-top: 16px; }
+table { width: 100%; border-collapse: collapse; }
+th { text-align: left; font-weight: 400; color: var(--quiet); font-size: 12.5px; padding: 4px 10px 6px 0; border-bottom: 1px solid var(--rule); white-space: nowrap; }
+td { padding: 6px 10px 6px 0; border-bottom: 1px solid var(--rule); vertical-align: top; }
+tr:last-child td { border-bottom: 0; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.scroll { overflow-x: auto; }
+code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+.q { max-width: 520px; overflow-wrap: anywhere; color: var(--ink); }
+.warnText { color: var(--warn); } .badText { color: var(--bad); } .goodText { color: var(--good); }
+.notice { background: var(--warn-soft); border: 1px solid var(--warn); border-radius: 8px; padding: 9px 12px; margin-bottom: 16px; font-size: 13px; }
+.notice.err { background: var(--bad-soft); border-color: var(--bad); }
+.meter { height: 8px; border-radius: 4px; background: var(--rule); overflow: hidden; }
+.meter i { display: block; height: 100%; background: var(--accent); border-radius: 4px; }
+.row { display: grid; grid-template-columns: 90px 1fr 70px; align-items: center; gap: 10px; margin: 9px 0; font-size: 13px; }
+.row span:last-child { text-align: right; font-variant-numeric: tabular-nums; }
+svg { display: block; width: 100%; height: auto; }
+.bars rect { fill: var(--accent); opacity: .8; } .bars rect.f { fill: var(--bad); opacity: .9; }
+.axis { stroke: var(--edge); } .gridline { stroke: var(--rule); } .tick { fill: var(--quiet); font-size: 11px; }
+.line { fill: none; stroke: var(--accent); stroke-width: 1.6; } .line.b { stroke: var(--warn); }
+.strip { display: flex; gap: 2px; height: 22px; align-items: stretch; }
+.strip i { flex: 1; border-radius: 2px; background: var(--good); min-width: 2px; }
+.strip i.bad { background: var(--bad); } .strip i.skip { background: var(--edge); }
+.tools { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
+.log { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; line-height: 1.5;
+       max-height: 62vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.log .t { color: var(--quiet); } .log .c { color: var(--accent); }
+footer { color: var(--quiet); font-size: 12px; text-align: center; padding: 0 24px 28px; }
+</style>
+</head>
+<body>
+<header>
+  <div class="top">
+    <h1>Archive in a Box&ensp;control panel</h1>
+    <span class="stage">views only (stage 1)</span>
+    <span id="pill" class="pill unknown">checking</span>
+    <button id="refresh" title="Read everything again">Refresh</button>
+  </div>
+  <nav id="nav"></nav>
+</header>
+<main id="main"></main>
+<footer id="foot"></footer>
+
+<script>
+'use strict';
+const TABS = ['Status', 'Activity', 'Load', 'Datasets', 'Cost', 'Components', 'Logs'];
+const $ = (s) => document.querySelector(s);
+const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
+const num = (v) => v == null ? '' : Number(v).toLocaleString('en-US');
+const bytes = (b) => { if (b == null) return ''; const u = ['B', 'KB', 'MB', 'GB', 'TB']; let i = 0; while (b >= 1000 && i < 4) { b /= 1000; i++; } return (b >= 100 || i === 0 ? b.toFixed(0) : b.toFixed(1)) + ' ' + u[i]; };
+const money = (v) => v == null ? '' : '$' + Number(v).toFixed(2);
+const ms = (v) => v == null ? '' : v >= 1000 ? (v / 1000).toFixed(v >= 10000 ? 0 : 1) + ' s' : v + ' ms';
+const clock = (t) => t ? new Date(t * 1000).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'}) : '';
+const day = (t) => t ? new Date(t * 1000).toLocaleDateString([], {month: 'short', day: 'numeric'}) : '';
+const when = (t) => t ? day(t) + ' ' + clock(t) : '';
+const ago = (t) => { if (!t) return ''; const s = Math.max(0, Date.now() / 1000 - t); return s < 90 ? Math.round(s) + ' s ago' : s < 5400 ? Math.round(s / 60) + ' min ago' : s < 129600 ? Math.round(s / 3600) + ' h ago' : Math.round(s / 86400) + ' d ago'; };
+
+let tab = (location.hash || '#Status').slice(1);
+if (!TABS.includes(tab)) tab = 'Status';
+const store = {};
+
+async function api(name, params) {
+  const qs = params ? '?' + new URLSearchParams(params) : '';
+  const r = await fetch('/api/' + name + qs, {cache: 'no-store'});
+  const body = await r.json().catch(() => ({error: 'The panel could not read the answer (' + r.status + ').'}));
+  if (!r.ok) throw new Error(body.error || ('HTTP ' + r.status));
+  return body;
+}
+async function get(name, params, fresh) {
+  const key = name + JSON.stringify(params || {});
+  if (!fresh && store[key] && Date.now() - store[key].at < 60000) return store[key].v;
+  const v = await api(name, params);
+  store[key] = {v, at: Date.now()};
+  return v;
+}
+
+function nav() {
+  $('#nav').innerHTML = TABS.map((t) => `<a class="${t === tab ? 'on' : ''}" data-t="${t}">${t}</a>`).join('');
+}
+$('#nav').addEventListener('click', (e) => { const t = e.target.dataset.t; if (t) { tab = t; location.hash = t; nav(); show(); } });
+$('#refresh').addEventListener('click', () => { for (const k in store) delete store[k]; show(true); });
+
+function pill(s) {
+  const words = {running: 'Running', standby: 'Standby', starting: 'Starting', down: 'Down', failing: 'Failing checks'};
+  const p = $('#pill');
+  p.className = 'pill ' + (words[s.state] ? s.state : 'unknown');
+  p.textContent = (words[s.state] || 'Unknown') + (s.state === 'standby' ? '' : ', ' + s.running + (s.running === 1 ? ' task' : ' tasks'));
+}
+
+// ---- small charts ---------------------------------------------------------
+function bars(perHour) {
+  const W = 720, H = 150, n = perHour.length, top = Math.max(1, ...perHour.map((p) => p[1] + p[2]));
+  const bw = (W - 40) / n;
+  let s = `<svg viewBox="0 0 ${W} ${H + 22}" class="bars"><line class="axis" x1="34" x2="${W}" y1="${H}" y2="${H}"/>`;
+  s += `<text class="tick" x="28" y="12" text-anchor="end">${top}</text><text class="tick" x="28" y="${H}" text-anchor="end">0</text>`;
+  perHour.forEach((p, i) => {
+    const x = 36 + i * bw, ok = p[1] / top * (H - 8), bad = p[2] / top * (H - 8);
+    s += `<rect x="${x.toFixed(1)}" y="${(H - ok - bad).toFixed(1)}" width="${Math.max(1, bw - 3).toFixed(1)}" height="${ok.toFixed(1)}" rx="2"><title>${when(p[0])}: ${p[1]} answered, ${p[2]} failed</title></rect>`;
+    if (bad) s += `<rect class="f" x="${x.toFixed(1)}" y="${(H - bad).toFixed(1)}" width="${Math.max(1, bw - 3).toFixed(1)}" height="${bad.toFixed(1)}" rx="2"/>`;
+    if (i % Math.ceil(n / 8) === 0) s += `<text class="tick" x="${x.toFixed(1)}" y="${H + 16}">${n > 48 ? day(p[0]) : clock(p[0])}</text>`;
+  });
+  return s + '</svg>';
+}
+function lines(a, b, unit, fixedTop) {
+  const W = 720, H = 130, all = (a || []).concat(b || []);
+  if (!all.length) return '<p class="note">No measurements in this period.</p>';
+  const t0 = Math.min(...all.map((p) => p[0])), t1 = Math.max(...all.map((p) => p[0])) || t0 + 1;
+  const top = Math.min(fixedTop || Infinity, Math.max(fixedTop ? 10 : 0, Math.max(...all.map((p) => p[1])) * 1.15)) || 1;
+  const X = (t) => 40 + (t - t0) / Math.max(1, t1 - t0) * (W - 44), Y = (v) => H - Math.min(v, top) / top * (H - 8);
+  const path = (s) => s.map((p, i) => (i ? 'L' : 'M') + X(p[0]).toFixed(1) + ' ' + Y(p[1]).toFixed(1)).join('');
+  let s = `<svg viewBox="0 0 ${W} ${H + 22}"><line class="axis" x1="38" x2="${W}" y1="${H}" y2="${H}"/><line class="gridline" x1="38" x2="${W}" y1="${Y(top / 2)}" y2="${Y(top / 2)}"/>`;
+  s += `<text class="tick" x="34" y="12" text-anchor="end">${+top.toPrecision(2)}${unit}</text><text class="tick" x="34" y="${H}" text-anchor="end">0</text>`;
+  for (let i = 0; i <= 6; i++) { const t = t0 + (t1 - t0) * i / 6; s += `<text class="tick" x="${X(t).toFixed(1)}" y="${H + 16}" text-anchor="${i === 6 ? 'end' : 'start'}">${t1 - t0 > 172800 ? day(t) : clock(t)}</text>`; }
+  if (b && b.length) s += `<path class="line b" d="${path(b)}"/>`;
+  if (a && a.length) s += `<path class="line" d="${path(a)}"/>`;
+  return s + '</svg>';
+}
+const last = (s) => s && s.length ? s[s.length - 1][1] : null;
+const total = (s) => (s || []).reduce((n, p) => n + p[1], 0);
+const meter = (name, frac, text) => `<div class="row"><span class="label">${name}</span><div class="meter"><i style="width:${Math.max(0, Math.min(100, (frac || 0) * 100)).toFixed(0)}%"></i></div><span>${text}</span></div>`;
+const tile = (label, big, note) => `<div class="card"><div class="label">${label}</div><div class="big">${big}</div><div class="note">${note || '&nbsp;'}</div></div>`;
+
+function canaryTile(c) {
+  if (!c.door) return tile('Service checks', '<span class="dot"></span>Not set up', 'the service does not admit the panel yet');
+  const l = c.last;
+  if (!l) return tile('Service checks', '<span class="dot"></span>No run yet', 'the canary runs every few minutes');
+  if (l.skipped) return tile('Service checks', '<span class="dot"></span>Paused', l.skipped === 'standby' ? 'no checks while in standby' : 'the service does not admit the panel yet');
+  return tile('Service checks', `<span class="dot ${l.ok ? 'ok' : 'bad'}"></span>${l.ok ? 'Passing' : 'Failing'}`,
+              `canary ${ago(l.at)}, ${ms(l.ms)}`);
+}
+
+// ---- views ----------------------------------------------------------------
+const VIEW = {
+  async Status(fresh) {
+    const [s, load, cost, act, ds] = await Promise.all([
+      get('status', null, fresh), get('load', {hours: 24}, fresh).catch((e) => ({error: e.message})),
+      get('cost', null, fresh).catch((e) => ({error: e.message})),
+      get('activity', {hours: 24}, fresh).catch((e) => ({error: e.message})),
+      get('datasets', null, fresh).catch((e) => ({error: e.message}))]);
+    pill(s);
+    const today = cost.days ? cost.days[cost.days.length - 1] : null;
+    const daily = (cost.budgets || []).find((b) => b.unit === 'DAILY');
+    const hourAgo = Date.now() / 1000 - 3600;
+    const lastHour = load.series ? (load.series.requests || []).filter((p) => p[0] >= hourAgo).reduce((n, p) => n + p[1], 0) : null;
+    let h = '<div class="grid g4">';
+    h += canaryTile(s.canary);
+    h += tile('Tasks', s.running + (s.desired !== s.running ? ` <span class="note">of ${s.desired} wanted</span>` : ''), 'most allowed:  ' + s.taskCap);
+    h += tile('Requests, last hour', lastHour == null ? '?' : num(lastHour),
+              act.recorded ? `${num(act.totals.queries)} queries in 24 h, ${num(act.totals.failed)} failed` : 'queries are not recorded yet');
+    h += tile('Cost today', today ? money(today.total) : '?', (daily ? 'alarm at ' + money(daily.limit) + ';  ' : '') + 'whole account');
+    h += '</div>';
+
+    h += '<div class="grid g2 gap"><div class="card"><h2>' + (act.recorded ? 'Queries per hour, last 24 hours' : 'Requests, last 24 hours') + '</h2>';
+    if (act.recorded) h += bars(act.perHour);
+    else if (load.series) h += lines(load.series.requests, null, '') + '<p class="note">Requests reaching the load balancer, in 5-minute counts.  Query counts appear once the service records its queries.</p>';
+    else h += `<p class="note">${esc(load.error)}</p>`;
+    h += '</div><div class="card"><h2>Load</h2>';
+    if (load.series) {
+      const cpu = last(load.series.cpu), mem = last(load.series.memory);
+      h += meter('CPU', cpu / 100, cpu == null ? 'none' : cpu.toFixed(0) + '%') + meter('Memory', mem / 100, mem == null ? 'none' : mem.toFixed(0) + '%');
+      const p95 = last(load.series.responseP95);
+      h += `<p class="note">Response time, 95th percentile:  ${p95 == null ? 'no requests' : ms(Math.round(p95 * 1000))}</p>`;
+      h += `<p class="note">Work area:  ${load.workArea ? bytes(load.workArea.bytes) : 'unknown'}</p>`;
+    } else h += `<p class="note">${esc(load.error)}</p>`;
+    h += '</div></div>';
+
+    h += '<div class="card gap"><h2>Datasets</h2>' + (ds.tables ? datasetTable(ds, true) : `<p class="note">${esc(ds.error)}</p>`) + '</div>';
+
+    if (s.canary.history && s.canary.history.length) {
+      h += `<div class="card gap"><h2>Service checks, last ${s.canary.history.length} runs</h2><div class="strip">` +
+        s.canary.history.map((c) => `<i class="${c.ok === null ? 'skip' : c.ok ? '' : 'bad'}" title="${when(c.at)}: ${c.ok === null ? 'skipped' : c.ok ? 'passed, ' + ms(c.ms) : 'failed'}"></i>`).join('') +
+        `</div><p class="note">${s.canary.day.runs} runs in the last 24 hours, ${s.canary.day.failed} failed.</p>` + canaryDetail(s.canary.last) + '</div>';
+    }
+    h += '<div class="card gap"><h2>Service events</h2><table>' + s.events.map((e) => `<tr><td class="note" style="white-space:nowrap">${when(e.at)}</td><td>${esc(e.message)}</td></tr>`).join('') + '</table></div>';
+    return h;
+  },
+
+  async Activity(fresh) {
+    const hours = +(sessionStorage.getItem('hours') || 24);
+    const a = await get('activity', {hours}, fresh);
+    let h = hoursPicker(hours);
+    if (!a.recorded) h += '<div class="notice">No query records found in this period.  The service writes one line per request (starting with <code>TAPQ</code>) only from the version that includes this panel\'s changes;  until that version is deployed, see Load for request counts.</div>';
+    const t = a.totals;
+    h += '<div class="grid g4">' + tile('Queries', num(t.queries), num(t.async) + ' of them async jobs') + tile('Failed', num(t.failed), t.queries ? (100 * t.failed / t.queries).toFixed(1) + '% of queries' : '') +
+         tile('Median time', t.medianMs == null ? 'none' : ms(t.medianMs), t.p95Ms == null ? '' : '95th percentile ' + ms(t.p95Ms)) + tile('Requests of every kind', num(t.requests), 'including status and metadata requests') + '</div>';
+    h += `<div class="card gap"><h2>Queries per hour</h2>${bars(a.perHour)}<p class="note">Blue answered, red failed.</p></div>`;
+    h += '<div class="card gap"><h2>Clients</h2><div class="scroll"><table><tr><th>Client</th><th class="num">Requests</th><th class="num">Queries</th><th class="num">Failed</th><th class="num">Rows returned</th><th class="num">Query time</th></tr>' +
+      a.clients.map((c) => `<tr><td class="mono">${esc(c.client)}</td><td class="num">${num(c.requests)}</td><td class="num">${num(c.queries)}</td><td class="num">${num(c.failed)}</td><td class="num">${num(c.rows)}</td><td class="num">${ms(c.ms)}</td></tr>`).join('') +
+      '</table></div><p class="note">"panel" is this panel\'s canary.  127.0.0.1 is Firefly, on behalf of all of its users.</p></div>';
+    h += queryCard('Failed queries', a.failed, true) + queryCard('Slowest queries', a.slow) + queryCard('Most recent queries', a.recent);
+    return h;
+  },
+
+  async Load(fresh) {
+    const hours = +(sessionStorage.getItem('hours') || 24);
+    const l = await get('load', {hours}, fresh), s = l.series;
+    let h = hoursPicker(hours);
+    h += '<div class="grid g4">' + tile('Requests', num(total(s.requests)), 'reaching the load balancer') + tile('Server errors', num(total(s.errors5xx) + total(s.gateway5xx)), '5xx answers') +
+         tile('Refused or bad', num(total(s.refused429)), '4xx answers, limits included') + tile('Work area', l.workArea ? bytes(l.workArea.bytes) : '?', 'async results and uploads') + '</div>';
+    h += `<div class="grid g11 gap"><div class="card"><h2>CPU, percent of the task</h2>${lines(s.cpu, s.cpuMax, '%', 100)}<p class="note">Blue average, amber peak.</p></div>` +
+         `<div class="card"><h2>Memory, percent of the task</h2>${lines(s.memory, s.memoryMax, '%', 100)}<p class="note">Blue average, amber peak.</p></div></div>`;
+    h += `<div class="grid g11 gap"><div class="card"><h2>Requests per ${l.period / 60} minutes</h2>${lines(s.requests, null, '')}</div>` +
+         `<div class="card"><h2>Response time, seconds</h2>${lines(s.responseP50, s.responseP95, ' s')}<p class="note">Blue median, amber 95th percentile.</p></div></div>`;
+    const L = l.limits || {};
+    h += '<div class="card gap"><h2>Limits in force</h2><table>' +
+      [['Requests in progress, one client, per task', L.ClientLimit], ['Async jobs running, one client', L.AsyncClientLimit], ['Async jobs running, in all', L.AsyncLimit],
+       ['Memory, one query', L.QueryMemory], ['Time, one query', (L.QueryTimeout || '?') + ' s'], ['Rows, one result', num(L.MaxRecLimit)]]
+        .map((r) => `<tr><td>${r[0]}</td><td class="num">${esc(r[1] ?? '?')}</td></tr>`).join('') + '</table><p class="note">Settings of the service\'s stack.  Changing them from here is stage 2.</p></div>';
+    return h;
+  },
+
+  async Datasets(fresh) {
+    const d = await get('datasets', null, fresh);
+    let h = d.problem ? `<div class="notice">Table details could not be read from the service:  ${esc(d.problem)}  Sizes below come from the bucket.</div>` : '';
+    h += `<div class="card"><h2>Datasets</h2>${datasetTable(d)}<p class="note">${bytes(d.totalBytes)} in <code>s3://${esc(d.bucket)}/${esc(d.prefix)}/</code>.  Upload and ingest from here are stage 3.</p></div>`;
+    return h;
+  },
+
+  async Cost(fresh) {
+    const c = await get('cost', null, fresh);
+    const top = Math.max(0.01, ...c.days.map((d) => d.total));
+    const names = {};
+    c.days.forEach((d) => Object.entries(d.parts).forEach(([k, v]) => { names[k] = (names[k] || 0) + v; }));
+    const order = Object.keys(names).sort((a, b) => names[b] - names[a]);
+    let h = '<div class="grid g4">' + tile('Today so far', money(c.days[c.days.length - 1].total), 'AWS reports cost hours late') + tile('Yesterday', money((c.days[c.days.length - 2] || {}).total)) +
+      tile('This month', money(c.month), c.forecast ? 'forecast ' + money(c.forecast) : '') +
+      tile('Alarms', (c.budgets || []).map((b) => money(b.limit) + (b.unit === 'DAILY' ? ' a day' : ' a month')).join('<span class="note">,</span> ') || 'none', 'email when passed;  they stop nothing') + '</div>';
+    h += '<div class="card gap"><h2>Cost by day, last two weeks</h2><div class="scroll"><table><tr><th>Day</th><th class="num">Total</th><th style="width:30%"></th>' + order.map((n) => `<th class="num">${esc(short(n))}</th>`).join('') + '</tr>' +
+      c.days.slice().reverse().map((d) => `<tr><td>${esc(d.day)}</td><td class="num">${money(d.total)}</td><td><div class="meter"><i style="width:${(100 * d.total / top).toFixed(0)}%"></i></div></td>` +
+        order.map((n) => `<td class="num">${d.parts[n] ? d.parts[n].toFixed(2) : ''}</td>`).join('') + '</tr>').join('') + '</table></div>' +
+      `<p class="note">These figures are for the ${esc(c.scope)}, not this project alone.  Read from AWS ${ago(c.at)};  the panel reads Cost Explorer a few times a day because each reading is charged for.</p></div>`;
+    return h;
+  },
+
+  async Components(fresh) {
+    const c = await get('components', null, fresh), v = c.versions || {};
+    const up = Object.fromEntries((c.upstream || []).map((u) => [u.repo, u]));
+    const tap = c.images.find((i) => i.repo.endsWith('-tap')) || {};
+    const firefly = (c.task.containers.find((x) => x.name === 'firefly') || {}).image || '';
+    const rows = [
+      ['Service code', 'fork commit ' + ((tap.tags || [])[0] || '?').slice(0, 7), tap.pushed ? 'image built ' + when(tap.pushed) : '', esc(c.stack.sourceRepo || '') + ' @ ' + esc(c.stack.sourceRef || '')],
+      ['nexsciTAP', v.nexsciTAP || 'not reported yet', '', rel(up['Caltech-IPAC/nexsciTAP'], v.nexsciTAP)],
+      ['DuckDB', v.duckdb || 'not reported yet', '', rel(up['duckdb/duckdb'], v.duckdb)],
+      ['Python', v.python || 'not reported yet', '', ''],
+      ['pyarrow', v.pyarrow || 'not reported yet', '', ''],
+      ['Firefly', esc(firefly), '', rel(up['Caltech-IPAC/firefly'], null)],
+      ['Task', esc(c.task.definition), `${c.task.cpu / 1024} vCPU, ${c.task.memory / 1024} GB`, ''],
+      ['Stack', esc(c.stack.name), esc(c.stack.status || ''), 'changed ' + when(c.stack.updated)],
+      ['Access', (c.stack.allowed || []).map(esc).join(', '), '', 'address ranges admitted to the service'],
+    ];
+    let h = '<div class="card"><h2>Components and versions</h2><div class="scroll"><table><tr><th>Piece</th><th>Running</th><th></th><th>Upstream</th></tr>' +
+      rows.map((r) => `<tr><td>${r[0]}</td><td class="mono">${r[1]}</td><td class="note">${r[2]}</td><td class="note">${r[3]}</td></tr>`).join('') + '</table></div>' +
+      (c.versions ? `<p class="note">Versions as the service reported them at its last start, ${when(v.reported)}.</p>` : '<p class="note">The service reports its own versions (a line starting with <code>TAPV</code>) only from the version that includes this panel\'s changes.</p>') + '</div>';
+    h += '<div class="card gap"><h2>Images</h2><table><tr><th>Repository</th><th>Tags on the running image</th><th>Pushed</th></tr>' +
+      c.images.map((i) => `<tr><td class="mono">${esc(i.repo)}</td><td class="mono">${esc((i.tags || []).join(', '))}</td><td>${when(i.pushed)}</td></tr>`).join('') + '</table></div>';
+    h += '<div class="card gap"><h2>Builds and deployments</h2><table><tr><th class="num">Build</th><th>Started</th><th>Took</th><th>Result</th><th>Commit</th></tr>' +
+      c.builds.map((b) => `<tr><td class="num">${b.number}</td><td>${when(b.started)}</td><td>${b.ended ? Math.round((b.ended - b.started) / 60) + ' min' : 'running'}</td><td class="${b.status === 'SUCCEEDED' ? 'goodText' : b.status === 'IN_PROGRESS' ? '' : 'badText'}">${esc(b.status.toLowerCase().replace('_', ' '))}</td><td class="mono">${esc(b.commit)}</td></tr>`).join('') +
+      '</table><p class="note">Rebuild, redeploy and roll back from here are stage 2.</p></div>';
+    return h;
+  },
+
+  async Logs(fresh) {
+    const p = {minutes: sessionStorage.getItem('logMinutes') || '60', container: sessionStorage.getItem('logContainer') || '', q: sessionStorage.getItem('logQ') || ''};
+    const l = await get('logs', p, fresh);
+    let h = '<div class="card"><div class="tools"><select id="lc">' + ['', 'tap', 'firefly', 'proxy'].map((c) => `<option value="${c}" ${c === p.container ? 'selected' : ''}>${c || 'all containers'}</option>`).join('') + '</select>' +
+      '<select id="lm">' + [[15, 'last 15 minutes'], [60, 'last hour'], [360, 'last 6 hours'], [1440, 'last 24 hours']].map((m) => `<option value="${m[0]}" ${String(m[0]) === String(p.minutes) ? 'selected' : ''}>${m[1]}</option>`).join('') + '</select>' +
+      `<input id="lq" placeholder="text to find" value="${esc(p.q)}" size="26"><button id="lgo">Show</button><span class="note">${num(l.found)} lines found, newest ${l.lines.length} shown</span></div>`;
+    h += '<div class="log">' + (l.lines.map((x) => `<span class="t">${when(x.at)}</span> <span class="c">${esc(x.container)}</span> ${esc(x.message)}`).join('\n') || 'No lines.') + '</div></div>';
+    setTimeout(() => {
+      const go = () => { sessionStorage.setItem('logContainer', $('#lc').value); sessionStorage.setItem('logMinutes', $('#lm').value); sessionStorage.setItem('logQ', $('#lq').value); show(true); };
+      $('#lgo').onclick = go; $('#lq').onkeydown = (e) => { if (e.key === 'Enter') go(); };
+      const box = document.querySelector('.log'); if (box) box.scrollTop = box.scrollHeight;
+    });
+    return h;
+  },
+};
+
+function short(n) { return n.replace('Amazon ', '').replace('AWS ', '').replace('Elastic Container Service', 'ECS (tasks)').replace('Elastic Load Balancing', 'Load balancer').replace('Virtual Private Cloud', 'Public addresses').replace('Simple Storage Service', 'S3').replace('Elastic File System', 'EFS').replace('EC2 Container Registry (ECR)', 'ECR').replace('Elastic Compute Cloud - Compute', 'EC2'); }
+function rel(u, have) { if (!u) return ''; if (u.error) return 'could not check'; const same = have && String(u.tag).replace(/^v/, '') === String(have).replace(/^v/, ''); return `latest release ${esc(u.tag)}${have ? (same ? ' <span class="goodText">(same)</span>' : ' <span class="warnText">(differs)</span>') : ''}`; }
+function hoursPicker(hours) {
+  setTimeout(() => { const s = $('#hp'); if (s) s.onchange = () => { sessionStorage.setItem('hours', s.value); show(); }; });
+  return '<div class="tools"><select id="hp">' + [[6, 'last 6 hours'], [24, 'last 24 hours'], [72, 'last 3 days'], [168, 'last 7 days']].map((m) => `<option value="${m[0]}" ${m[0] === hours ? 'selected' : ''}>${m[1]}</option>`).join('') + '</select></div>';
+}
+function canaryDetail(l) {
+  if (!l || !l.checks || !l.checks.length) return '';
+  return '<table class="gap"><tr><th>Check</th><th class="num">Expected</th><th class="num">Got</th><th class="num">Time</th><th>Result</th></tr>' + l.checks.map((c) =>
+    `<tr><td>${esc(c.name)}</td><td class="num">${num(c.expected)}</td><td class="num">${num(c.got)}</td><td class="num">${ms(c.ms)}</td><td class="${c.ok ? 'goodText' : 'badText'}">${c.ok ? 'pass' : esc(c.error || 'wrong answer')}</td></tr>`).join('') + '</table>';
+}
+function datasetTable(d, brief) {
+  return '<div class="scroll"><table><tr><th>Table</th><th class="num">Rows</th><th class="num">Size</th><th class="num">Files</th><th class="num">Columns</th><th>Metadata</th><th class="num">Queries, 24 h</th>' + (brief ? '' : '<th>Changed</th><th>Description</th>') + '</tr>' +
+    d.tables.map((t) => {
+      const meta = t.columns == null ? '<span class="note">unknown</span>' : (t.noUnit || t.noDescription) ? `<span class="note">${t.noDescription ? t.noDescription + ' lack a description' : 'all described'};  ${t.noUnit} have no unit</span>` : 'complete';
+      const state = t.served === false ? ' <span class="warnText">(in the bucket, not served)</span>' : t.folder ? '' : ' <span class="warnText">(served, no folder found)</span>';
+      return `<tr><td class="mono">${esc(t.table)}${state}</td><td class="num">${num(t.rows)}</td><td class="num">${bytes(t.bytes)}</td><td class="num">${num(t.files)}</td><td class="num">${num(t.columns)}</td><td>${meta}</td><td class="num">${num(t.queries24h)}</td>` +
+        (brief ? '' : `<td class="note" style="white-space:nowrap">${when(t.modified)}</td><td class="note">${esc(t.description || '')}</td>`) + '</tr>';
+    }).join('') + '</table></div>';
+}
+function queryCard(title, list, withError) {
+  if (!list || !list.length) return '';
+  return `<div class="card gap"><h2>${title}</h2><div class="scroll"><table><tr><th>When</th><th>Client</th><th class="num">Time</th><th class="num">Rows</th><th>Query</th></tr>` +
+    list.map((r) => `<tr><td class="note" style="white-space:nowrap">${when(r.t)}</td><td class="mono">${esc(r.client)}</td><td class="num">${ms(r.ms)}</td><td class="num">${r.phase === 'ERROR' ? '<span class="badText">failed</span>' : num(r.rows)}</td><td class="mono q">${esc(r.q)}${r.job ? ' <span class="note">(async)</span>' : ''}${withError || r.err ? `<div class="badText">${esc(r.err || '')}</div>` : ''}</td></tr>`).join('') + '</table></div></div>';
+}
+
+let turn = 0;
+async function show(fresh) {
+  const mine = ++turn, main = $('#main');
+  if (!main.innerHTML) main.innerHTML = '<p class="note">Reading…</p>';
+  try {
+    const html = await VIEW[tab](fresh);
+    if (mine !== turn) return;
+    main.innerHTML = html;
+    if (tab !== 'Status') get('status').then(pill).catch(() => {});
+    $('#foot').textContent = 'Read ' + new Date().toLocaleTimeString() + '.  The panel changes nothing in the service.';
+  } catch (e) {
+    if (mine === turn) main.innerHTML = `<div class="notice err">This view could not be read:  ${esc(e.message)}</div>`;
+  }
+}
+nav(); show();
+setInterval(() => { if (document.visibilityState === 'visible' && tab === 'Status') show(true); }, 120000);
+</script>
+</body>
+</html>
