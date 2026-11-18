@@ -438,6 +438,8 @@ def test_every_request_leaves_a_record(fixture_root: Path):
 
     done = [r for r in recs if r["job"]]
     assert len(done) == 1 and done[0]["phase"] == "COMPLETED" and done[0]["rows"] == 10
+    assert done[0]["id"] == job.rsplit("/", 1)[1]
+    assert all(r["id"] == done[0]["id"] for r in recs if "/async/" in r["path"])
 
     # Looking at a job is a request too, but not a query.
     looks = [r for r in recs if r["path"].endswith("/phase")]

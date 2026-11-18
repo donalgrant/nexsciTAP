@@ -379,6 +379,7 @@ def log_query(method, path_info, client, started, status, tap, is_job, asked='')
                 has a line of its own
         phase   COMPLETED or ERROR for a query that ran; absent otherwise
         rows    rows returned, for a query that completed
+        id      the job, for a request about an async job
         fmt, q  the output format and the query as the client sent it (ADQL).
                 For a job started by a later request, which carries no
                 query, q is the service's translation of it
@@ -399,6 +400,12 @@ def log_query(method, path_info, client, started, status, tap, is_job, asked='')
         if query:
             rec['q'] = ' '.join(str(query).split())[:QUERY_TEXT_LIMIT]
             rec['fmt'] = getattr(tap, 'format', '') or ''
+
+        # Which job, for a request about one: what an administrator needs
+        # to find it again or to stop it.
+        jobid = getattr(tap, 'id', '') or getattr(tap, 'workspace', '') or ''     # a new job has no id yet, only its place
+        if jobid and (path_info or '').startswith('/async'):
+            rec['id'] = str(jobid)
 
         said = getattr(tap, 'said', None)
 

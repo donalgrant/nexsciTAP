@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >-
-  Archive in a Box - the administrator's control panel, stage 1 (views only).
+  Archive in a Box - the administrator's control panel (views and controls).
   A static page and one Lambda function behind CloudFront, beside the service's
   stack and independent of it:  deleting this stack leaves the service as it is.
 
@@ -88,7 +88,7 @@ Resources:
         - PolicyName: read-the-service
           PolicyDocument:
             Statement:
-              # Stage 1 reads.  Nothing here can change the service.
+              # Reads.  Nothing in this policy can change the service.
               - Effect: Allow
                 Action: ecs:DescribeServices
                 Resource: !Sub arn:aws:ecs:${AWS::Region}:${AWS::AccountId}:service/${ServiceStack}/*
@@ -123,6 +123,33 @@ Resources:
                 Resource: !Sub arn:aws:s3:::${CatalogBucket}
                 Condition:
                   StringLike: {s3:prefix: !Sub '${CatalogPrefix}/*'}
+        - PolicyName: controls
+          PolicyDocument:
+            Statement:
+              # Stage 2.  The whole of what the panel can change in the service.
+              - Sid: TaskCountAndRestart
+                Effect: Allow
+                Action: ecs:UpdateService
+                Resource: !Sub arn:aws:ecs:${AWS::Region}:${AWS::AccountId}:service/${ServiceStack}/${ServiceStack}
+              - Sid: PausedPage
+                Effect: Allow
+                Action: elasticloadbalancing:ModifyRule
+                Resource: !Sub arn:aws:elasticloadbalancing:${AWS::Region}:${AWS::AccountId}:listener-rule/app/*
+                Condition:
+                  StringEquals: {'aws:ResourceTag/aws:cloudformation:stack-name': !Ref ServiceStack}
+              - Effect: Allow
+                Action: [elasticloadbalancing:DescribeRules, elasticloadbalancing:DescribeTargetHealth]
+                Resource: '*'
+              - Sid: Rebuild
+                Effect: Allow
+                Action: codebuild:StartBuild
+                Resource: !Sub arn:aws:codebuild:${AWS::Region}:${AWS::AccountId}:project/${BuildProject}
+              - Sid: RollBackTheLiveTag
+                Effect: Allow
+                Action: [ecr:BatchGetImage, ecr:PutImage]
+                Resource:
+                  - !Sub arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${ImagePrefix}-tap
+                  - !Sub arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${ImagePrefix}-proxy
         - PolicyName: own-state
           PolicyDocument:
             Statement:
@@ -188,7 +215,7 @@ Resources:
     Type: AWS::Events::Rule
     DependsOn: FunctionLogs
     Properties:
-      Description: Archive in a Box control panel - run the canary
+      Description: Archive in a Box control panel - canary, standby schedule, return from standby
       ScheduleExpression: !Sub rate(${CanaryMinutes} minutes)
       Targets:
         - {Id: canary, Arn: !GetAtt Function.Arn, Input: '{"canary": true}'}
@@ -280,7 +307,7 @@ Resources:
           - PathPattern: /api/*
             TargetOriginId: functions
             ViewerProtocolPolicy: redirect-to-https
-            AllowedMethods: [GET, HEAD]
+            AllowedMethods: [GET, HEAD, OPTIONS, PUT, PATCH, POST, DELETE]
             Compress: true
             CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad          # managed: CachingDisabled
             OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac  # managed: AllViewerExceptHostHeader

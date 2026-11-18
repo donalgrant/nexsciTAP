@@ -33,6 +33,12 @@ button, select, input { font: inherit; color: inherit; background: var(--card); 
        border-radius: 6px; padding: 4px 10px; }
 button { cursor: pointer; }
 button:hover { border-color: var(--accent); }
+button:disabled { opacity: .5; cursor: default; }
+button.go { border-color: var(--accent); background: var(--accent-soft); }
+button.sm { padding: 1px 9px; }
+label.d { margin-right: 10px; white-space: nowrap; }
+.form { display: flex; gap: 10px 14px; flex-wrap: wrap; align-items: center; }
+#toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: var(--ink); color: var(--bg); padding: 9px 16px; border-radius: 8px; font-size: 13px; max-width: 80vw; display: none; z-index: 5; }
 nav { display: flex; gap: 22px; margin-top: 12px; overflow-x: auto; }
 nav a { padding: 6px 0 9px; color: var(--quiet); text-decoration: none; border-bottom: 2.5px solid transparent; cursor: pointer; white-space: nowrap; }
 nav a.on { color: var(--ink); font-weight: 600; border-bottom-color: var(--accent); }
@@ -83,18 +89,19 @@ footer { color: var(--quiet); font-size: 12px; text-align: center; padding: 0 24
 <header>
   <div class="top">
     <h1>Archive in a Box&ensp;control panel</h1>
-    <span class="stage">views only (stage 1)</span>
     <span id="pill" class="pill unknown">checking</span>
+    <button id="power" hidden></button>
     <button id="refresh" title="Read everything again">Refresh</button>
   </div>
   <nav id="nav"></nav>
 </header>
 <main id="main"></main>
 <footer id="foot"></footer>
+<div id="toast"></div>
 
 <script>
 'use strict';
-const TABS = ['Status', 'Activity', 'Load', 'Datasets', 'Cost', 'Components', 'Logs'];
+const TABS = ['Status', 'Activity', 'Load', 'Datasets', 'Cost', 'Components', 'Logs', 'Record'];
 const $ = (s) => document.querySelector(s);
 const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
 const num = (v) => v == null ? '' : Number(v).toLocaleString('en-US');
@@ -125,6 +132,33 @@ async function get(name, params, fresh) {
   return v;
 }
 
+async function post(body) {
+  const text = JSON.stringify(body);
+  const hash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text)))).map((b) => b.toString(16).padStart(2, '0')).join('');
+  // CloudFront signs what it passes to the functions, and for a request with a body it needs the body's hash from us.
+  const r = await fetch('/api/control', {method: 'POST', cache: 'no-store', body: text,
+    headers: {'Content-Type': 'application/json', 'X-Panel': '1', 'x-amz-content-sha256': hash}});
+  const out = await r.json().catch(() => ({error: 'The panel could not read the answer (' + r.status + ').'}));
+  if (!r.ok) throw new Error(out.error || ('HTTP ' + r.status));
+  return out;
+}
+let toastTimer;
+function toast(text) { const t = $('#toast'); t.textContent = text; t.style.display = 'block'; clearTimeout(toastTimer); toastTimer = setTimeout(() => { t.style.display = 'none'; }, 6000); }
+async function act(body, done) {
+  try { const out = await post(body); for (const k in store) delete store[k]; toast(done(out)); show(true); }
+  catch (e) { toast('Not done:  ' + e.message); }
+}
+async function setTasks(count, current) {
+  if (count === current) return;
+  if (count === 0) {
+    let jobs = [];
+    try { jobs = (await api('jobs')).jobs; } catch (e) { /* no list; ask anyway */ }
+    const lost = jobs.length ? `\n\n${jobs.length} async job${jobs.length === 1 ? ' is' : 's are'} running and will be lost.` : '';
+    if (!confirm('Put the service in standby?\n\nUsers will see a page saying the archive is paused until it is started again.' + lost)) return;
+  } else if (count > current && !confirm(`Run ${count} task${count === 1 ? '' : 's'}?  Each task costs about $2.80 a day.`)) return;
+  act({action: 'tasks', count}, (o) => count === 0 ? 'Standby:  the task is stopping.' : current === 0 ? 'Starting.  The service answers again in a few minutes.' : `Now asking for ${count} task${count === 1 ? '' : 's'}.`);
+}
+
 function nav() {
   $('#nav').innerHTML = TABS.map((t) => `<a class="${t === tab ? 'on' : ''}" data-t="${t}">${t}</a>`).join('');
 }
@@ -136,6 +170,14 @@ function pill(s) {
   const p = $('#pill');
   p.className = 'pill ' + (words[s.state] ? s.state : 'unknown');
   p.textContent = (words[s.state] || 'Unknown') + (s.state === 'standby' ? '' : ', ' + s.running + (s.running === 1 ? ' task' : ' tasks'));
+  const b = $('#power');
+  b.hidden = false;
+  b.textContent = s.desired === 0 ? 'Start the service' : 'Standby';
+  b.className = s.desired === 0 ? 'go' : '';
+  b.onclick = () => setTasks(s.desired === 0 ? Math.max(1, (s.schedule || {}).count || 1) : 0, s.desired);
+  // While it starts, keep asking whether a task answers yet, so users get the service back promptly.
+  clearTimeout(pill.timer);
+  if (s.state === 'starting') pill.timer = setTimeout(async () => { try { await post({action: 'settle'}); } catch (e) { /* next time */ } for (const k in store) delete store[k]; show(true); }, 15000);
 }
 
 // ---- small charts ---------------------------------------------------------
@@ -195,7 +237,10 @@ const VIEW = {
     const lastHour = load.series ? (load.series.requests || []).filter((p) => p[0] >= hourAgo).reduce((n, p) => n + p[1], 0) : null;
     let h = '<div class="grid g4">';
     h += canaryTile(s.canary);
-    h += tile('Tasks', s.running + (s.desired !== s.running ? ` <span class="note">of ${s.desired} wanted</span>` : ''), 'most allowed:  ' + s.taskCap);
+    h += tile('Tasks', s.running + (s.desired !== s.running ? ` <span class="note">of ${s.desired} wanted</span>` : '') +
+              `<span style="flex:1"></span><button class="sm" id="tminus" ${s.desired <= 0 ? 'disabled' : ''} title="One task fewer">&minus;</button><button class="sm" id="tplus" ${s.desired >= s.taskCap ? 'disabled' : ''} title="One task more">+</button>`,
+              'most allowed:  ' + s.taskCap);
+    setTimeout(() => { const m = $('#tminus'), p = $('#tplus'); if (m) m.onclick = () => setTasks(s.desired - 1, s.desired); if (p) p.onclick = () => setTasks(s.desired + 1, s.desired); });
     h += tile('Requests, last hour', lastHour == null ? '?' : num(lastHour),
               act.recorded ? `${num(act.totals.queries)} queries in 24 h, ${num(act.totals.failed)} failed` : 'queries are not recorded yet');
     h += tile('Cost today', today ? money(today.total) : '?', (daily ? 'alarm at ' + money(daily.limit) + ';  ' : '') + 'whole account');
@@ -222,6 +267,7 @@ const VIEW = {
         s.canary.history.map((c) => `<i class="${c.ok === null ? 'skip' : c.ok ? '' : 'bad'}" title="${when(c.at)}: ${c.ok === null ? 'skipped' : c.ok ? 'passed, ' + ms(c.ms) : 'failed'}"></i>`).join('') +
         `</div><p class="note">${s.canary.day.runs} runs in the last 24 hours, ${s.canary.day.failed} failed${s.canary.day.skipped ? ', ' + s.canary.day.skipped + ' skipped' : ''}.</p>` + canaryDetail(s.canary.last) + '</div>';
     }
+    h += scheduleCard(s);
     h += '<div class="card gap"><h2>Service events</h2><table>' + s.events.map((e) => `<tr><td class="note" style="white-space:nowrap">${when(e.at)}</td><td>${esc(e.message)}</td></tr>`).join('') + '</table></div>';
     return h;
   },
@@ -234,6 +280,11 @@ const VIEW = {
     const t = a.totals;
     h += '<div class="grid g4">' + tile('Queries', num(t.queries), num(t.async) + ' of them async jobs') + tile('Failed', num(t.failed), t.queries ? (100 * t.failed / t.queries).toFixed(1) + '% of queries' : '') +
          tile('Median time', t.medianMs == null ? 'none' : ms(t.medianMs), t.p95Ms == null ? '' : '95th percentile ' + ms(t.p95Ms)) + tile('Requests of every kind', num(t.requests), 'including status and metadata requests') + '</div>';
+    const j = await get('jobs', null, fresh).catch((e) => ({jobs: [], problem: e.message}));
+    h += '<div class="card gap"><h2>Async jobs running now</h2>' + (j.jobs.length ? '<div class="scroll"><table><tr><th>Job</th><th>Client</th><th>Started</th><th>Query</th><th></th></tr>' +
+      j.jobs.map((x) => `<tr><td class="mono">${esc(x.id)}</td><td class="mono">${esc(x.client)}</td><td class="note" style="white-space:nowrap">${when(x.started)}</td><td class="mono q">${esc(x.q)}</td><td><button class="sm" data-abort="${esc(x.id)}">Stop</button></td></tr>`).join('') + '</table></div>'
+      : `<p class="note">${j.problem ? esc(j.problem) : 'None.'}</p>`) + '<p class="note">A sync query cannot be stopped from here;  the service ends it after its time limit.</p></div>';
+    setTimeout(() => document.querySelectorAll('[data-abort]').forEach((b) => { b.onclick = () => { if (confirm('Stop job ' + b.dataset.abort + '?  Its client will see it as aborted.')) act({action: 'abort', id: b.dataset.abort}, (o) => 'Job ' + o.job + ' is now ' + o.phase + '.'); }; }));
     h += `<div class="card gap"><h2>Queries per hour</h2>${bars(a.perHour)}<p class="note">Blue answered, red failed.</p></div>`;
     h += '<div class="card gap"><h2>Clients</h2><div class="scroll"><table><tr><th>Client</th><th class="num">Requests</th><th class="num">Queries</th><th class="num">Failed</th><th class="num">Rows returned</th><th class="num">Query time</th></tr>' +
       a.clients.map((c) => `<tr><td class="mono">${esc(c.client)}</td><td class="num">${num(c.requests)}</td><td class="num">${num(c.queries)}</td><td class="num">${num(c.failed)}</td><td class="num">${num(c.rows)}</td><td class="num">${ms(c.ms)}</td></tr>`).join('') +
@@ -256,7 +307,7 @@ const VIEW = {
     h += '<div class="card gap"><h2>Limits in force</h2><table>' +
       [['Requests in progress, one client, per task', L.ClientLimit], ['Async jobs running, one client', L.AsyncClientLimit], ['Async jobs running, in all', L.AsyncLimit],
        ['Memory, one query', L.QueryMemory], ['Time, one query', (L.QueryTimeout || '?') + ' s'], ['Rows, one result', num(L.MaxRecLimit)]]
-        .map((r) => `<tr><td>${r[0]}</td><td class="num">${esc(r[1] ?? '?')}</td></tr>`).join('') + '</table><p class="note">Settings of the service\'s stack.  Changing them from here is stage 2.</p></div>';
+        .map((r) => `<tr><td>${r[0]}</td><td class="num">${esc(r[1] ?? '?')}</td></tr>`).join('') + '</table><p class="note">Settings of the service\'s stack.  They are not changed from here yet.</p></div>';
     return h;
   },
 
@@ -306,7 +357,14 @@ const VIEW = {
       c.images.map((i) => `<tr><td class="mono">${esc(i.repo)}</td><td class="mono">${esc((i.tags || []).join(', '))}</td><td>${when(i.pushed)}</td></tr>`).join('') + '</table></div>';
     h += '<div class="card gap"><h2>Builds and deployments</h2><table><tr><th class="num">Build</th><th>Started</th><th>Took</th><th>Result</th><th>Commit</th></tr>' +
       c.builds.map((b) => `<tr><td class="num">${b.number}</td><td>${when(b.started)}</td><td>${b.ended ? Math.round((b.ended - b.started) / 60) + ' min' : 'running'}</td><td class="${b.status === 'SUCCEEDED' ? 'goodText' : b.status === 'IN_PROGRESS' ? '' : 'badText'}">${esc(b.status.toLowerCase().replace('_', ' '))}</td><td class="mono">${esc(b.commit)}</td></tr>`).join('') +
-      '</table><p class="note">Rebuild, redeploy and roll back from here are stage 2.</p></div>';
+      '</table><div class="tools gap"><button id="rebuild">Rebuild and redeploy</button><span class="note">Builds the branch\'s latest commit and restarts the tasks one at a time.  About ten minutes.</span></div></div>';
+    h += '<div class="card gap"><h2>Earlier images</h2><table><tr><th>Commit</th><th>Built</th><th></th></tr>' +
+      (c.earlier || []).map((i) => `<tr><td class="mono">${esc(i.tag)}</td><td>${when(i.pushed)}</td><td>${i.live ? '<span class="goodText">running</span>' : `<button class="sm" data-back="${esc(i.tag)}">Run this one</button>`}</td></tr>`).join('') +
+      '</table><p class="note">Running an earlier image moves the "live" tag to it and restarts the tasks.  The next rebuild moves it forward again.</p></div>';
+    setTimeout(() => {
+      const r = $('#rebuild'); if (r) r.onclick = () => { if (confirm('Rebuild the service from the latest commit on its branch and redeploy it?')) act({action: 'rebuild'}, (o) => 'Build ' + o.build + ' started.'); };
+      document.querySelectorAll('[data-back]').forEach((b) => { b.onclick = () => { if (confirm('Run the image built from commit ' + b.dataset.back + '?\n\nThe tasks restart one at a time;  the service stays up.')) act({action: 'rollback', tag: b.dataset.back}, (o) => 'Now running ' + o.live + (o.restarted ? ';  tasks are restarting.' : '.')); }; });
+    });
     return h;
   },
 
@@ -326,6 +384,35 @@ const VIEW = {
   },
 };
 
+VIEW.Record = async function (fresh) {
+  const r = await get('record', null, fresh);
+  return '<div class="card"><h2>Record of controls used</h2>' + (r.entries.length ? '<div class="scroll"><table><tr><th>When</th><th>From</th><th>Control</th><th>Detail</th></tr>' +
+    r.entries.map((e) => `<tr><td class="note" style="white-space:nowrap">${when(e.at)}</td><td class="mono">${esc(e.who)}</td><td>${esc(e.action)}</td><td class="mono q">${esc(detail(e))}</td></tr>`).join('') + '</table></div>' : '<p class="note">No control has been used yet.</p>') +
+    '<p class="note">The panel has no sign-in yet, so a control is recorded by the address it came from.  "schedule" is the panel\'s own timer.</p></div>';
+};
+function detail(e) {
+  const d = e.detail || {};
+  if (d.before !== undefined && d.after !== undefined && typeof d.before !== 'object') return d.before + ' \u2192 ' + d.after + (d.why === 'schedule' ? '  (by the schedule)' : '');
+  return JSON.stringify(d);
+}
+const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+function scheduleCard(s) {
+  const c = s.schedule || {};
+  setTimeout(() => {
+    const b = $('#ssave'); if (!b) return;
+    b.onclick = () => act({action: 'schedule', enabled: $('#son').checked, days: DAYS.map((d, i) => $('#sd' + i).checked ? i : -1).filter((i) => i >= 0),
+      start: $('#sstart').value, end: $('#send').value, tz: $('#stz').value, count: +$('#scount').value},
+      (o) => o.schedule.enabled ? 'Schedule saved.  It acts at its next start or stop time.' : 'Schedule saved, and switched off.');
+  });
+  const now = !c.enabled ? 'No schedule:  the service runs until it is put in standby.' : `By the schedule the service should be ${s.scheduleNow === 'run' ? 'running' : 'in standby'} now.  A change made by hand stands until the schedule's next start or stop time.`;
+  return '<div class="card gap"><h2>Standby schedule</h2><div class="form">' +
+    `<label class="d"><input type="checkbox" id="son" ${c.enabled ? 'checked' : ''}> Run only</label>` +
+    DAYS.map((d, i) => `<label class="d"><input type="checkbox" id="sd${i}" ${(c.days || []).includes(i) ? 'checked' : ''}> ${d}</label>`).join('') +
+    `<span>from <input type="time" id="sstart" value="${esc(c.start || '07:00')}"> to <input type="time" id="send" value="${esc(c.end || '19:00')}"></span>` +
+    `<select id="stz">${['America/Los_Angeles', 'America/Denver', 'America/Chicago', 'America/New_York', 'UTC', 'Europe/London', 'Europe/Paris'].map((z) => `<option ${z === c.tz ? 'selected' : ''}>${z}</option>`).join('')}</select>` +
+    `<span>with <select id="scount">${Array.from({length: s.taskCap}, (_, i) => `<option ${i + 1 === (c.count || 1) ? 'selected' : ''}>${i + 1}</option>`).join('')}</select> task(s)</span>` +
+    `<button id="ssave">Save</button></div><p class="note">${now}  Outside those hours the service is in standby.  The timer looks every five minutes.</p></div>`;
+}
 function short(n) { return n.replace('Amazon ', '').replace('AWS ', '').replace('Elastic Container Service', 'ECS (tasks)').replace('Elastic Load Balancing', 'Load balancer').replace('Virtual Private Cloud', 'Public addresses').replace('Simple Storage Service', 'S3').replace('Elastic File System', 'EFS').replace('EC2 Container Registry (ECR)', 'ECR').replace('Elastic Compute Cloud - Compute', 'EC2'); }
 function rel(u, have) { if (!u) return ''; if (u.error) return 'could not check'; const same = have && String(u.tag).replace(/^v/, '') === String(have).replace(/^v/, ''); return `latest release ${esc(u.tag)}${have ? (same ? ' <span class="goodText">(same)</span>' : ' <span class="warnText">(differs)</span>') : ''}`; }
 function hoursPicker(hours) {
@@ -361,7 +448,7 @@ async function show(fresh) {
     if (mine !== turn) return;
     main.innerHTML = html;
     if (tab !== 'Status') get('status').then(pill).catch(() => {});
-    $('#foot').textContent = 'Read ' + new Date().toLocaleTimeString() + '.  The panel changes nothing in the service.';
+    $('#foot').textContent = 'Read ' + new Date().toLocaleTimeString() + '.  Every control used is in the Record.';
   } catch (e) {
     if (mine === turn) main.innerHTML = `<div class="notice err">This view could not be read:  ${esc(e.message)}</div>`;
   }

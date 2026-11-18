@@ -3,14 +3,20 @@
 #   https://github.com/Caltech-IPAC/nexsciTAP/blob/master/LICENSE
 
 """
-The control panel's functions, stage 1:  views only.
+The control panel's functions:  views (stage 1) and controls (stage 2).
 
-One Lambda function answers every "/api/<view>" request of the panel page
-and, on a timer, runs the canary.  It changes nothing in the service:  its
-role may read the service's records and write only the panel's own state
-(the "state/" part of the panel's bucket) and the canary's metrics.
+One Lambda function answers every "/api/<view>" request of the panel page,
+carries out the controls sent to "/api/control", and on a timer runs the
+canary and keeps the standby schedule.
 
-Views:  status, load, activity, datasets, cost, components, logs.
+Views read the service's records.  Controls change four things and no
+others:  how many tasks the service runs (none is standby), what the load
+balancer answers while there are none, which image is tagged "live", and
+whether a build is started.  An async job is stopped by asking the service
+itself, as any TAP client may.  Every control used is written to a record.
+
+Views:  status, load, activity, jobs, datasets, cost, components, logs, record.
+Controls:  tasks, settle, schedule, rebuild, rollback, abort.
 
 Environment:
 
@@ -105,6 +111,22 @@ class ServiceError(Exception):
     pass
 
 
+def service(path, data=None, timeout=30):
+    """A request to the service's TAP through the panel's door; (status, text).  POST when data is given."""
+    if not SECRET:
+        raise ServiceError('The panel has no way into the service yet (no panel secret set).')
+    body = urllib.parse.urlencode(data).encode() if data is not None else None
+    req = urllib.request.Request(SERVICE_URL + '/TAP' + path, data=body,
+                                 headers={'X-Panel-Secret': SECRET, 'User-Agent': 'aiab-panel'})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status, r.read().decode('utf-8', 'replace')
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode('utf-8', 'replace')
+    except Exception as e:
+        raise ServiceError(f'No answer from the service: {e}')
+
+
 def tap(query, timeout=50):
     """Run a sync query on the service through the panel's door; rows as dicts, seconds taken."""
     if not SECRET:
@@ -164,9 +186,18 @@ def view_status(params):
     history = canary.get('history', [])
     day = [h for h in history if time.time() - h['at'] < 86400]
 
+    paused = None
+    try:
+        paused = is_paused()
+    except ClientError:
+        pass
+    if state == 'running' and paused:
+        state = 'starting'          # a task is up, but users still get the paused page
+
     return {
         'state': state, 'desired': desired, 'running': running, 'pending': svc.get('pendingCount', 0),
-        'taskCap': TASK_CAP, 'serviceUrl': SERVICE_URL,
+        'taskCap': TASK_CAP, 'serviceUrl': SERVICE_URL, 'paused': paused,
+        'schedule': load_state('schedule', dict(DEFAULT_SCHEDULE)), 'scheduleNow': scheduled_state(),
         'canary': {'last': last, 'history': history[-72:],
                    'day': {'runs': len(day), 'failed': sum(1 for h in day if h['ok'] is False),
                            'skipped': sum(1 for h in day if h['ok'] is None)},
@@ -481,6 +512,21 @@ def image_tags(repo):
         return {'repo': repo}
 
 
+def earlier_images():
+    """The service images that can be run again, newest first."""
+    try:
+        out = []
+        for page in aws('ecr').get_paginator('describe_images').paginate(repositoryName=f'{ECR_PREFIX}-tap'):
+            for d in page['imageDetails']:
+                tags = d.get('imageTags', [])
+                commit = [t for t in tags if t != 'live']
+                if commit:
+                    out.append({'tag': commit[0], 'pushed': d['imagePushedAt'].timestamp(), 'live': 'live' in tags})
+        return sorted(out, key=lambda i: -i['pushed'])[:12]
+    except ClientError:
+        return []
+
+
 def latest_release(repo):
     req = urllib.request.Request(f'https://api.github.com/repos/{repo}/releases/latest',
                                  headers={'User-Agent': 'aiab-panel', 'Accept': 'application/vnd.github+json'})
@@ -554,6 +600,7 @@ def view_components(params):
         'task': {'definition': td['taskDefinitionArn'].split('/')[-1], 'cpu': td.get('cpu'),
                  'memory': td.get('memory'), 'containers': containers},
         'images': [image_tags(f'{ECR_PREFIX}-{n}') for n in ('tap', 'proxy', 'firefly')],
+        'earlier': earlier_images(),
         'versions': versions,
         'upstream': cached('upstream', 86400, upstream)['releases'],
         'builds': builds,
@@ -584,7 +631,254 @@ def view_logs(params):
     return {'minutes': minutes, 'container': container, 'q': text, 'lines': lines[-400:], 'found': len(lines)}
 
 
-VIEWS = {'status': view_status, 'load': view_load, 'activity': view_activity, 'datasets': view_datasets,
+# ---- controls -------------------------------------------------------------
+
+class Refused(Exception):
+    """A control that will not be carried out; the message is for the administrator."""
+
+
+PAUSED_PAGE = (
+    '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+    '<meta name="viewport" content="width=device-width, initial-scale=1"><title>Archive paused</title>'
+    '<style>body{font:16px/1.5 -apple-system,Segoe UI,Helvetica,Arial,sans-serif;max-width:34em;'
+    'margin:18vh auto;padding:0 1.5em;color:#222}h1{font-size:1.4em}p{color:#555}</style></head><body>'
+    '<h1>This archive is paused</h1>'
+    '<p>The service is switched off to save cost, or is just starting.  '
+    'Nothing is lost:  the catalogs and the results of earlier jobs are kept.</p>'
+    '<p>If it is starting, it will answer within a few minutes.  Otherwise, ask its administrator to start it.</p>'
+    '</body></html>')
+
+DEFAULT_SCHEDULE = {'enabled': False, 'days': [0, 1, 2, 3, 4], 'start': '07:00', 'end': '19:00',
+                    'tz': 'America/Los_Angeles', 'count': 1}
+
+
+def record(who, action, detail):
+    """Append to the record of controls used."""
+    entries = load_state('record', {}).get('entries', [])
+    entries.append({'at': time.time(), 'who': who, 'action': action, 'detail': detail})
+    save_state('record', {'entries': entries[-2000:]})
+
+
+def view_record(params):
+    return {'entries': list(reversed(load_state('record', {}).get('entries', [])))[:300]}
+
+
+def rule_arn():
+    arn = service_resources().get('ListenerRule')
+    if not arn:
+        raise Refused("The service's load balancer rule could not be found.")
+    return arn
+
+
+def is_paused():
+    """Is the load balancer answering with the paused page instead of the service?"""
+    rule = aws('elbv2').describe_rules(RuleArns=[rule_arn()])['Rules'][0]
+    return any(a['Type'] == 'fixed-response' for a in rule['Actions'])
+
+
+def set_paused(on):
+    if on:
+        actions = [{'Type': 'fixed-response', 'FixedResponseConfig': {
+            'StatusCode': '503', 'ContentType': 'text/html', 'MessageBody': PAUSED_PAGE}}]
+    else:
+        actions = [{'Type': 'forward', 'TargetGroupArn': service_resources()['TargetGroup']}]
+    aws('elbv2').modify_rule(RuleArn=rule_arn(), Actions=actions)
+
+
+def healthy_tasks():
+    r = aws('elbv2').describe_target_health(TargetGroupArn=service_resources()['TargetGroup'])
+    return sum(1 for t in r['TargetHealthDescriptions'] if t['TargetHealth']['State'] == 'healthy')
+
+
+def settle():
+    """Once a task answers again, give users the service back instead of the paused page."""
+    svc = ecs_service()
+    if svc['desiredCount'] > 0 and is_paused() and healthy_tasks() > 0:
+        set_paused(False)
+        return True
+    return False
+
+
+def set_tasks(count, who, why='asked'):
+    if not 0 <= count <= TASK_CAP:
+        raise Refused(f'The panel runs between 0 and {TASK_CAP} tasks.')
+    before = ecs_service()['desiredCount']
+    if count == before:
+        return {'tasks': count, 'changed': False}
+
+    if count == 0:
+        set_paused(True)        # first, so that no user meets a bare gateway error
+    aws('ecs').update_service(cluster=STACK, service=STACK, desiredCount=count)
+    record(who, 'standby' if count == 0 else ('wake' if before == 0 else 'tasks'),
+           {'before': before, 'after': count, 'why': why})
+    return {'tasks': count, 'changed': True, 'before': before}
+
+
+def scheduled_state(at=None):
+    """'run' or 'standby' by the schedule, or None when there is no schedule in force."""
+    sch = load_state('schedule', DEFAULT_SCHEDULE)
+    if not sch.get('enabled'):
+        return None
+    try:
+        from zoneinfo import ZoneInfo
+        local = (at or now()).astimezone(ZoneInfo(sch.get('tz', 'UTC')))
+    except Exception:
+        return None
+    hhmm = local.strftime('%H:%M')
+    inside = local.weekday() in sch.get('days', []) and sch['start'] <= hhmm < sch['end']
+    return 'run' if inside else 'standby'
+
+
+def keep_schedule():
+    """
+    Called by the timer.  The schedule acts on its edges only:  when the
+    scheduled state changes, it is applied once.  What the administrator
+    sets by hand in between stands until the next edge.
+    """
+    want = scheduled_state()
+    if want is None:
+        return None
+    sch = load_state('schedule', DEFAULT_SCHEDULE)
+    if sch.get('applied') == want:
+        return None
+    set_tasks(0 if want == 'standby' else max(1, min(int(sch.get('count', 1)), TASK_CAP)), 'schedule', 'schedule')
+    sch['applied'] = want
+    save_state('schedule', sch)
+    return want
+
+
+def set_schedule(body, who):
+    sch = dict(DEFAULT_SCHEDULE)
+    sch['enabled'] = bool(body.get('enabled'))
+    days = sorted({int(d) for d in body.get('days', []) if 0 <= int(d) <= 6})
+    start, end = str(body.get('start', '')), str(body.get('end', ''))
+    for v in (start, end):
+        if not re.fullmatch(r'([01]\d|2[0-3]):[0-5]\d', v):
+            raise Refused('Times are written HH:MM, 00:00 to 23:59.')
+    if not start < end:
+        raise Refused('The service must start before it stops, on the same day.')
+    if sch['enabled'] and not days:
+        raise Refused('Choose at least one day for the service to run.')
+    tz = str(body.get('tz') or DEFAULT_SCHEDULE['tz'])
+    try:
+        from zoneinfo import ZoneInfo
+        ZoneInfo(tz)
+    except Exception:
+        raise Refused(f'Unknown time zone {tz!r}.')
+    count = int(body.get('count', 1))
+    if not 1 <= count <= TASK_CAP:
+        raise Refused(f'The schedule runs between 1 and {TASK_CAP} tasks.')
+
+    sch.update(days=days, start=start, end=end, tz=tz, count=count)
+    before = load_state('schedule', dict(DEFAULT_SCHEDULE))
+    # Start from the state the schedule calls for now, so that saving it
+    # changes nothing by itself; the next edge is the first to act.
+    save_state('schedule', sch)
+    sch['applied'] = scheduled_state()
+    save_state('schedule', sch)
+    record(who, 'schedule', {'before': {k: before.get(k) for k in DEFAULT_SCHEDULE},
+                             'after': {k: sch.get(k) for k in DEFAULT_SCHEDULE}})
+    return {'schedule': sch}
+
+
+def start_build(who):
+    cb = aws('codebuild')
+    ids = cb.list_builds_for_project(projectName=BUILD_PROJECT, sortOrder='DESCENDING')['ids'][:1]
+    if ids and cb.batch_get_builds(ids=ids)['builds'][0]['buildStatus'] == 'IN_PROGRESS':
+        raise Refused('A build is already running.  One at a time.')
+    b = cb.start_build(projectName=BUILD_PROJECT)['build']
+    record(who, 'rebuild', {'build': b.get('buildNumber')})
+    return {'build': b.get('buildNumber')}
+
+
+def roll_back(tag, who):
+    """Run an earlier image: move the 'live' tag to it and restart the tasks."""
+    if not re.fullmatch(r'[0-9a-f]{7,40}', tag or ''):
+        raise Refused('Name the image by its commit tag.')
+    ecr = aws('ecr')
+    before = (image_tags(f'{ECR_PREFIX}-tap').get('tags') or ['?'])[0]
+    moved = []
+    for repo in (f'{ECR_PREFIX}-tap', f'{ECR_PREFIX}-proxy'):
+        got = ecr.batch_get_image(repositoryName=repo, imageIds=[{'imageTag': tag}],
+                                  acceptedMediaTypes=['application/vnd.docker.distribution.manifest.v2+json',
+                                                      'application/vnd.oci.image.manifest.v1+json',
+                                                      'application/vnd.oci.image.index.v1+json',
+                                                      'application/vnd.docker.distribution.manifest.list.v2+json'])
+        if not got.get('images'):
+            raise Refused(f'There is no image tagged {tag} in {repo}.')
+        image = got['images'][0]
+        try:
+            ecr.put_image(repositoryName=repo, imageManifest=image['imageManifest'],
+                          imageManifestMediaType=image.get('imageManifestMediaType'), imageTag='live')
+            moved.append(repo)
+        except ClientError as e:
+            if e.response['Error']['Code'] != 'ImageAlreadyExistsException':
+                raise
+    restarted = False
+    if ecs_service()['desiredCount'] > 0:
+        aws('ecs').update_service(cluster=STACK, service=STACK, forceNewDeployment=True)
+        restarted = True
+    record(who, 'rollback', {'before': before, 'after': tag, 'moved': moved, 'restarted': restarted})
+    return {'live': tag, 'moved': moved, 'restarted': restarted}
+
+
+JOB_ID = re.compile(r'tap_[A-Za-z0-9_]+')
+
+
+def view_jobs(params):
+    """Async jobs that started and have not been seen to end, checked against the service."""
+    hours = max(1, min(int(params.get('hours', '6')), 48))
+    jobs = {}
+    for r in sorted(query_records(hours), key=lambda r: r.get('t', 0)):
+        jid = r.get('id')
+        if not jid or not JOB_ID.fullmatch(jid):
+            continue
+        j = jobs.setdefault(jid, {'id': jid, 'client': r.get('client'), 'started': r.get('t'), 'q': '', 'ended': False})
+        if r.get('q') and not j['q']:
+            j['q'] = r['q']
+        if r.get('job') or r.get('m') == 'DELETE':
+            j['ended'] = True
+
+    running, problem = [], None
+    for j in [j for j in jobs.values() if not j['ended'] and j['q']][-25:]:
+        try:
+            code, text = service(f"/async/{j['id']}/phase", timeout=10)
+        except ServiceError as e:
+            problem = str(e)
+            break
+        j['phase'] = text.strip() if code == 200 else f'({code})'
+        if j['phase'] in ('EXECUTING', 'QUEUED', 'PENDING'):
+            running.append(j)
+    return {'hours': hours, 'jobs': running, 'problem': problem}
+
+
+def abort_job(jid, who):
+    if not JOB_ID.fullmatch(jid or ''):
+        raise Refused('That is not a job id.')
+    code, text = service(f'/async/{jid}/phase', {'PHASE': 'ABORT'}, timeout=20)
+    _, phase = service(f'/async/{jid}/phase', timeout=10)
+    record(who, 'abort', {'job': jid, 'answer': code, 'phase': phase.strip()[:20]})
+    return {'job': jid, 'phase': phase.strip()[:20]}
+
+
+def control(body, who):
+    action = body.get('action')
+    if action == 'tasks':
+        return set_tasks(int(body.get('count', -1)), who)
+    if action == 'settle':
+        return {'settled': settle()}
+    if action == 'schedule':
+        return set_schedule(body, who)
+    if action == 'rebuild':
+        return start_build(who)
+    if action == 'rollback':
+        return roll_back(body.get('tag'), who)
+    if action == 'abort':
+        return abort_job(body.get('id'), who)
+    raise Refused(f'No control named {action!r}.')
+
+
+VIEWS = {'record': view_record, 'jobs': view_jobs, 'status': view_status, 'load': view_load, 'activity': view_activity, 'datasets': view_datasets,
          'cost': view_cost, 'components': view_components, 'logs': view_logs}
 
 
@@ -602,6 +896,8 @@ def run_canary():
         result.update(ok=None, skipped='no way in')
     elif svc['desiredCount'] == 0:
         result.update(ok=None, skipped='standby')
+    elif svc['runningCount'] == 0 or is_paused():
+        result.update(ok=None, skipped='starting')
     else:
         for c in checks:
             one = {'name': c['name']}
@@ -637,15 +933,52 @@ def respond(code, body):
             'body': json.dumps(body, default=str)}
 
 
+def tick():
+    """The timer: keep the schedule, give the service back once it answers, run the canary."""
+    out = {}
+    for name, step in (('schedule', keep_schedule), ('settled', settle)):
+        try:
+            out[name] = step()
+        except Exception as e:
+            print(f'tick: {name} failed: {e!r}')
+            out[name] = f'failed: {e}'[:200]
+    out['canary'] = run_canary()
+    return out
+
+
 def handler(event, context):
     if event.get('canary'):
-        return run_canary()
+        return tick()
 
     http = event.get('requestContext', {}).get('http', {})
-    if http.get('method', 'GET') != 'GET':
-        return respond(405, {'error': 'The panel is read-only at this stage.'})
-
+    headers = {k.lower(): v for k, v in (event.get('headers') or {}).items()}
     name = event.get('rawPath', '').rstrip('/').split('/')[-1]
+
+    if http.get('method', 'GET') == 'POST' and name == 'control':
+        # A page elsewhere cannot add this header to a request it makes the
+        # administrator's browser send here.
+        if headers.get('x-panel') != '1':
+            return respond(403, {'error': 'Not from the panel page.'})
+        who = (headers.get('x-forwarded-for') or '?').split(',')[0].strip()
+        try:
+            raw = event.get('body') or '{}'
+            if event.get('isBase64Encoded'):
+                import base64
+                raw = base64.b64decode(raw).decode()
+            out = control(json.loads(raw), who)
+            out['asOf'] = time.time()
+            return respond(200, out)
+        except Refused as e:
+            return respond(409, {'error': str(e)})
+        except ServiceError as e:
+            return respond(502, {'error': str(e)})
+        except Exception as e:
+            print(f'control failed: {e!r}')
+            return respond(500, {'error': f'{type(e).__name__}: {e}'[:500]})
+
+    if http.get('method', 'GET') != 'GET':
+        return respond(405, {'error': 'Only the controls take a POST.'})
+
     view = VIEWS.get(name)
     if not view:
         return respond(404, {'error': f'No view named {name!r}', 'views': sorted(VIEWS)})
