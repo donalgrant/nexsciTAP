@@ -1004,7 +1004,7 @@ def ingests():
                     if code != 0:
                         i['reason'] = t.get('stoppedReason') or (t.get('containers') or [{}])[0].get('reason') or ''
                 else:
-                    i['status'] = 'RUNNING' if t['lastStatus'] == 'RUNNING' else 'STARTING'
+                    i['status'] = 'STARTING' if t['lastStatus'] in ('PROVISIONING', 'PENDING', 'ACTIVATING') else 'RUNNING'
             save_state('ingests', {'list': held[-50:]})
         except ClientError as e:
             print(f'ingests: {e!r}')
@@ -1017,7 +1017,13 @@ def upload_slot(body):
     name = os.path.basename(str(body.get('filename') or 'table'))
     name = re.sub(r'[^A-Za-z0-9._-]', '_', name)[:120] or 'table'
     key = f"upload/{time.strftime('%Y%m%dT%H%M%S', time.gmtime())}-{secrets.token_hex(5)}/{name}"
-    url = aws('s3').generate_presigned_url('put_object', Params={'Bucket': STATE_BUCKET, 'Key': key}, ExpiresIn=3600)
+    # Signed for the bucket's own region: a link to the general S3 address
+    # is answered with a redirect for a new bucket, which an upload cannot follow.
+    from botocore.config import Config
+    region = os.environ['AWS_REGION']
+    signer = boto3.client('s3', region_name=region, endpoint_url=f'https://s3.{region}.amazonaws.com',
+                          config=Config(signature_version='s3v4', s3={'addressing_style': 'virtual'}))
+    url = signer.generate_presigned_url('put_object', Params={'Bucket': STATE_BUCKET, 'Key': key}, ExpiresIn=3600)
     return {'key': key, 'url': url}
 
 
@@ -1072,7 +1078,9 @@ def view_columns(params):
     cols, _ = tap(f"SELECT column_name, datatype, unit, ucd, description FROM TAP_SCHEMA.columns WHERE table_name = '{table}'")
     about, _ = tap(f"SELECT description FROM TAP_SCHEMA.tables WHERE table_name = '{table}'")
     return {'table': table, 'description': (about[0]['description'] if about else ''),
-            'columns': [c for c in cols if c['column_name'] != 'hpx29']}
+            # Not the index column, nor the columns the service adds for itself.
+            'columns': [c for c in cols if c['column_name'] != 'hpx29'
+                        and 'computed by the service' not in (c.get('description') or '')]}
 
 
 def start_describe(body, who):
