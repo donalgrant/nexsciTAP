@@ -323,6 +323,8 @@ const VIEW = {
     const failed = (d.moves || []).filter((m) => m.status === 'FAILED' && Date.now() / 1000 - m.started < 3600);
     if (failed.length) h += `<div class="notice err">${failed.map((m) => esc(m.action + ' ' + m.folder + ' failed:  ' + m.error)).join('<br>')}</div>`;
 
+    const converting = (d.ingests || []).filter((i) => i.status === 'RUNNING' || i.status === 'STARTING');
+    if (converting.length) h += `<div class="notice">Converting ${converting.map((i) => '<b>' + esc(i.folder) + '</b>' + (i.what === 'describe' ? ' (new metadata)' : '')).join(', ')}.  This takes about a minute for a small table.  When it finishes, the result appears here, at the top of this page, with a <b>Publish</b> button.  The page refreshes by itself.</div>`;
     h += (d.staged || []).map(stagedCard).join('');
 
     h += '<div class="card"><h2>Served</h2><div class="scroll"><table><tr><th>Table</th><th class="num">Rows</th><th class="num">Size</th><th class="num">Files</th><th class="num">Columns</th><th>Metadata</th><th class="num">Queries, 24 h</th><th>Changed</th><th></th></tr>' +
@@ -509,7 +511,8 @@ async function uploadAndConvert() {
     state.textContent = 'Uploaded.  Starting the conversion.';
     await post({action: 'ingest', name, key: slot.key, schemaKey, description: $('#udesc').value, ra: $('#ura').value, dec: $('#udec').value});
     for (const k in store) delete store[k];
-    toast('Conversion of ' + name + ' started.  It appears under Staged when it finishes.');
+    toast('Conversion of ' + name + ' started.  In about a minute it appears at the top of this page, to publish.');
+    window.scrollTo({top: 0, behavior: 'smooth'});
     show(true);
   } catch (e) { state.innerHTML = `<span class="badText">${esc(e.message)}</span>`; const b = $('#upbusy'); if (b) { b.disabled = false; b.id = 'ugo'; } }
 }
@@ -522,13 +525,13 @@ async function metaEditor(table, folder) {
       `<label>Description of the table <input id="mdesc" style="width:100%" value="${esc(c.description)}"></label>` +
       '<div class="scroll gap" style="max-height:55vh;overflow:auto"><table><tr><th>Column</th><th>Type</th><th>Unit</th><th>UCD</th><th style="width:55%">Description</th></tr>' +
       c.columns.map((x, i) => `<tr><td class="mono">${esc(x.column_name)}</td><td class="note">${esc(x.datatype)}</td><td><input data-i="${i}" data-k="unit" size="9" value="${esc(x.unit)}"></td><td><input data-i="${i}" data-k="ucd" size="16" value="${esc(x.ucd)}"></td><td><input data-i="${i}" data-k="description" style="width:100%" value="${esc(x.description)}"></td></tr>`).join('') +
-      '</table></div><div class="tools gap"><button class="go" id="msave">Save to staging</button><button id="mcancel">Cancel</button><span class="note">Saving rewrites the files with the new metadata, into staging.  The data does not change, and nothing is served until you publish.</span></div></div>';
+      '</table></div><div class="tools gap"><button class="go" id="msave">Save to staging</button><button id="mcancel">Cancel</button><span class="note">Saving rewrites the files with the new metadata, which takes about a minute.  The result then appears at the top of this page with a Publish button.  The data does not change, and nothing is served until you publish.</span></div></div>';
     slot.scrollIntoView({behavior: 'smooth'});
     $('#mcancel').onclick = () => { slot.innerHTML = ''; };
     $('#msave').onclick = () => {
       slot.querySelectorAll('input[data-i]').forEach((el) => { c.columns[+el.dataset.i][el.dataset.k] = el.value; });
       act({action: 'describe', folder, description: $('#mdesc').value, columns: c.columns.map((x) => ({column_name: x.column_name, unit: x.unit, ucd: x.ucd, description: x.description}))},
-          () => 'Rewriting ' + folder + ' with the new metadata.  It appears under Staged when it finishes.');
+          () => { window.scrollTo({top: 0, behavior: 'smooth'}); return 'Rewriting ' + folder + ' with the new metadata.  In about a minute it appears at the top of this page, to publish.'; });
     };
   } catch (e) { slot.innerHTML = `<div class="notice err gap">The columns could not be read:  ${esc(e.message)}</div>`; }
 }
