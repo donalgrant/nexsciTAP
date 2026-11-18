@@ -16,7 +16,7 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir cython numpy setuptools wheel configobj sqlparse \
-        astropy beautifulsoup4 lxml xmltodict duckdb pyarrow astropy-healpix \
+        astropy beautifulsoup4 lxml xmltodict duckdb pyarrow astropy-healpix boto3 \
  && pip install --no-cache-dir --no-deps ADQL==1.0.6
 
 # spatial_index has no wheel for current Python and its setup.py no longer

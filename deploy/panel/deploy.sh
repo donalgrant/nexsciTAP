@@ -28,7 +28,12 @@ trap 'rm -rf "$OUT"' EXIT
 aws cloudformation package --template-file stack.yaml --s3-bucket "$CATALOG_BUCKET" \
     --s3-prefix deploy/panel --output-template-file "$OUT/packaged.yaml" > /dev/null
 
-PARAMS=("ServiceStack=$SERVICE_STACK" "ServiceUrl=$SERVICE_URL" "AdminCidr=$ADMIN_CIDR" "CatalogBucket=$CATALOG_BUCKET")
+# The conversion task runs in the service's network.
+net() { aws cloudformation describe-stacks --stack-name "$SERVICE_STACK" \
+    --query "Stacks[0].Parameters[?ParameterKey=='$1'].ParameterValue" --output text; }
+
+PARAMS=("ServiceStack=$SERVICE_STACK" "ServiceUrl=$SERVICE_URL" "AdminCidr=$ADMIN_CIDR" "CatalogBucket=$CATALOG_BUCKET"
+        "VpcId=$(net VpcId)" "SubnetIds=$(net SubnetIds)")
 if [ $# -ge 2 ]; then PARAMS+=("PanelSecret=$2"); fi
 
 aws cloudformation deploy --stack-name "$STACK" --template-file "$OUT/packaged.yaml" \

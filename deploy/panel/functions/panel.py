@@ -15,8 +15,23 @@ balancer answers while there are none, which image is tagged "live", and
 whether a build is started.  An async job is stopped by asking the service
 itself, as any TAP client may.  Every control used is written to a record.
 
-Views:  status, load, activity, jobs, datasets, cost, components, logs, record.
-Controls:  tasks, settle, schedule, rebuild, rollback, abort.
+Views:  status, load, activity, jobs, datasets, columns, ingestlog, cost,
+components, logs, record.
+Controls:  tasks, settle, schedule, rebuild, rollback, abort, and for
+datasets (stage 3):  upload, ingest, describe, publish, discard, hide,
+unhide, remove, restore.
+
+Datasets move between five areas of the catalog bucket.  The service reads
+only the first:
+
+    catalogs/<folder>/            what the service serves
+    staging/<folder>/             a converted table and its report, awaiting a decision
+    hidden/<folder>/              a table taken out of the service, kept whole
+    versions/<folder>/<when>/     what a folder held before it was replaced or removed
+
+Uploads arrive in the panel's own bucket, under upload/, and are converted
+by a one-off Fargate task (tools/ingest_task.py in the service's image).
+The panel never deletes a served table:  "remove" moves it to versions/.
 
 Environment:
 
@@ -29,7 +44,9 @@ Environment:
     STATE_BUCKET    the panel's bucket
     ECR_PREFIX      image repositories are <prefix>-tap, -proxy, -firefly
     BUILD_PROJECT   the service's CodeBuild project
-    TASK_CAP        most tasks the panel will ever ask for (shown, not used yet)
+    TASK_CAP        most tasks the panel will ever ask for
+    INGEST_CLUSTER, INGEST_TASKDEF, INGEST_SUBNETS, INGEST_SG, INGEST_LOGS
+                    where and how the one-off conversion task runs
 """
 
 import csv
@@ -56,6 +73,11 @@ ECR_PREFIX = os.environ.get('ECR_PREFIX', 'aiab')
 BUILD_PROJECT = os.environ.get('BUILD_PROJECT', '')
 TASK_CAP = int(os.environ.get('TASK_CAP', '3'))
 LOG_GROUP = '/ecs/' + STACK
+INGEST_CLUSTER = os.environ.get('INGEST_CLUSTER', '')
+INGEST_TASKDEF = os.environ.get('INGEST_TASKDEF', '')
+INGEST_SUBNETS = [x for x in os.environ.get('INGEST_SUBNETS', '').split(',') if x]
+INGEST_SG = os.environ.get('INGEST_SG', '')
+INGEST_LOGS = os.environ.get('INGEST_LOGS', '')
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -448,7 +470,9 @@ def view_datasets(params):
                     'modified': f.get('modified'), 'served': name in served if served else None,
                     'queries24h': use.get(name, 0), **s})
     return {'tables': out, 'problem': problem, 'bucket': CATALOG_BUCKET, 'prefix': CATALOG_PREFIX,
-            'totalBytes': sum(f['bytes'] for f in folders.values())}
+            'totalBytes': sum(f['bytes'] for f in folders.values()),
+            'staged': staged(), 'ingests': ingests(), 'hidden': area_folders('hidden/'),
+            'versions': versions(), 'moves': moves()}
 
 
 def view_cost(params):
@@ -883,10 +907,331 @@ def control(body, who):
         return roll_back(body.get('tag'), who)
     if action == 'abort':
         return abort_job(body.get('id'), who)
+    if action == 'upload':
+        return upload_slot(body)
+    if action == 'ingest':
+        return start_ingest(body, who)
+    if action == 'describe':
+        return start_describe(body, who)
+    if action in ('publish', 'discard', 'hide', 'unhide', 'remove', 'restore'):
+        return start_move(action, body.get('folder'), who, confirm=body.get('confirm'), version=body.get('version'))
     raise Refused(f'No control named {action!r}.')
 
 
-VIEWS = {'record': view_record, 'jobs': view_jobs, 'status': view_status, 'load': view_load, 'activity': view_activity, 'datasets': view_datasets,
+# ---- datasets: ingest, publish, hide, remove (stage 3) --------------------
+
+FOLDER = re.compile(r'[a-z][a-z0-9_]{0,62}')
+RESERVED = {'tap_schema', 'staging', 'hidden', 'versions', 'catalogs', 'upload', 'incoming'}
+AREAS = ('staging/', 'hidden/', 'versions/')
+
+
+def folder_name(name):
+    name = str(name or '').strip()
+    if not FOLDER.fullmatch(name) or name in RESERVED:
+        raise Refused('A table name starts with a letter and has only lower-case letters, digits and "_".')
+    return name
+
+
+def keys_under(prefix, bucket=None):
+    out = []
+    for page in aws('s3').get_paginator('list_objects_v2').paginate(Bucket=bucket or CATALOG_BUCKET, Prefix=prefix):
+        out.extend(page.get('Contents', []))
+    return out
+
+
+def area_folders(prefix):
+    """Folders of Parquet files directly under a prefix: name -> files, bytes, modified."""
+    folders = {}
+    for o in keys_under(prefix):
+        rest = o['Key'][len(prefix):]
+        if rest.count('/') != 1 or not rest.endswith('.parquet'):
+            continue
+        f = folders.setdefault(rest.split('/')[0], {'files': 0, 'bytes': 0, 'modified': 0})
+        f['files'] += 1
+        f['bytes'] += o['Size']
+        f['modified'] = max(f['modified'], o['LastModified'].timestamp())
+    return [{'folder': k, **v} for k, v in sorted(folders.items())]
+
+
+def versions():
+    out = {}
+    for o in keys_under('versions/'):
+        parts = o['Key'].split('/')
+        if len(parts) != 4 or not parts[3].endswith('.parquet'):
+            continue
+        v = out.setdefault(parts[1], {}).setdefault(parts[2], {'version': parts[2], 'files': 0, 'bytes': 0})
+        v['files'] += 1
+        v['bytes'] += o['Size']
+    return {k: sorted(v.values(), key=lambda x: x['version'], reverse=True) for k, v in out.items()}
+
+
+def staged():
+    """Every folder in staging with its report."""
+    out = []
+    seen = set()
+    for o in keys_under('staging/'):
+        parts = o['Key'].split('/')
+        if len(parts) != 3 or parts[1] in seen or parts[2] != '_report.json':
+            continue
+        seen.add(parts[1])
+        try:
+            report = json.loads(aws('s3').get_object(Bucket=CATALOG_BUCKET, Key=o['Key'])['Body'].read())
+        except (ClientError, ValueError) as e:
+            report = {'ok': False, 'error': f'The report could not be read: {e}'}
+        report['folder'] = parts[1]
+        report['replaces'] = bool(keys_under(f'{CATALOG_PREFIX}/{parts[1]}/')[:1])
+        out.append(report)
+    return out
+
+
+def ingests():
+    """The conversion tasks the panel has started, newest first, with how each stands now."""
+    held = load_state('ingests', {}).get('list', [])
+    live = [i for i in held if i.get('status') in ('PROVISIONING', 'PENDING', 'RUNNING', 'STARTING')]
+    if live:
+        try:
+            got = aws('ecs').describe_tasks(cluster=INGEST_CLUSTER, tasks=[i['task'] for i in live])
+            by_arn = {t['taskArn']: t for t in got.get('tasks', [])}
+            for i in live:
+                t = by_arn.get(i['task'])
+                if not t:
+                    i['status'] = 'GONE'
+                    continue
+                if t['lastStatus'] == 'STOPPED':
+                    code = (t.get('containers') or [{}])[0].get('exitCode')
+                    i['status'] = 'STAGED' if code == 0 else 'FAILED'
+                    i['ended'] = (t.get('stoppedAt') or now()).timestamp()
+                    if code != 0:
+                        i['reason'] = t.get('stoppedReason') or (t.get('containers') or [{}])[0].get('reason') or ''
+                else:
+                    i['status'] = 'RUNNING' if t['lastStatus'] == 'RUNNING' else 'STARTING'
+            save_state('ingests', {'list': held[-50:]})
+        except ClientError as e:
+            print(f'ingests: {e!r}')
+    return list(reversed(held))[:15]
+
+
+def upload_slot(body):
+    """Somewhere to put a file, and a link good for an hour that lets the browser put it there."""
+    import secrets
+    name = os.path.basename(str(body.get('filename') or 'table'))
+    name = re.sub(r'[^A-Za-z0-9._-]', '_', name)[:120] or 'table'
+    key = f"upload/{time.strftime('%Y%m%dT%H%M%S', time.gmtime())}-{secrets.token_hex(5)}/{name}"
+    url = aws('s3').generate_presigned_url('put_object', Params={'Bucket': STATE_BUCKET, 'Key': key}, ExpiresIn=3600)
+    return {'key': key, 'url': url}
+
+
+def run_ingest(folder, env, who, what):
+    held = load_state('ingests', {}).get('list', [])
+    ingests()
+    held = load_state('ingests', {}).get('list', [])
+    if any(i['folder'] == folder and i.get('status') in ('STARTING', 'RUNNING') for i in held):
+        raise Refused(f'An ingest of {folder} is already running.')
+
+    env = dict(env, NAME=folder, DEST_BUCKET=CATALOG_BUCKET, DEST_PREFIX=f'staging/{folder}/')
+    r = aws('ecs').run_task(
+        cluster=INGEST_CLUSTER, taskDefinition=INGEST_TASKDEF, launchType='FARGATE', count=1,
+        networkConfiguration={'awsvpcConfiguration': {
+            'subnets': INGEST_SUBNETS, 'securityGroups': [INGEST_SG], 'assignPublicIp': 'ENABLED'}},
+        overrides={'containerOverrides': [{'name': 'ingest', 'environment': [
+            {'name': k, 'value': str(v)} for k, v in env.items() if v not in (None, '')]}]},
+        propagateTags='TASK_DEFINITION')
+    if not r.get('tasks'):
+        raise Refused('The conversion task could not be started: ' + json.dumps(r.get('failures', []))[:300])
+    task = r['tasks'][0]['taskArn']
+    held.append({'folder': folder, 'task': task, 'started': time.time(), 'status': 'STARTING', 'what': what})
+    save_state('ingests', {'list': held[-50:]})
+    record(who, what, {'table': folder, 'task': task.split('/')[-1], 'source': env.get('SRC_KEY') or env.get('SRC_PREFIX')})
+    return {'folder': folder, 'task': task.split('/')[-1]}
+
+
+def start_ingest(body, who):
+    folder = folder_name(body.get('name'))
+    key = str(body.get('key') or '')
+    if not key.startswith('upload/') or '..' in key:
+        raise Refused('Upload the file first.')
+    try:
+        aws('s3').head_object(Bucket=STATE_BUCKET, Key=key)
+    except ClientError:
+        raise Refused('The uploaded file is not there.  Upload it again.')
+    schema = str(body.get('schemaKey') or '')
+    if schema and (not schema.startswith('upload/') or '..' in schema):
+        raise Refused('The column list was not uploaded.')
+    col = re.compile(r'[A-Za-z_][A-Za-z0-9_ .-]{0,63}')
+    ra, dec = str(body.get('ra') or 'ra').strip(), str(body.get('dec') or 'dec').strip()
+    if not col.fullmatch(ra) or not col.fullmatch(dec):
+        raise Refused('Give the names of the two position columns as they appear in the file.')
+    return run_ingest(folder, {'MODE': 'convert', 'SRC_BUCKET': STATE_BUCKET, 'SRC_KEY': key, 'SCHEMA_KEY': schema,
+                               'DESCRIPTION': str(body.get('description') or '')[:500], 'RA': ra, 'DEC': dec},
+                      who, 'ingest')
+
+
+def view_columns(params):
+    """A served table's columns as the service lists them, for the metadata editor."""
+    table = folder_name(params.get('table'))
+    cols, _ = tap(f"SELECT column_name, datatype, unit, ucd, description FROM TAP_SCHEMA.columns WHERE table_name = '{table}'")
+    about, _ = tap(f"SELECT description FROM TAP_SCHEMA.tables WHERE table_name = '{table}'")
+    return {'table': table, 'description': (about[0]['description'] if about else ''),
+            'columns': [c for c in cols if c['column_name'] != 'hpx29']}
+
+
+def start_describe(body, who):
+    """Rewrite a served catalog's files with new units and descriptions, into staging."""
+    folder = folder_name(body.get('folder'))
+    if not keys_under(f'{CATALOG_PREFIX}/{folder}/')[:1]:
+        raise Refused(f'There is no served folder named {folder}.')
+    rows = body.get('columns') or []
+    if not rows:
+        raise Refused('No columns were sent.')
+    out = io.StringIO()
+    w = csv.writer(out)
+    w.writerow(['column_name', 'unit', 'ucd', 'description'])
+    for c in rows[:5000]:
+        w.writerow([str(c.get('column_name', ''))[:128], str(c.get('unit') or '')[:64],
+                    str(c.get('ucd') or '')[:128], str(c.get('description') or '')[:1000]])
+    import secrets
+    key = f"upload/{time.strftime('%Y%m%dT%H%M%S', time.gmtime())}-{secrets.token_hex(5)}/schema.csv"
+    aws('s3').put_object(Bucket=STATE_BUCKET, Key=key, Body=out.getvalue().encode(), ContentType='text/csv')
+    return run_ingest(folder, {'MODE': 'describe', 'SRC_BUCKET': CATALOG_BUCKET,
+                               'SRC_PREFIX': f'{CATALOG_PREFIX}/{folder}/', 'SCHEMA_BUCKET': STATE_BUCKET,
+                               'SCHEMA_KEY': key, 'DESCRIPTION': str(body.get('description') or '')[:500]},
+                      who, 'describe')
+
+
+def view_ingestlog(params):
+    task = re.sub(r'[^0-9a-f]', '', params.get('task', ''))[:40]
+    if not task:
+        return {'lines': []}
+    events = aws('logs').filter_log_events(logGroupName=INGEST_LOGS, logStreamNames=[f'ingest/ingest/{task}'],
+                                          limit=400).get('events', [])
+    return {'lines': [{'at': e['timestamp'] / 1000, 'message': e['message'][:1000]} for e in events][-300:]}
+
+
+# Moving a table between areas can take minutes for a large one, longer than
+# a page waits.  A control starts the move as a second run of this function
+# and returns; the page watches "moves" in the datasets view.
+
+def moves():
+    return [m for m in load_state('moves', {}).get('list', []) if time.time() - m.get('started', 0) < 86400][-10:]
+
+
+def start_move(action, folder, who, **more):
+    folder = folder_name(folder)
+    held = load_state('moves', {}).get('list', [])
+    if any(m['folder'] == folder and m['status'] == 'RUNNING' and time.time() - m['started'] < 900 for m in held):
+        raise Refused(f'{folder} is already being moved.  Wait for that to finish.')
+
+    here = f'{CATALOG_PREFIX}/{folder}/'
+    if action == 'publish':
+        report = next((r for r in staged() if r['folder'] == folder), None)
+        if not report or not report.get('ok'):
+            raise Refused(f'There is no staged table named {folder} that passed its conversion.')
+    elif action in ('hide', 'remove'):
+        if not keys_under(here)[:1]:
+            raise Refused(f'There is no served folder named {folder}.')
+        if action == 'remove' and more.get('confirm') != folder:
+            raise Refused('To remove a table, type its folder name exactly.')
+    elif action == 'unhide':
+        if not keys_under(f'hidden/{folder}/')[:1]:
+            raise Refused(f'There is no hidden table named {folder}.')
+        if keys_under(here)[:1]:
+            raise Refused(f'A table named {folder} is being served.  Remove or hide that one first.')
+    elif action == 'restore':
+        version = str(more.get('version') or '')
+        if not re.fullmatch(r'[0-9TZ]+(-[a-z]+)?', version) or not keys_under(f'versions/{folder}/{version}/')[:1]:
+            raise Refused('There is no such earlier version.')
+    elif action == 'discard':
+        pass
+    else:
+        raise Refused(f'No control named {action!r}.')
+
+    move = {'id': f'{int(time.time() * 1000)}', 'action': action, 'folder': folder, 'who': who,
+            'started': time.time(), 'status': 'RUNNING', **{k: v for k, v in more.items() if k == 'version'}}
+    held.append(move)
+    save_state('moves', {'list': held[-40:]})
+    aws('lambda').invoke(FunctionName=os.environ['AWS_LAMBDA_FUNCTION_NAME'], InvocationType='Event',
+                         Payload=json.dumps({'move': move}).encode())
+    return {'started': action, 'folder': folder}
+
+
+def copy_folder(src, dst, src_bucket=None):
+    """Copy the Parquet files directly under src to dst; returns their names."""
+    s3 = boto3.client('s3')
+    names = []
+    for o in keys_under(src, src_bucket):
+        name = o['Key'][len(src):]
+        if '/' in name or not name.endswith('.parquet'):
+            continue
+        s3.copy({'Bucket': src_bucket or CATALOG_BUCKET, 'Key': o['Key']}, CATALOG_BUCKET, dst + name)
+        names.append(name)
+    return names
+
+
+def empty_folder(prefix, keep=()):
+    for o in keys_under(prefix):
+        if o['Key'][len(prefix):] not in keep:
+            aws('s3').delete_object(Bucket=CATALOG_BUCKET, Key=o['Key'])
+
+
+def stamp():
+    return time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())
+
+
+def do_move(move):
+    action, folder = move['action'], move['folder']
+    here, detail = f'{CATALOG_PREFIX}/{folder}/', {'table': folder}
+    try:
+        if action == 'publish':
+            # Keep what is being replaced, put the new files in, then take
+            # away old files the new set does not have.  The service reads
+            # this folder throughout; for the seconds the copy takes it may
+            # see a mixture of old and new files.
+            if keys_under(here)[:1]:
+                detail['kept'] = f'versions/{folder}/{stamp()}/'
+                copy_folder(here, detail['kept'])
+            names = copy_folder(f'staging/{folder}/', here)
+            if not names:
+                raise RuntimeError('Staging held no files.')
+            empty_folder(here, keep=names)
+            empty_folder(f'staging/{folder}/')
+            detail['files'] = len(names)
+        elif action == 'discard':
+            empty_folder(f'staging/{folder}/')
+        elif action == 'hide':
+            empty_folder(f'hidden/{folder}/')
+            copy_folder(here, f'hidden/{folder}/')
+            empty_folder(here)
+        elif action == 'unhide':
+            copy_folder(f'hidden/{folder}/', here)
+            empty_folder(f'hidden/{folder}/')
+        elif action == 'remove':
+            detail['kept'] = f'versions/{folder}/{stamp()}-removed/'
+            copy_folder(here, detail['kept'])
+            empty_folder(here)
+        elif action == 'restore':
+            if keys_under(here)[:1]:
+                detail['kept'] = f'versions/{folder}/{stamp()}/'
+                copy_folder(here, detail['kept'])
+            names = copy_folder(f"versions/{folder}/{move['version']}/", here)
+            empty_folder(here, keep=names)
+            detail['restored'] = move['version']
+        status, error = 'DONE', None
+    except Exception as e:
+        print(f'move failed: {e!r}')
+        status, error = 'FAILED', str(e)[:300]
+        detail['error'] = error
+
+    held = load_state('moves', {}).get('list', [])
+    for m in held:
+        if m.get('id') == move['id']:
+            m.update(status=status, ended=time.time(), error=error)
+    save_state('moves', {'list': held[-40:]})
+    record(move.get('who', '?'), action, detail)
+    return {'status': status}
+
+
+VIEWS = {'record': view_record, 'jobs': view_jobs, 'columns': view_columns, 'ingestlog': view_ingestlog,
+         'status': view_status, 'load': view_load, 'activity': view_activity, 'datasets': view_datasets,
          'cost': view_cost, 'components': view_components, 'logs': view_logs}
 
 
@@ -957,6 +1302,8 @@ def tick():
 def handler(event, context):
     if event.get('canary'):
         return tick()
+    if event.get('move'):
+        return do_move(event['move'])
 
     http = event.get('requestContext', {}).get('http', {})
     headers = {k.lower(): v for k, v in (event.get('headers') or {}).items()}

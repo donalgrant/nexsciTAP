@@ -46,6 +46,23 @@ Parameters:
     Type: Number
     Default: 5
     Description: Minutes between canary runs.
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: Network the one-off conversion task runs in (the service's).
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Public subnets for the conversion task; it needs to reach S3 and ECR.
+  IngestCpu:
+    Type: String
+    Default: '2048'
+  IngestMemory:
+    Type: String
+    Default: '16384'
+    Description: Memory of the conversion task in MiB.  Sorting a catalog is what needs it.
+  IngestStorage:
+    Type: Number
+    Default: 100
+    Description: Disk of the conversion task in GiB (21 to 200); it holds the input and the output at once.
 
 Resources:
 
@@ -58,6 +75,16 @@ Resources:
       BucketEncryption:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault: {SSEAlgorithm: AES256}
+      # The page sends an upload straight to upload/ with a link the functions
+      # sign for it, good for an hour.  The link is what admits the request,
+      # so any origin may use one.
+      CorsConfiguration:
+        CorsRules:
+          - {AllowedMethods: [PUT], AllowedOrigins: ['*'], AllowedHeaders: ['*'], MaxAge: 3000}
+      LifecycleConfiguration:
+        Rules:
+          - {Id: uploads-are-temporary, Status: Enabled, Prefix: upload/, ExpirationInDays: 7,
+             AbortIncompleteMultipartUpload: {DaysAfterInitiation: 2}}
 
   BucketPolicy:
     Type: AWS::S3::BucketPolicy
@@ -150,6 +177,44 @@ Resources:
                 Resource:
                   - !Sub arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${ImagePrefix}-tap
                   - !Sub arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${ImagePrefix}-proxy
+        - PolicyName: datasets
+          PolicyDocument:
+            Statement:
+              # Stage 3.  Tables move between areas of the catalog bucket; a
+              # served table is only ever moved, to hidden/ or versions/.
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: !Sub arn:aws:s3:::${CatalogBucket}
+                Condition:
+                  StringLike: {s3:prefix: [staging/*, hidden/*, versions/*]}
+              - Effect: Allow
+                Action: [s3:GetObject, s3:PutObject, s3:DeleteObject]
+                Resource:
+                  - !Sub arn:aws:s3:::${CatalogBucket}/${CatalogPrefix}/*
+                  - !Sub arn:aws:s3:::${CatalogBucket}/staging/*
+                  - !Sub arn:aws:s3:::${CatalogBucket}/hidden/*
+                  - !Sub arn:aws:s3:::${CatalogBucket}/versions/*
+              - Effect: Allow
+                Action: [s3:GetObject, s3:PutObject]
+                Resource: !Sub ${Bucket.Arn}/upload/*
+              - Effect: Allow
+                Action: ecs:RunTask
+                Resource: !Sub arn:aws:ecs:${AWS::Region}:${AWS::AccountId}:task-definition/${AWS::StackName}-ingest:*
+              - Effect: Allow
+                Action: [ecs:DescribeTasks, ecs:TagResource]
+                Resource: !Sub arn:aws:ecs:${AWS::Region}:${AWS::AccountId}:task/${AWS::StackName}-ingest/*
+              - Effect: Allow
+                Action: iam:PassRole
+                Resource: [!GetAtt IngestExecutionRole.Arn, !GetAtt IngestTaskRole.Arn]
+                Condition:
+                  StringEquals: {iam:PassedToService: ecs-tasks.amazonaws.com}
+              - Effect: Allow
+                Action: logs:FilterLogEvents
+                Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/ecs/${AWS::StackName}-ingest:*
+              # A long move is run as a second invocation of this function.
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-Function-*
         - PolicyName: own-state
           PolicyDocument:
             Statement:
@@ -165,7 +230,7 @@ Resources:
       Handler: panel.handler
       Code: functions/
       Role: !GetAtt FunctionRole.Arn
-      Timeout: 60
+      Timeout: 900                # views answer in seconds; moving a large table takes minutes
       MemorySize: 512
       Environment:
         Variables:
@@ -178,6 +243,11 @@ Resources:
           ECR_PREFIX: !Ref ImagePrefix
           BUILD_PROJECT: !Ref BuildProject
           TASK_CAP: !Ref TaskCap
+          INGEST_CLUSTER: !Ref IngestCluster
+          INGEST_TASKDEF: !Sub ${AWS::StackName}-ingest
+          INGEST_SUBNETS: !Join [',', !Ref SubnetIds]
+          INGEST_SG: !Ref IngestSecurityGroup
+          INGEST_LOGS: !Ref IngestLogs
 
   FunctionLogs:
     Type: AWS::Logs::LogGroup
@@ -208,6 +278,86 @@ Resources:
       Action: lambda:InvokeFunction
       Principal: cloudfront.amazonaws.com
       SourceArn: !Sub arn:aws:cloudfront::${AWS::AccountId}:distribution/${Distribution}
+
+  # ---- the one-off conversion task ----------------------------------------
+  # Started for an ingest and gone when it ends.  It runs the service's own
+  # image, which holds the conversion tools, with a different entry point.
+
+  IngestCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub ${AWS::StackName}-ingest
+
+  IngestLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /ecs/${AWS::StackName}-ingest
+      RetentionInDays: 30
+
+  IngestExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - {Effect: Allow, Principal: {Service: ecs-tasks.amazonaws.com}, Action: sts:AssumeRole}
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  # What the conversion may touch: it reads an upload or a served catalog,
+  # and writes only to staging.
+  IngestTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - {Effect: Allow, Principal: {Service: ecs-tasks.amazonaws.com}, Action: sts:AssumeRole}
+      Policies:
+        - PolicyName: ingest
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource:
+                  - !Sub ${Bucket.Arn}/upload/*
+                  - !Sub arn:aws:s3:::${CatalogBucket}/${CatalogPrefix}/*
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: !Sub arn:aws:s3:::${CatalogBucket}
+                Condition:
+                  StringLike: {s3:prefix: [!Sub '${CatalogPrefix}/*', staging/*]}
+              - Effect: Allow
+                Action: [s3:PutObject, s3:DeleteObject]
+                Resource: !Sub arn:aws:s3:::${CatalogBucket}/staging/*
+
+  IngestSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Archive in a Box control panel - conversion task; nothing may connect to it
+      VpcId: !Ref VpcId
+
+  IngestTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub ${AWS::StackName}-ingest
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: !Ref IngestCpu
+      Memory: !Ref IngestMemory
+      EphemeralStorage: {SizeInGiB: !Ref IngestStorage}
+      ExecutionRoleArn: !GetAtt IngestExecutionRole.Arn
+      TaskRoleArn: !GetAtt IngestTaskRole.Arn
+      RuntimePlatform: {CpuArchitecture: X86_64, OperatingSystemFamily: LINUX}
+      ContainerDefinitions:
+        - Name: ingest
+          Image: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ImagePrefix}-tap:live
+          Essential: true
+          EntryPoint: [python, /opt/nexsciTAP/tools/ingest_task.py]
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref IngestLogs
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ingest
 
   # ---- the canary's timer -------------------------------------------------
 

@@ -313,8 +313,52 @@ const VIEW = {
 
   async Datasets(fresh) {
     const d = await get('datasets', null, fresh);
+    const busy = (d.ingests || []).some((i) => i.status === 'RUNNING' || i.status === 'STARTING') || (d.moves || []).some((m) => m.status === 'RUNNING');
+    clearTimeout(VIEW.Datasets.timer);
+    if (busy) VIEW.Datasets.timer = setTimeout(() => { if (tab === 'Datasets' && !document.querySelector('#meta, #upbusy')) { delete store['datasets{}']; show(true); } }, 10000);
+
     let h = d.problem ? `<div class="notice">Table details could not be read from the service:  ${esc(d.problem)}  Sizes below come from the bucket.</div>` : '';
-    h += `<div class="card"><h2>Datasets</h2>${datasetTable(d)}<p class="note">${bytes(d.totalBytes)} in <code>s3://${esc(d.bucket)}/${esc(d.prefix)}/</code>.  Upload and ingest from here are stage 3.</p></div>`;
+    const moving = (d.moves || []).filter((m) => m.status === 'RUNNING');
+    if (moving.length) h += `<div class="notice">In progress:  ${moving.map((m) => esc(m.action + ' ' + m.folder)).join(', ')}.  This page refreshes by itself.</div>`;
+    const failed = (d.moves || []).filter((m) => m.status === 'FAILED' && Date.now() / 1000 - m.started < 3600);
+    if (failed.length) h += `<div class="notice err">${failed.map((m) => esc(m.action + ' ' + m.folder + ' failed:  ' + m.error)).join('<br>')}</div>`;
+
+    h += (d.staged || []).map(stagedCard).join('');
+
+    h += '<div class="card"><h2>Served</h2><div class="scroll"><table><tr><th>Table</th><th class="num">Rows</th><th class="num">Size</th><th class="num">Files</th><th class="num">Columns</th><th>Metadata</th><th class="num">Queries, 24 h</th><th>Changed</th><th></th></tr>' +
+      d.tables.map((t) => {
+        const meta = t.columns == null ? '<span class="note">not served yet</span>' : `<span class="note">${t.noDescription ? t.noDescription + ' lack a description' : 'all described'};  ${t.noUnit} have no unit</span>`;
+        const vs = (d.versions || {})[t.folder] || [];
+        return `<tr><td><span class="mono">${esc(t.table)}</span>${t.folder && t.folder !== t.table ? `<div class="note">folder ${esc(t.folder)}</div>` : ''}<div class="note">${esc(t.description || '')}</div></td>` +
+          `<td class="num">${num(t.rows)}</td><td class="num">${bytes(t.bytes)}</td><td class="num">${num(t.files)}</td><td class="num">${num(t.columns)}</td><td>${meta}</td><td class="num">${num(t.queries24h)}</td><td class="note" style="white-space:nowrap">${when(t.modified)}</td>` +
+          `<td style="white-space:nowrap">${t.folder ? `<button class="sm" data-meta="${esc(t.table)}" data-folder="${esc(t.folder)}" ${t.columns == null ? 'disabled' : ''}>Edit metadata</button> <button class="sm" data-hide="${esc(t.folder)}">Hide</button> <button class="sm" data-remove="${esc(t.folder)}">Remove</button>` : ''}` +
+          (vs.length ? `<div class="note" style="margin-top:4px">${vs.length} earlier version${vs.length === 1 ? '' : 's'}:  ${vs.slice(0, 4).map((v) => `<a href="#" data-restore="${esc(t.folder)}" data-version="${esc(v.version)}">${esc(stampText(v.version))}</a>`).join(', ')}</div>` : '') + '</td></tr>';
+      }).join('') + `</table></div><p class="note">${bytes(d.totalBytes)} in <code>s3://${esc(d.bucket)}/${esc(d.prefix)}/</code>.  The service takes up to five minutes to show a change.  "Remove" keeps the files as an earlier version;  nothing here deletes a served table for good.</p></div>`;
+
+    h += '<div id="metaslot"></div>';
+
+    const gone = Object.entries(d.versions || {}).filter(([f]) => !d.tables.some((t) => t.folder === f) && !(d.hidden || []).some((x) => x.folder === f));
+    if ((d.hidden || []).length || gone.length) {
+      h += '<div class="card gap"><h2>Not served</h2><table><tr><th>Folder</th><th>State</th><th class="num">Size</th><th></th></tr>' +
+        (d.hidden || []).map((x) => `<tr><td class="mono">${esc(x.folder)}</td><td>hidden</td><td class="num">${bytes(x.bytes)}</td><td><button class="sm" data-unhide="${esc(x.folder)}">Serve again</button></td></tr>`).join('') +
+        gone.map(([f, vs]) => `<tr><td class="mono">${esc(f)}</td><td>removed;  ${vs.length} version${vs.length === 1 ? '' : 's'} kept</td><td class="num">${bytes(vs[0].bytes)}</td><td>${vs.slice(0, 3).map((v) => `<button class="sm" data-restore="${esc(f)}" data-version="${esc(v.version)}">Restore ${esc(stampText(v.version))}</button>`).join(' ')}</td></tr>`).join('') + '</table></div>';
+    }
+
+    h += '<div class="card gap"><h2>Add a dataset</h2><div class="form">' +
+      '<label>File <input type="file" id="ufile" accept=".csv,.parquet,.fits,.fit,.vot,.xml,.votable,.gz,.tbl"></label>' +
+      '<label>Table name <input id="uname" size="18" placeholder="my_catalog"></label>' +
+      '<label>RA column <input id="ura" size="9" value="ra"></label><label>Dec column <input id="udec" size="9" value="dec"></label></div>' +
+      '<div class="form" style="margin-top:10px"><label style="flex:1">Description <input id="udesc" style="width:100%" placeholder="What the table is, shown to users"></label>' +
+      '<label>Column list (optional) <input type="file" id="uschema" accept=".csv"></label><button id="ugo" class="go">Upload and convert</button></div>' +
+      '<p class="note" id="ustate">CSV, Parquet, FITS or VOTable, up to 5 GB from the browser.  Positions must be in degrees.  The column list is a CSV with a header and the columns <code>column_name, datatype, unit, ucd, description</code>;  it gives a CSV file its types and any file its units and descriptions.  The result goes to staging for you to look at before anything is served.</p></div>';
+
+    if ((d.ingests || []).length) {
+      h += '<div class="card gap"><h2>Conversions</h2><table><tr><th>Table</th><th>Kind</th><th>Started</th><th>Took</th><th>State</th><th></th></tr>' +
+        d.ingests.map((i) => `<tr><td class="mono">${esc(i.folder)}</td><td>${i.what === 'describe' ? 'metadata' : 'new data'}</td><td class="note">${when(i.started)}</td><td class="num">${i.ended ? Math.round(i.ended - i.started) + ' s' : ''}</td>` +
+          `<td class="${i.status === 'FAILED' || i.status === 'GONE' ? 'badText' : i.status === 'STAGED' ? 'goodText' : ''}">${{STARTING: 'starting', RUNNING: 'running', STAGED: 'finished', FAILED: 'failed', GONE: 'lost'}[i.status] || esc(i.status)}${i.reason ? ' <span class="note">' + esc(i.reason) + '</span>' : ''}</td>` +
+          `<td><button class="sm" data-log="${esc(i.task.split('/').pop())}">Log</button></td></tr>`).join('') + '</table><div id="logslot"></div></div>';
+    }
+    setTimeout(() => wireDatasets(d));
     return h;
   },
 
@@ -412,6 +456,81 @@ function scheduleCard(s) {
     `<select id="stz">${['America/Los_Angeles', 'America/Denver', 'America/Chicago', 'America/New_York', 'UTC', 'Europe/London', 'Europe/Paris'].map((z) => `<option ${z === c.tz ? 'selected' : ''}>${z}</option>`).join('')}</select>` +
     `<span>with <select id="scount">${Array.from({length: s.taskCap}, (_, i) => `<option ${i + 1 === (c.count || 1) ? 'selected' : ''}>${i + 1}</option>`).join('')}</select> task(s)</span>` +
     `<button id="ssave">Save</button></div><p class="note">${now}  Outside those hours the service is in standby.  The timer looks every five minutes.</p></div>`;
+}
+function stampText(v) { const m = /^(\d{4})(\d\d)(\d\d)T(\d\d)(\d\d)/.exec(v); return m ? `${m[2]}/${m[3]} ${m[4]}:${m[5]} UTC${v.endsWith('removed') ? ' (removed)' : ''}` : v; }
+function stagedCard(r) {
+  const f = esc(r.folder);
+  if (!r.ok) return `<div class="card" style="margin-bottom:16px"><h2>Staged:  <span class="mono">${f}</span> <span class="badText">failed</span></h2><p>${esc(r.error || 'The conversion did not finish.')}</p>${r.toolOutput ? `<details><summary class="note">Output of the conversion</summary><div class="log">${esc(r.toolOutput)}</div></details>` : ''}<div class="tools gap"><button data-discard="${f}">Discard</button></div></div>`;
+  const p = r.position || {}, deg = (v) => v == null ? '?' : Number(v).toFixed(4);
+  let h = `<div class="card" style="margin-bottom:16px"><h2>Staged:  <span class="mono">${f}</span> ${r.replaces ? '<span class="warnText">replaces the served table of that name</span>' : '<span class="note">a new table</span>'}</h2>`;
+  h += `<div class="grid g4">${tile('Rows', num(r.rows), '')}${tile('Size', bytes(r.bytes), (r.files || []).length + ' file' + ((r.files || []).length === 1 ? '' : 's'))}${tile('Columns', num((r.columns || []).length - 1), `${r.noDescription} lack a description;  ${r.noUnit} have no unit`)}` +
+       tile('Positions', `<span style="font-size:14px;font-weight:400">RA ${deg(p.raMin)} to ${deg(p.raMax)}<br>Dec ${deg(p.decMin)} to ${deg(p.decMax)}</span>`, r.samePosition ? num(r.samePosition) + ' rows share a position' : 'no repeated positions') + '</div>';
+  if (r.description) h += `<p class="gap">${esc(r.description)}</p>`;
+  if ((r.notes || []).length) h += '<div class="notice gap" style="margin-bottom:0">' + r.notes.map(esc).join('<br>') + '</div>';
+  if (r.sample) h += `<details class="gap"><summary class="note">First rows</summary><div class="scroll"><table><tr>${r.sample.columns.map((c) => `<th>${esc(c)}</th>`).join('')}</tr>${r.sample.rows.map((row) => `<tr>${row.map((v) => `<td class="mono">${v == null ? '<span class="note">null</span>' : esc(v)}</td>`).join('')}</tr>`).join('')}</table></div></details>`;
+  h += `<details class="gap"><summary class="note">Columns</summary><div class="scroll"><table><tr><th>Column</th><th>Type</th><th>Unit</th><th class="num">Empty</th><th>Description</th></tr>${(r.columns || []).map((c) => `<tr><td class="mono">${esc(c.name)}</td><td class="note">${esc(c.type)}</td><td>${esc(c.unit)}</td><td class="num">${num(c.nulls)}</td><td class="note">${esc(c.description)}</td></tr>`).join('')}</table></div></details>`;
+  return h + `<div class="tools gap"><button class="go" data-publish="${f}" data-replaces="${r.replaces ? 1 : ''}">Publish</button><button data-discard="${f}">Discard</button><span class="note">Converted ${when(r.ended)}${r.mode === 'describe' ? ';  metadata only, the data is unchanged' : ''}.</span></div></div>`;
+}
+function wireDatasets(d) {
+  const each = (sel, fn) => document.querySelectorAll(sel).forEach((b) => { b.onclick = (e) => { e.preventDefault(); fn(b.dataset); }; });
+  const move = (action, folder, more, done) => act(Object.assign({action, folder}, more || {}), () => done);
+  each('[data-publish]', (x) => { if (confirm(x.replaces ? `Publish ${x.publish}?\n\nIt replaces the served table of that name.  The files it replaces are kept as an earlier version.` : `Publish ${x.publish}?  The service will list it within five minutes.`)) move('publish', x.publish, null, 'Publishing ' + x.publish + '.'); });
+  each('[data-discard]', (x) => { if (confirm(`Discard the staged ${x.discard}?  Its converted files are deleted;  nothing served changes.`)) move('discard', x.discard, null, 'Discarding.'); });
+  each('[data-hide]', (x) => { if (confirm(`Hide ${x.hide}?\n\nThe service stops listing it within five minutes.  Its files are kept and it can be served again.`)) move('hide', x.hide, null, 'Hiding ' + x.hide + '.'); });
+  each('[data-unhide]', (x) => move('unhide', x.unhide, null, 'Serving ' + x.unhide + ' again.'));
+  each('[data-remove]', (x) => { const typed = prompt(`Remove ${x.remove} from the service?\n\nIts files are kept as an earlier version and can be restored.  Type the folder name to confirm.`); if (typed !== null) move('remove', x.remove, {confirm: typed.trim()}, 'Removing ' + x.remove + '.'); });
+  each('[data-restore]', (x) => { if (confirm(`Serve the version of ${x.restore} kept at ${stampText(x.version)}?\n\nWhat is served now, if anything, is kept as another earlier version.`)) move('restore', x.restore, {version: x.version}, 'Restoring ' + x.restore + '.'); });
+  each('[data-log]', async (x) => { const slot = $('#logslot'); slot.innerHTML = '<p class="note">Reading…</p>'; try { const l = await api('ingestlog', {task: x.log}); slot.innerHTML = '<div class="log gap">' + (l.lines.map((y) => `<span class="t">${clock(y.at)}</span> ${esc(y.message)}`).join('\n') || 'No lines yet.') + '</div>'; } catch (e) { slot.innerHTML = `<p class="badText">${esc(e.message)}</p>`; } });
+  each('[data-meta]', (x) => metaEditor(x.meta, x.folder));
+  const go = $('#ugo'); if (go) go.onclick = () => uploadAndConvert();
+  const file = $('#ufile'); if (file) file.onchange = () => { const n = $('#uname'); if (!n.value && file.files[0]) n.value = file.files[0].name.replace(/\.[^.]*$/, '').toLowerCase().replace(/[^a-z0-9_]+/g, '_').replace(/^[^a-z]+/, '').slice(0, 40); };
+}
+function putFile(url, file, onProgress) {
+  return new Promise((resolve, reject) => {
+    const x = new XMLHttpRequest();
+    x.open('PUT', url);
+    x.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded / e.total); };
+    x.onload = () => (x.status >= 200 && x.status < 300 ? resolve() : reject(new Error('The upload was refused (' + x.status + ').')));
+    x.onerror = () => reject(new Error('The upload did not go through.'));
+    x.send(file);
+  });
+}
+async function uploadAndConvert() {
+  const file = $('#ufile').files[0], schema = $('#uschema').files[0], name = $('#uname').value.trim(), state = $('#ustate');
+  if (!file) return toast('Choose a file first.');
+  if (!/^[a-z][a-z0-9_]{0,62}$/.test(name)) return toast('A table name starts with a letter and has only lower-case letters, digits and "_".');
+  if (file.size > 5e9) return toast('That file is over 5 GB.  Copy it to the bucket from the command line instead.');
+  const go = $('#ugo'); go.disabled = true; go.id = 'upbusy';
+  try {
+    const slot = await post({action: 'upload', filename: file.name});
+    await putFile(slot.url, file, (f) => { state.textContent = `Uploading ${file.name}:  ${(100 * f).toFixed(0)}% of ${bytes(file.size)}`; });
+    let schemaKey = '';
+    if (schema) { const s2 = await post({action: 'upload', filename: 'schema.csv'}); await putFile(s2.url, schema, () => {}); schemaKey = s2.key; }
+    state.textContent = 'Uploaded.  Starting the conversion.';
+    await post({action: 'ingest', name, key: slot.key, schemaKey, description: $('#udesc').value, ra: $('#ura').value, dec: $('#udec').value});
+    for (const k in store) delete store[k];
+    toast('Conversion of ' + name + ' started.  It appears under Staged when it finishes.');
+    show(true);
+  } catch (e) { state.innerHTML = `<span class="badText">${esc(e.message)}</span>`; const b = $('#upbusy'); if (b) { b.disabled = false; b.id = 'ugo'; } }
+}
+async function metaEditor(table, folder) {
+  const slot = $('#metaslot');
+  slot.innerHTML = '<div class="card gap"><p class="note">Reading the columns…</p></div>';
+  try {
+    const c = await api('columns', {table});
+    slot.innerHTML = `<div class="card gap" id="meta"><h2>Metadata of <span class="mono">${esc(table)}</span></h2>` +
+      `<label>Description of the table <input id="mdesc" style="width:100%" value="${esc(c.description)}"></label>` +
+      '<div class="scroll gap" style="max-height:55vh;overflow:auto"><table><tr><th>Column</th><th>Type</th><th>Unit</th><th>UCD</th><th style="width:55%">Description</th></tr>' +
+      c.columns.map((x, i) => `<tr><td class="mono">${esc(x.column_name)}</td><td class="note">${esc(x.datatype)}</td><td><input data-i="${i}" data-k="unit" size="9" value="${esc(x.unit)}"></td><td><input data-i="${i}" data-k="ucd" size="16" value="${esc(x.ucd)}"></td><td><input data-i="${i}" data-k="description" style="width:100%" value="${esc(x.description)}"></td></tr>`).join('') +
+      '</table></div><div class="tools gap"><button class="go" id="msave">Save to staging</button><button id="mcancel">Cancel</button><span class="note">Saving rewrites the files with the new metadata, into staging.  The data does not change, and nothing is served until you publish.</span></div></div>';
+    slot.scrollIntoView({behavior: 'smooth'});
+    $('#mcancel').onclick = () => { slot.innerHTML = ''; };
+    $('#msave').onclick = () => {
+      slot.querySelectorAll('input[data-i]').forEach((el) => { c.columns[+el.dataset.i][el.dataset.k] = el.value; });
+      act({action: 'describe', folder, description: $('#mdesc').value, columns: c.columns.map((x) => ({column_name: x.column_name, unit: x.unit, ucd: x.ucd, description: x.description}))},
+          () => 'Rewriting ' + folder + ' with the new metadata.  It appears under Staged when it finishes.');
+    };
+  } catch (e) { slot.innerHTML = `<div class="notice err gap">The columns could not be read:  ${esc(e.message)}</div>`; }
 }
 function short(n) { return n.replace('Amazon ', '').replace('AWS ', '').replace('Elastic Container Service', 'ECS (tasks)').replace('Elastic Load Balancing', 'Load balancer').replace('Virtual Private Cloud', 'Public addresses').replace('Simple Storage Service', 'S3').replace('Elastic File System', 'EFS').replace('EC2 Container Registry (ECR)', 'ECR').replace('Elastic Compute Cloud - Compute', 'EC2'); }
 function rel(u, have) { if (!u) return ''; if (u.error) return 'could not check'; const same = have && String(u.tag).replace(/^v/, '') === String(have).replace(/^v/, ''); return `latest release ${esc(u.tag)}${have ? (same ? ' <span class="goodText">(same)</span>' : ' <span class="warnText">(differs)</span>') : ''}`; }
