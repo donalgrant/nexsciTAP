@@ -169,7 +169,7 @@ def view_status(params):
     if desired == 0:
         state = 'standby'
     elif running == 0:
-        state = 'starting' if svc.get('pendingCount') else 'down'
+        state = 'starting'          # asked for, not yet up; 'failing' is for a service that is up and wrong
     elif last and last.get('ok') is False and time.time() - last.get('at', 0) < 900:
         state = 'failing'
     else:
@@ -693,10 +693,18 @@ def healthy_tasks():
 def settle():
     """Once a task answers again, give users the service back instead of the paused page."""
     svc = ecs_service()
-    if svc['desiredCount'] > 0 and is_paused() and healthy_tasks() > 0:
+    # A task of the new start must be running: for a short while after
+    # standby begins, the task being stopped still counts as healthy.
+    if svc['desiredCount'] > 0 and svc['runningCount'] > 0 and is_paused() and healthy_tasks() > 0:
         set_paused(False)
+        save_state('gaveback', {'at': time.time()})
         return True
     return False
+
+
+def just_given_back():
+    """The load balancer takes some seconds to act on a changed rule (20 s seen); don't judge the service in them."""
+    return time.time() - (load_state('gaveback') or {}).get('at', 0) < 90
 
 
 def set_tasks(count, who, why='asked'):
@@ -896,7 +904,7 @@ def run_canary():
         result.update(ok=None, skipped='no way in')
     elif svc['desiredCount'] == 0:
         result.update(ok=None, skipped='standby')
-    elif svc['runningCount'] == 0 or is_paused():
+    elif svc['runningCount'] == 0 or is_paused() or just_given_back():
         result.update(ok=None, skipped='starting')
     else:
         for c in checks:

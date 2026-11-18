@@ -310,6 +310,24 @@ Resources:
       Actions:
         - {Type: forward, TargetGroupArn: !Ref TargetGroup}
 
+  # The control panel (deploy/panel) puts the service in standby by changing
+  # the rule above to answer with a "paused" page.  A target group that no
+  # rule forwards to is not health-checked, so the panel could never tell
+  # when a task is ready again.  This rule matches no real request; it only
+  # keeps the target group in use.
+  StandbyHealthRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref Listener
+      Priority: 2
+      Conditions:
+        - Field: http-header
+          HttpHeaderConfig: {HttpHeaderName: X-Origin-Secret, Values: [!Ref OriginSecret]}
+        - Field: path-pattern
+          PathPatternConfig: {Values: [/__standby-health-only__]}
+      Actions:
+        - {Type: forward, TargetGroupArn: !Ref TargetGroup}
+
   # ---- HTTPS front ----------------------------------------------------
   # CloudFront serves the site at https://<id>.cloudfront.net with Amazon's
   # certificate, so no domain has to be registered.  Nothing is cached.

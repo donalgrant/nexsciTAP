@@ -217,7 +217,7 @@ function canaryTile(c) {
   if (!c.door) return tile('Service checks', '<span class="dot"></span>Not set up', 'the service does not admit the panel yet');
   const l = c.last;
   if (!l) return tile('Service checks', '<span class="dot"></span>No run yet', 'the canary runs every few minutes');
-  if (l.skipped) return tile('Service checks', '<span class="dot"></span>Paused', l.skipped === 'standby' ? 'no checks while in standby' : 'the service does not admit the panel yet');
+  if (l.skipped) return tile('Service checks', '<span class="dot"></span>Paused', l.skipped === 'standby' ? 'no checks while in standby' : l.skipped === 'starting' ? 'no checks while the service starts' : 'the service does not admit the panel yet');
   return tile('Service checks', `<span class="dot ${l.ok ? 'ok' : 'bad'}"></span>${l.ok ? 'Passing' : 'Failing'}`,
               `canary ${ago(l.at)}, ${ms(l.ms)}`);
 }
