@@ -197,10 +197,29 @@ def main():
     p.add_argument('--description', default='', help='what the table is, shown in the table listing')
     p.add_argument('--rows-per-file', type=int, default=5_000_000)
     p.add_argument('--row-group', type=int, default=100_000)
+    p.add_argument('--work', metavar='DIR',
+                   help='keep the working tables on disk in DIR, for a table too large for memory')
+    p.add_argument('--memory', metavar='SIZE', help="most memory DuckDB may use, e.g. 8GB (default: DuckDB's own)")
     args = p.parse_args()
 
-    con = duckdb.connect()
+    # By default the whole table is held in memory, which is quickest and
+    # fine for a few million rows.  --work puts the working tables in a
+    # database file there instead, and --memory bounds what DuckDB keeps in
+    # memory; with both, the size of the table is limited by the disk.
+    # DuckDB reads a machine's memory, not a container's allowance, so in a
+    # container --memory is what keeps the conversion from being killed.
+    if args.work:
+        os.makedirs(args.work, exist_ok=True)
+        scratch = os.path.join(args.work, f'convert-{os.getpid()}.duckdb')
+        con = duckdb.connect(scratch)
+        con.execute(f"SET temp_directory = '{os.path.join(args.work, 'spill')}'")
+    else:
+        scratch = None
+        con = duckdb.connect()
+    if args.memory:
+        con.execute(f"SET memory_limit = '{args.memory}'")
     con.execute('SET preserve_insertion_order = true')
+    temp = '' if scratch else 'TEMP'       # a table in the database file, or in memory
 
     types, declared = read_schema(args.schema) if args.schema else ({}, {})
     rel, carried = read_input(con, args.input, types)  # noqa: F841  (rel is used by name in SQL)
@@ -228,7 +247,7 @@ def main():
 
     select = ', '.join((f'CAST("{old}" AS {types[old]})' if old in types else f'"{old}"') + f' AS "{new}"'
                        for old, new in names.items())
-    con.execute(f'CREATE TEMP TABLE src AS SELECT {select} FROM rel '
+    con.execute(f'CREATE {temp} TABLE src AS SELECT {select} FROM rel '
                 'WHERE "{0}" IS NOT NULL AND "{1}" IS NOT NULL'.format(args.ra, args.dec))
 
     total_in = con.execute('SELECT count(*) FROM rel').fetchone()[0]
@@ -240,7 +259,7 @@ def main():
         sys.exit(f'Declination runs from {lo} to {hi}; it must be in degrees.')
 
     # The index is computed in numpy, a slice at a time, and joined back by row id.
-    con.execute('CREATE TEMP TABLE idx (rid BIGINT, hpx29 BIGINT)')
+    con.execute(f'CREATE {temp} TABLE idx (rid BIGINT, hpx29 BIGINT)')
     nside = 2 ** ORDER
     step = 5_000_000
     for start in range(0, kept, step):
@@ -253,9 +272,12 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
 
     parts = max(1, -(-kept // args.rows_per_file))
-    con.execute('CREATE TEMP TABLE sorted AS SELECT src.*, idx.hpx29, '
-                'row_number() OVER (ORDER BY idx.hpx29) - 1 AS _n '
-                'FROM src JOIN idx ON src.rowid = idx.rid')
+    # Each row's place in the output.  Only the index is sorted as a whole,
+    # three numbers a row; the rows themselves are brought together a file
+    # at a time below, so memory is set by --rows-per-file, not by the table.
+    con.execute(f'CREATE {temp} TABLE place AS SELECT rid, hpx29, '
+                'row_number() OVER (ORDER BY hpx29, rid) - 1 AS _n FROM idx')
+    con.execute('DROP TABLE idx')
 
     # What the columns mean, under their output names: what the input
     # carried, then what --schema says, which wins.
@@ -266,10 +288,10 @@ def main():
         meta[pos].setdefault('unit', 'deg')
     meta['hpx29'] = {'description': 'Nested HEALPix index of (ra, dec) at order 29, added on conversion; '
                                     'the files are sorted by it'}
-    out_cols = [(r[0], r[1]) for r in con.execute('DESCRIBE SELECT * EXCLUDE (_n) FROM sorted').fetchall()]
+    out_cols = [(r[0], r[1]) for r in con.execute('DESCRIBE SELECT src.*, place.hpx29 FROM src JOIN place ON src.rowid = place.rid').fetchall()]
     text_cols = [c for c, t in out_cols if t.upper() == 'VARCHAR']
     if text_cols:
-        widths = con.execute('SELECT ' + ', '.join(f'max(length("{c}"))' for c in text_cols) + ' FROM sorted').fetchone()
+        widths = con.execute('SELECT ' + ', '.join(f'max(length("{c}"))' for c in text_cols) + ' FROM src').fetchone()
         for c, w in zip(text_cols, widths):
             meta.setdefault(c, {})['width'] = max(1, w or 1)
     votable = votable_metadata.build([(c, t, meta.get(c, {})) for c, t in out_cols], args.description)
@@ -279,8 +301,15 @@ def main():
     for part in range(parts):
         out = os.path.join(args.output_dir, f'part-{part:02d}.parquet')
         a, b = part * args.rows_per_file, (part + 1) * args.rows_per_file
-        con.execute(f"""COPY (SELECT * EXCLUDE (_n) FROM sorted WHERE _n >= {a} AND _n < {b} ORDER BY _n)
+        con.execute(f"""COPY (SELECT src.*, place.hpx29 FROM src JOIN place ON src.rowid = place.rid
+                              WHERE place._n >= {a} AND place._n < {b} ORDER BY place._n)
                         TO '{out}' (FORMAT parquet, COMPRESSION zstd, ROW_GROUP_SIZE {args.row_group}, {kv})""")
+
+    if scratch:
+        con.close()
+        for leftover in (scratch, scratch + '.wal'):
+            if os.path.exists(leftover):
+                os.remove(leftover)
 
     print(f'{kept:,} rows in {parts} file(s) under {args.output_dir}'
           + (f'  ({total_in - kept:,} rows without a position dropped)' if total_in != kept else ''))

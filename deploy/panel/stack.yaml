@@ -362,6 +362,8 @@ Resources:
           Image: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ImagePrefix}-tap:live
           Essential: true
           EntryPoint: [python, /opt/nexsciTAP/tools/ingest_task.py]
+          Environment:
+            - {Name: TASK_MEMORY_MB, Value: !Ref IngestMemory}
           LogConfiguration:
             LogDriver: awslogs
             Options:

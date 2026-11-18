@@ -28,6 +28,7 @@ Everything is given in the environment:
     DEST_PREFIX     the staging folder, ending in "/"
     DESCRIPTION     what the table is (optional)
     RA, DEC         names of the position columns in the input (default ra, dec)
+    TASK_MEMORY_MB  the task's memory; the conversion keeps to half of it
     WORK            a local directory with room for input and output (default /tmp/ingest)
 
 The report is DEST_PREFIX + "_report.json".  It is written whether the
@@ -213,7 +214,12 @@ def main():
                 s3.download_file(env('SRC_BUCKET'), key, local)
             report['inputBytes'] = size
 
-            args = ['make_parquet_catalog.py', local, outdir, '--ra', env('RA', 'ra'), '--dec', env('DEC', 'dec')]
+            args = ['make_parquet_catalog.py', local, outdir, '--ra', env('RA', 'ra'), '--dec', env('DEC', 'dec'),
+                    '--work', os.path.join(work, 'scratch')]
+            # Half of the task's memory for DuckDB; the rest is for Python,
+            # which holds five million positions at a time, and for the system.
+            if env('TASK_MEMORY_MB').isdigit():
+                args += ['--memory', f"{int(env('TASK_MEMORY_MB')) // 2}MB"]
             if schema:
                 args += ['--schema', schema]
             if env('DESCRIPTION'):
