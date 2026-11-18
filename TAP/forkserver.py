@@ -318,9 +318,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
             traceback.print_exc()
             status = 1
 
+        # The query as the client wrote it; the service keeps only its translation.
+        asked = ''
+        try:
+            form = _tap.Tap.form
+            for key in form.keys():
+                if key.lower() == 'query':
+                    asked = form[key].value
+        except Exception:
+            pass
+
         try:
             log_query(self.command, path_info, client, started, status,
-                      seen[0] if seen else None, os.getpid() != request_pid)
+                      seen[0] if seen else None, os.getpid() != request_pid, asked)
         except Exception as e:                      # a record, never a reason to fail
             sys.stderr.write(f'query record failed: {e!r}\n')
 
@@ -343,7 +353,7 @@ VERSION_RECORD = 'TAPV'
 QUERY_TEXT_LIMIT = 4000
 
 
-def log_query(method, path_info, client, started, status, tap, is_job):
+def log_query(method, path_info, client, started, status, tap, is_job, asked=''):
     """
     One line on standard error for each request the service handled, as JSON
     after the word TAPQ, for whoever counts queries from the log:
@@ -357,7 +367,9 @@ def log_query(method, path_info, client, started, status, tap, is_job):
                 has a line of its own
         phase   COMPLETED or ERROR for a query that ran; absent otherwise
         rows    rows returned, for a query that completed
-        fmt, q  the output format and the query as the client sent it
+        fmt, q  the output format and the query as the client sent it (ADQL).
+                For a job started by a later request, which carries no
+                query, q is the service's translation of it
         err     the service's message, for a query that failed
     """
 
@@ -369,7 +381,7 @@ def log_query(method, path_info, client, started, status, tap, is_job):
         rec['err'] = 'internal error'
 
     if tap is not None:
-        query = getattr(tap, 'query', '') or ''
+        query = asked or getattr(tap, 'query', '') or ''
         phase = getattr(tap, 'phase', '') or ''
 
         if query:
@@ -400,7 +412,13 @@ def log_versions():
         from importlib import metadata
         rec['nexsciTAP'] = metadata.version('nexsciTAP')
     except Exception:
-        pass
+        # Run from a source tree: the version is in setup.py beside the package.
+        try:
+            setup = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'setup.py')
+            with open(setup) as f:
+                rec['nexsciTAP'] = re.search(r"version\s*=\s*['\"]([^'\"]+)", f.read()).group(1)
+        except Exception:
+            pass
 
     for name in ('duckdb', 'pyarrow', 'astropy'):
         try:

@@ -168,7 +168,8 @@ def view_status(params):
         'state': state, 'desired': desired, 'running': running, 'pending': svc.get('pendingCount', 0),
         'taskCap': TASK_CAP, 'serviceUrl': SERVICE_URL,
         'canary': {'last': last, 'history': history[-72:],
-                   'day': {'runs': len(day), 'failed': sum(1 for h in day if not h['ok'])},
+                   'day': {'runs': len(day), 'failed': sum(1 for h in day if h['ok'] is False),
+                           'skipped': sum(1 for h in day if h['ok'] is None)},
                    'door': bool(SECRET)},
         'deployments': deployments, 'events': events,
     }

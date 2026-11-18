@@ -402,7 +402,7 @@ def test_every_request_leaves_a_record(fixture_root: Path):
                 assert proc.poll() is None
                 time.sleep(0.1)
 
-        ok = requests.post(base + "/TAP/sync", data={"query": "select l0filename\n from   data_l0", "format": "csv"})
+        ok = requests.post(base + "/TAP/sync", data={"QUERY": "select l0filename\n from   data_l0", "format": "csv"})
         assert ok.status_code == 200
         bad = requests.post(base + "/TAP/sync", data={"query": "select nothing from nowhere", "format": "csv"})
         assert bad.status_code != 200

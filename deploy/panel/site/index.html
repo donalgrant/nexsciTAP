@@ -220,7 +220,7 @@ const VIEW = {
     if (s.canary.history && s.canary.history.length) {
       h += `<div class="card gap"><h2>Service checks, last ${s.canary.history.length} runs</h2><div class="strip">` +
         s.canary.history.map((c) => `<i class="${c.ok === null ? 'skip' : c.ok ? '' : 'bad'}" title="${when(c.at)}: ${c.ok === null ? 'skipped' : c.ok ? 'passed, ' + ms(c.ms) : 'failed'}"></i>`).join('') +
-        `</div><p class="note">${s.canary.day.runs} runs in the last 24 hours, ${s.canary.day.failed} failed.</p>` + canaryDetail(s.canary.last) + '</div>';
+        `</div><p class="note">${s.canary.day.runs} runs in the last 24 hours, ${s.canary.day.failed} failed${s.canary.day.skipped ? ', ' + s.canary.day.skipped + ' skipped' : ''}.</p>` + canaryDetail(s.canary.last) + '</div>';
     }
     h += '<div class="card gap"><h2>Service events</h2><table>' + s.events.map((e) => `<tr><td class="note" style="white-space:nowrap">${when(e.at)}</td><td>${esc(e.message)}</td></tr>`).join('') + '</table></div>';
     return h;
