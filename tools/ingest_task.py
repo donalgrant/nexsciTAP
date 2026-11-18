@@ -18,7 +18,8 @@ Everything is given in the environment:
     MODE            convert | describe
     NAME            table name, for the report
     SRC_BUCKET      bucket of the input
-    SRC_KEY         convert:  key of the file to convert
+    SRC_KEY         convert:  key of the file to convert, or, ending in "/", a folder
+                    of CSV files or of Parquet files that make up one table
     SRC_PREFIX      describe: folder of the catalog to describe, ending in "/"
     SCHEMA_KEY      optional (required to describe): key, in SRC_BUCKET or
                     SCHEMA_BUCKET, of the CSV of column types and metadata
@@ -51,9 +52,12 @@ def env(name, default=''):
 
 def run_tool(args, report):
     """Run one of the tools beside this file; its output goes to the log and its tail to the report."""
-    cmd = [sys.executable] + args
+    cmd = [sys.executable, os.path.join(HERE, args[0])] + args[1:]
     print('+', ' '.join(cmd), flush=True)
-    done = subprocess.run(cmd, cwd=HERE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    # Run where there is room: the tools sort on disk when memory runs out,
+    # in the directory they are started from.
+    done = subprocess.run(cmd, cwd=os.environ.get('WORK_DIR') or HERE,
+                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     print(done.stdout, flush=True)
     report['toolOutput'] = done.stdout[-4000:]
     if done.returncode != 0:
@@ -164,6 +168,7 @@ def main():
     indir, outdir = os.path.join(work, 'in'), os.path.join(work, 'out')
     os.makedirs(indir, exist_ok=True)
     os.makedirs(outdir, exist_ok=True)
+    os.environ['WORK_DIR'] = work
 
     if not dest_bucket or not dest.endswith('/') or dest.count('/') < 2:
         sys.exit('DEST_BUCKET and DEST_PREFIX (a folder inside the staging area, ending in "/") are required.')
@@ -180,11 +185,33 @@ def main():
 
         if mode == 'convert':
             key = env('SRC_KEY')
-            local = os.path.join(indir, os.path.basename(key))
-            size = s3.head_object(Bucket=env('SRC_BUCKET'), Key=key)['ContentLength']
+            if key.endswith('/'):
+                # A folder of files that are one table: all CSV, or all Parquet.
+                src = os.path.join(indir, 'table')
+                os.makedirs(src, exist_ok=True)
+                kinds, size = set(), 0
+                for page in s3.get_paginator('list_objects_v2').paginate(Bucket=env('SRC_BUCKET'), Prefix=key):
+                    for o in page.get('Contents', []):
+                        name = o['Key'][len(key):]
+                        low = name.lower()
+                        kind = ('parquet' if low.endswith(('.parquet', '.pq')) else
+                                'csv' if low.endswith(('.csv', '.csv.gz')) else None)
+                        if '/' in name or not kind:
+                            continue
+                        kinds.add(kind)
+                        size += o['Size']
+                        print(f'fetching {o["Key"]} ({o["Size"]:,} bytes)', flush=True)
+                        s3.download_file(env('SRC_BUCKET'), o['Key'], os.path.join(src, name))
+                if len(kinds) != 1:
+                    raise RuntimeError('The folder must hold CSV files only or Parquet files only; it holds '
+                                       + (' and '.join(sorted(kinds)) if kinds else 'neither') + '.')
+                local = os.path.join(src, '*.parquet' if kinds == {'parquet'} else '*.csv*')
+            else:
+                local = os.path.join(indir, os.path.basename(key))
+                size = s3.head_object(Bucket=env('SRC_BUCKET'), Key=key)['ContentLength']
+                print(f'fetching s3://{env("SRC_BUCKET")}/{key} ({size:,} bytes)', flush=True)
+                s3.download_file(env('SRC_BUCKET'), key, local)
             report['inputBytes'] = size
-            print(f'fetching s3://{env("SRC_BUCKET")}/{key} ({size:,} bytes)', flush=True)
-            s3.download_file(env('SRC_BUCKET'), key, local)
 
             args = ['make_parquet_catalog.py', local, outdir, '--ra', env('RA', 'ra'), '--dec', env('DEC', 'dec')]
             if schema:

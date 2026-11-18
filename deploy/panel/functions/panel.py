@@ -472,6 +472,7 @@ def view_datasets(params):
     return {'tables': out, 'problem': problem, 'bucket': CATALOG_BUCKET, 'prefix': CATALOG_PREFIX,
             'totalBytes': sum(f['bytes'] for f in folders.values()),
             'staged': staged(), 'ingests': ingests(), 'hidden': area_folders('hidden/'),
+            'incoming': incoming(), 'uploadArea': f's3://{STATE_BUCKET}/{INCOMING}',
             'versions': versions(), 'moves': moves()}
 
 
@@ -1011,6 +1012,29 @@ def ingests():
     return list(reversed(held))[:15]
 
 
+INCOMING = 'upload/incoming/'
+
+
+def incoming():
+    """
+    Files an administrator copied to the bucket by hand, for tables too large
+    to send from a browser: single files, and folders of files that are one table.
+    """
+    files, folders = [], {}
+    for o in keys_under(INCOMING, STATE_BUCKET):
+        rest = o['Key'][len(INCOMING):]
+        if not rest or rest.endswith('/'):
+            continue
+        if '/' not in rest:
+            files.append({'key': o['Key'], 'name': rest, 'bytes': o['Size'], 'modified': o['LastModified'].timestamp()})
+        elif rest.count('/') == 1:
+            f = folders.setdefault(rest.split('/')[0], {'files': 0, 'bytes': 0, 'modified': 0})
+            f['files'] += 1
+            f['bytes'] += o['Size']
+            f['modified'] = max(f['modified'], o['LastModified'].timestamp())
+    return files + [{'key': f'{INCOMING}{k}/', 'name': k + '/', **v} for k, v in sorted(folders.items())]
+
+
 def upload_slot(body):
     """Somewhere to put a file, and a link good for an hour that lets the browser put it there."""
     import secrets
@@ -1056,10 +1080,14 @@ def start_ingest(body, who):
     key = str(body.get('key') or '')
     if not key.startswith('upload/') or '..' in key:
         raise Refused('Upload the file first.')
-    try:
-        aws('s3').head_object(Bucket=STATE_BUCKET, Key=key)
-    except ClientError:
-        raise Refused('The uploaded file is not there.  Upload it again.')
+    if key.endswith('/'):
+        if not key.startswith(INCOMING) or not keys_under(key, STATE_BUCKET)[:1]:
+            raise Refused('That folder is not in the incoming area.')
+    else:
+        try:
+            aws('s3').head_object(Bucket=STATE_BUCKET, Key=key)
+        except ClientError:
+            raise Refused('The uploaded file is not there.  Upload it again.')
     schema = str(body.get('schemaKey') or '')
     if schema and (not schema.startswith('upload/') or '..' in schema):
         raise Refused('The column list was not uploaded.')

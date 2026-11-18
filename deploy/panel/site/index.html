@@ -324,7 +324,7 @@ const VIEW = {
     if (failed.length) h += `<div class="notice err">${failed.map((m) => esc(m.action + ' ' + m.folder + ' failed:  ' + m.error)).join('<br>')}</div>`;
 
     const converting = (d.ingests || []).filter((i) => i.status === 'RUNNING' || i.status === 'STARTING');
-    if (converting.length) h += `<div class="notice">Converting ${converting.map((i) => '<b>' + esc(i.folder) + '</b>' + (i.what === 'describe' ? ' (new metadata)' : '')).join(', ')}.  This takes about a minute for a small table.  When it finishes, the result appears here, at the top of this page, with a <b>Publish</b> button.  The page refreshes by itself.</div>`;
+    if (converting.length) h += `<div class="notice">Converting ${converting.map((i) => '<b>' + esc(i.folder) + '</b>' + (i.what === 'describe' ? ' (new metadata)' : '')).join(', ')}.  This takes about a minute for a small table and longer for a large one.  When it finishes, the result appears here, at the top of this page, with a <b>Publish</b> button.  The page refreshes by itself.</div>`;
     h += (d.staged || []).map(stagedCard).join('');
 
     h += '<div class="card"><h2>Served</h2><div class="scroll"><table><tr><th>Table</th><th class="num">Rows</th><th class="num">Size</th><th class="num">Files</th><th class="num">Columns</th><th>Metadata</th><th class="num">Queries, 24 h</th><th>Changed</th><th></th></tr>' +
@@ -352,6 +352,7 @@ const VIEW = {
       '<label>RA column <input id="ura" size="9" value="ra"></label><label>Dec column <input id="udec" size="9" value="dec"></label></div>' +
       '<div class="form" style="margin-top:10px"><label style="flex:1">Description <input id="udesc" style="width:100%" placeholder="What the table is, shown to users"></label>' +
       '<label>Column list (optional) <input type="file" id="uschema" accept=".csv"></label><button id="ugo" class="go">Upload and convert</button></div>' +
+      incomingBlock(d) +
       '<p class="note" id="ustate">CSV, Parquet, FITS or VOTable, up to 5 GB from the browser.  Positions must be in degrees.  The column list is a CSV with a header and the columns <code>column_name, datatype, unit, ucd, description</code>;  it gives a CSV file its types and any file its units and descriptions.  The result goes to staging for you to look at before anything is served.</p></div>';
 
     if ((d.ingests || []).length) {
@@ -460,6 +461,31 @@ function scheduleCard(s) {
     `<button id="ssave">Save</button></div><p class="note">${now}  Outside those hours the service is in standby.  The timer looks every five minutes.</p></div>`;
 }
 function stampText(v) { const m = /^(\d{4})(\d\d)(\d\d)T(\d\d)(\d\d)/.exec(v); return m ? `${m[2]}/${m[3]} ${m[4]}:${m[5]} UTC${v.endsWith('removed') ? ' (removed)' : ''}` : v; }
+function incomingBlock(d) {
+  const area = d.uploadArea || '', list = d.incoming || [];
+  return '<details class="gap" ' + (list.length ? 'open' : '') + '><summary>A file too large for the browser, or already on a machine with the AWS command line</summary>' +
+    '<p class="note gap">Copy it to the incoming area yourself, then start the conversion here.  Fill in the table name and the other fields above first;  they apply to whichever item you convert.</p>' +
+    `<p class="note">One file:</p><div class="log">aws s3 cp MY_TABLE.csv ${esc(area)}</div>` +
+    `<p class="note gap">Several CSV files, or several Parquet files, that together are one table:</p><div class="log">aws s3 cp MY_FOLDER ${esc(area)}MY_TABLE/ --recursive</div>` +
+    '<p class="note gap">The command line sends a large file in parts, so there is no 5 GB limit.  Files left in the incoming area are deleted after seven days.</p>' +
+    (list.length ? '<table class="gap"><tr><th>In the incoming area</th><th class="num">Size</th><th>Copied</th><th></th></tr>' +
+      list.map((x) => `<tr><td class="mono">${esc(x.name)}${x.files ? ` <span class="note">${x.files} file${x.files === 1 ? '' : 's'}</span>` : ''}</td><td class="num">${bytes(x.bytes)}</td><td class="note">${when(x.modified)}</td><td><button class="sm" data-incoming="${esc(x.key)}">Convert this</button></td></tr>`).join('') + '</table>'
+      : '<p class="note gap">Nothing is in the incoming area now.  <a href="#" id="increfresh">Look again</a></p>') + '</details>';
+}
+async function convertIncoming(key) {
+  const name = $('#uname').value.trim(), schema = $('#uschema').files[0];
+  if (!/^[a-z][a-z0-9_]{0,62}$/.test(name)) return toast('Give the table a name first:  a letter, then lower-case letters, digits and "_".');
+  if (!confirm(`Convert ${key.replace('upload/incoming/', '')} into a table named ${name}?`)) return;
+  try {
+    let schemaKey = '';
+    if (schema) { const s2 = await post({action: 'upload', filename: 'schema.csv'}); await putFile(s2.url, schema, () => {}); schemaKey = s2.key; }
+    await post({action: 'ingest', name, key, schemaKey, description: $('#udesc').value, ra: $('#ura').value, dec: $('#udec').value});
+    for (const k in store) delete store[k];
+    toast('Conversion of ' + name + ' started.  A large table can take many minutes;  it appears at the top of this page when it finishes.');
+    window.scrollTo({top: 0, behavior: 'smooth'});
+    show(true);
+  } catch (e) { toast('Not started:  ' + e.message); }
+}
 function stagedCard(r) {
   const f = esc(r.folder);
   if (!r.ok) return `<div class="card" style="margin-bottom:16px"><h2>Staged:  <span class="mono">${f}</span> <span class="badText">failed</span></h2><p>${esc(r.error || 'The conversion did not finish.')}</p>${r.toolOutput ? `<details><summary class="note">Output of the conversion</summary><div class="log">${esc(r.toolOutput)}</div></details>` : ''}<div class="tools gap"><button data-discard="${f}">Discard</button></div></div>`;
@@ -484,6 +510,8 @@ function wireDatasets(d) {
   each('[data-restore]', (x) => { if (confirm(`Serve the version of ${x.restore} kept at ${stampText(x.version)}?\n\nWhat is served now, if anything, is kept as another earlier version.`)) move('restore', x.restore, {version: x.version}, 'Restoring ' + x.restore + '.'); });
   each('[data-log]', async (x) => { const slot = $('#logslot'); slot.innerHTML = '<p class="note">Reading…</p>'; try { const l = await api('ingestlog', {task: x.log}); slot.innerHTML = '<div class="log gap">' + (l.lines.map((y) => `<span class="t">${clock(y.at)}</span> ${esc(y.message)}`).join('\n') || 'No lines yet.') + '</div>'; } catch (e) { slot.innerHTML = `<p class="badText">${esc(e.message)}</p>`; } });
   each('[data-meta]', (x) => metaEditor(x.meta, x.folder));
+  each('[data-incoming]', (x) => convertIncoming(x.incoming));
+  const again = $('#increfresh'); if (again) again.onclick = (e) => { e.preventDefault(); delete store['datasets{}']; show(true); };
   const go = $('#ugo'); if (go) go.onclick = () => uploadAndConvert();
   const file = $('#ufile'); if (file) file.onchange = () => { const n = $('#uname'); if (!n.value && file.files[0]) n.value = file.files[0].name.replace(/\.[^.]*$/, '').toLowerCase().replace(/[^a-z0-9_]+/g, '_').replace(/^[^a-z]+/, '').slice(0, 40); };
 }

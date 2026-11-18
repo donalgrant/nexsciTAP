@@ -198,6 +198,11 @@ Resources:
                 Action: [s3:GetObject, s3:PutObject]
                 Resource: !Sub ${Bucket.Arn}/upload/*
               - Effect: Allow
+                Action: s3:ListBucket
+                Resource: !GetAtt Bucket.Arn
+                Condition:
+                  StringLike: {s3:prefix: upload/*}
+              - Effect: Allow
                 Action: ecs:RunTask
                 Resource: !Sub arn:aws:ecs:${AWS::Region}:${AWS::AccountId}:task-definition/${AWS::StackName}-ingest:*
               - Effect: Allow
@@ -325,6 +330,11 @@ Resources:
                 Resource: !Sub arn:aws:s3:::${CatalogBucket}
                 Condition:
                   StringLike: {s3:prefix: [!Sub '${CatalogPrefix}/*', staging/*]}
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: !GetAtt Bucket.Arn
+                Condition:
+                  StringLike: {s3:prefix: upload/*}
               - Effect: Allow
                 Action: [s3:PutObject, s3:DeleteObject]
                 Resource: !Sub arn:aws:s3:::${CatalogBucket}/staging/*
