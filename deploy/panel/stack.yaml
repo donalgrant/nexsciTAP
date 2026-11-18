@@ -26,8 +26,29 @@ Parameters:
       through the service's access check.  Empty:  the canary and the table details wait.
   AdminCidr:
     Type: String
-    AllowedPattern: '^\d+\.\d+\.\d+\.\d+/\d+$'
-    Description: The one IPv4 range admitted to the panel, e.g. 203.0.113.7/32.
+    AllowedPattern: '^\d+\.\d+\.\d+\.\d+/\d+(,\d+\.\d+\.\d+\.\d+/\d+)*$'
+    Description: >-
+      The IPv4 ranges admitted to the panel, separated by commas, e.g.
+      203.0.113.7/32 or 134.4.0.0/16,131.215.0.0/16.  This is the outer door;
+      sign-in is the inner one.
+  SignIn:
+    Type: String
+    AllowedValues: [required, 'off']
+    Default: required
+    Description: Whether the panel's views and controls need a signed-in user.
+  CallbackUrl:
+    Type: String
+    Default: ''
+    Description: >-
+      The panel's own address, https://dxxxx.cloudfront.net/, where sign-in returns to.
+      It is an output of this stack, so it is known from the second deployment on;
+      deploy.sh fills it in.
+  SessionHours:
+    Type: Number
+    Default: 8
+    MinValue: 1
+    MaxValue: 24
+    Description: Hours a sign-in lasts.
   CatalogBucket:
     Type: String
   CatalogPrefix:
@@ -63,6 +84,9 @@ Parameters:
     Type: Number
     Default: 100
     Description: Disk of the conversion task in GiB (21 to 200); it holds the input and the output at once.
+
+Conditions:
+  HaveCallback: !Not [!Equals [!Ref CallbackUrl, '']]
 
 Resources:
 
@@ -100,6 +124,66 @@ Resources:
             Condition:
               StringEquals:
                 AWS:SourceArn: !Sub arn:aws:cloudfront::${AWS::AccountId}:distribution/${Distribution}
+
+  # ---- who may sign in -----------------------------------------------------
+  # Accounts are made by an administrator only (aws cognito-idp
+  # admin-create-user); nobody can sign themselves up.  Every account needs a
+  # password and a code from an authenticator app.
+
+  Users:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Ref AWS::StackName
+      UsernameAttributes: [email]
+      AutoVerifiedAttributes: [email]
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: true
+        InviteMessageTemplate:
+          EmailSubject: Archive in a Box control panel - your account
+          EmailMessage: >-
+            An account for the Archive in a Box control panel has been made for {username}.
+            Your temporary password is {####}  It is good for seven days.  At your first
+            sign-in you choose your own password and add the panel to an authenticator app.
+      MfaConfiguration: 'ON'
+      EnabledMfas: [SOFTWARE_TOKEN_MFA]
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 12
+          RequireLowercase: true
+          RequireUppercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+          TemporaryPasswordValidityDays: 7
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - {Name: verified_email, Priority: 1}
+
+  UsersDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      UserPoolId: !Ref Users
+      Domain: !Sub ${AWS::StackName}-${AWS::AccountId}
+
+  UsersClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref Users
+      ClientName: panel-page
+      GenerateSecret: false
+      SupportedIdentityProviders: [COGNITO]
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthFlows: [code]
+      # The last scope is what lets the functions ask Cognito whose token they hold.
+      AllowedOAuthScopes: [openid, email, aws.cognito.signin.user.admin]
+      CallbackURLs: [!If [HaveCallback, !Ref CallbackUrl, 'https://example.invalid/']]
+      LogoutURLs: [!If [HaveCallback, !Ref CallbackUrl, 'https://example.invalid/']]
+      # The admin flow is for a test from the command line by someone who holds the account.
+      ExplicitAuthFlows: [ALLOW_USER_SRP_AUTH, ALLOW_REFRESH_TOKEN_AUTH, ALLOW_ADMIN_USER_PASSWORD_AUTH]
+      PreventUserExistenceErrors: ENABLED
+      AccessTokenValidity: !Ref SessionHours
+      IdTokenValidity: !Ref SessionHours
+      RefreshTokenValidity: 1
+      TokenValidityUnits: {AccessToken: hours, IdToken: hours, RefreshToken: days}
 
   # ---- the functions ------------------------------------------------------
 
@@ -253,6 +337,10 @@ Resources:
           INGEST_SUBNETS: !Join [',', !Ref SubnetIds]
           INGEST_SG: !Ref IngestSecurityGroup
           INGEST_LOGS: !Ref IngestLogs
+          SIGN_IN: !Ref SignIn
+          SIGN_IN_HOST: !Sub ${UsersDomain}.auth.${AWS::Region}.amazoncognito.com
+          SIGN_IN_CLIENT: !Ref UsersClient
+          SIGN_IN_RETURN: !Ref CallbackUrl
 
   FunctionLogs:
     Type: AWS::Logs::LogGroup
@@ -398,7 +486,7 @@ Resources:
       Name: !Sub ${AWS::StackName}-access
       AutoPublish: true
       FunctionConfig:
-        Comment: Admit the administrator's address only
+        Comment: Admit the allowed address ranges only
         Runtime: cloudfront-js-2.0
       FunctionCode: !Sub |
         function toInt(ip) {
@@ -407,12 +495,17 @@ Resources:
             return ((+p[0] << 24) | (+p[1] << 16) | (+p[2] << 8) | +p[3]) >>> 0;
         }
         function handler(event) {
-            var parts = '${AdminCidr}'.split('/');
-            var bits = +parts[1];
-            var mask = bits === 0 ? 0 : (0xFFFFFFFF << (32 - bits)) >>> 0;
+            var allowed = '${AdminCidr}'.split(',');
             var ip = toInt(event.viewer.ip);
-            if (ip !== null && ((ip & mask) >>> 0) === ((toInt(parts[0]) & mask) >>> 0)) {
-                return event.request;
+            if (ip !== null) {
+                for (var i = 0; i < allowed.length; i++) {
+                    var parts = allowed[i].split('/');
+                    var bits = +parts[1];
+                    var mask = bits === 0 ? 0 : (0xFFFFFFFF << (32 - bits)) >>> 0;
+                    if (((ip & mask) >>> 0) === ((toInt(parts[0]) & mask) >>> 0)) {
+                        return event.request;
+                    }
+                }
             }
             return { statusCode: 403, statusDescription: 'Forbidden' };
         }
@@ -477,6 +570,10 @@ Resources:
               - {EventType: viewer-request, FunctionARN: !GetAtt AccessFunction.FunctionMetadata.FunctionARN}
 
 Outputs:
+  UserPool:
+    Value: !Ref Users
+  UserPoolClient:
+    Value: !Ref UsersClient
   PanelUrl:
     Value: !Sub https://${Distribution.DomainName}/
   Bucket:

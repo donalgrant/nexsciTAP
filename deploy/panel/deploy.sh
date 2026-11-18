@@ -3,11 +3,13 @@
 #
 #   deploy.sh ADMIN_CIDR [PANEL_SECRET]
 #
-#   ADMIN_CIDR     the one address range admitted to the panel, e.g. 203.0.113.7/32
+#   ADMIN_CIDR     the address ranges admitted to the panel, comma-separated,
+#                  e.g. 203.0.113.7/32 or 134.4.0.0/16,131.215.0.0/16
 #   PANEL_SECRET   the service stack's PanelSecret; leave out to keep the value
 #                  the panel's stack already has (empty on a first deployment)
 #
 # Environment:  STACK (default aiab-panel), SERVICE_STACK (aiab-fargate),
+# SIGN_IN (required | off; default: keep what the stack has, required at first),
 # CATALOG_BUCKET (ipac-archive-in-a-box-pilot), which is also where the
 # function's code is uploaded (under deploy/panel/), AWS_PROFILE, AWS_REGION.
 
@@ -34,6 +36,13 @@ net() { aws cloudformation describe-stacks --stack-name "$SERVICE_STACK" \
 
 PARAMS=("ServiceStack=$SERVICE_STACK" "ServiceUrl=$SERVICE_URL" "AdminCidr=$ADMIN_CIDR" "CatalogBucket=$CATALOG_BUCKET"
         "VpcId=$(net VpcId)" "SubnetIds=$(net SubnetIds)")
+
+# Sign-in returns to the panel's own address, which exists once the stack does.
+# A first deployment therefore needs running twice.
+CALLBACK=$(aws cloudformation describe-stacks --stack-name "$STACK" \
+    --query "Stacks[0].Outputs[?OutputKey=='PanelUrl'].OutputValue" --output text 2>/dev/null || true)
+if [ -n "$CALLBACK" ] && [ "$CALLBACK" != "None" ]; then PARAMS+=("CallbackUrl=$CALLBACK"); fi
+if [ -n "${SIGN_IN:-}" ]; then PARAMS+=("SignIn=$SIGN_IN"); fi
 if [ $# -ge 2 ]; then PARAMS+=("PanelSecret=$2"); fi
 
 aws cloudformation deploy --stack-name "$STACK" --template-file "$OUT/packaged.yaml" \

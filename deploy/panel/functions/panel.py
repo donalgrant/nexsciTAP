@@ -47,6 +47,18 @@ Environment:
     TASK_CAP        most tasks the panel will ever ask for
     INGEST_CLUSTER, INGEST_TASKDEF, INGEST_SUBNETS, INGEST_SG, INGEST_LOGS
                     where and how the one-off conversion task runs
+    SIGN_IN         "required" (the default) or "off"
+    SIGN_IN_HOST, SIGN_IN_CLIENT, SIGN_IN_RETURN
+                    the Cognito sign-in pages, the page's client id there,
+                    and the panel address they return to
+
+Sign-in.  The page sends the browser to Cognito's sign-in pages, comes back
+with an access token, and sends it with every request in the X-Panel-Token
+header (the Authorization header is taken: CloudFront signs its requests to
+this function with it).  Each request's token is checked by asking Cognito
+whose it is, so a token that has expired, or whose user was removed or
+signed out everywhere, stops working at once.  "/api/config", which tells
+the page where to sign in, is the one request answered without a token.
 """
 
 import csv
@@ -78,6 +90,10 @@ INGEST_TASKDEF = os.environ.get('INGEST_TASKDEF', '')
 INGEST_SUBNETS = [x for x in os.environ.get('INGEST_SUBNETS', '').split(',') if x]
 INGEST_SG = os.environ.get('INGEST_SG', '')
 INGEST_LOGS = os.environ.get('INGEST_LOGS', '')
+SIGN_IN = os.environ.get('SIGN_IN', 'required') != 'off'
+SIGN_IN_HOST = os.environ.get('SIGN_IN_HOST', '')
+SIGN_IN_CLIENT = os.environ.get('SIGN_IN_CLIENT', '')
+SIGN_IN_RETURN = os.environ.get('SIGN_IN_RETURN', '')
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -1322,6 +1338,30 @@ def respond(code, body):
             'body': json.dumps(body, default=str)}
 
 
+_known = {}         # token -> (who, checked at), for the few minutes a function instance lives
+
+
+def signed_in(headers):
+    """The email address of whoever holds the request's token, or None."""
+    token = headers.get('x-panel-token', '')
+    if not token or len(token) > 4096:
+        return None
+    held = _known.get(token)
+    if held and time.time() - held[1] < 120:
+        return held[0]
+    try:
+        user = aws('cognito-idp').get_user(AccessToken=token)
+    except ClientError:
+        _known.pop(token, None)
+        return None
+    attrs = {a['Name']: a['Value'] for a in user.get('UserAttributes', [])}
+    who = attrs.get('email') or user.get('Username') or 'someone'
+    if len(_known) > 200:
+        _known.clear()
+    _known[token] = (who, time.time())
+    return who
+
+
 def tick():
     """The timer: keep the schedule, give the service back once it answers, run the canary."""
     out = {}
@@ -1345,12 +1385,23 @@ def handler(event, context):
     headers = {k.lower(): v for k, v in (event.get('headers') or {}).items()}
     name = event.get('rawPath', '').rstrip('/').split('/')[-1]
 
+    if name == 'config':
+        return respond(200, {'signIn': SIGN_IN, 'host': SIGN_IN_HOST, 'client': SIGN_IN_CLIENT,
+                             'returnTo': SIGN_IN_RETURN})
+
+    user = None
+    if SIGN_IN:
+        user = signed_in(headers)
+        if not user:
+            return respond(401, {'error': 'Sign in to use the panel.'})
+
     if http.get('method', 'GET') == 'POST' and name == 'control':
         # A page elsewhere cannot add this header to a request it makes the
         # administrator's browser send here.
         if headers.get('x-panel') != '1':
             return respond(403, {'error': 'Not from the panel page.'})
-        who = (headers.get('x-forwarded-for') or '?').split(',')[0].strip()
+        address = (headers.get('x-forwarded-for') or '?').split(',')[0].strip()
+        who = f'{user} ({address})' if user else address
         try:
             raw = event.get('body') or '{}'
             if event.get('isBase64Encoded'):
@@ -1377,6 +1428,8 @@ def handler(event, context):
     try:
         out = view(event.get('queryStringParameters') or {})
         out['asOf'] = time.time()
+        if user:
+            out['user'] = user
         return respond(200, out)
     except Exception as e:
         print(f'view {name} failed: {e!r}')
