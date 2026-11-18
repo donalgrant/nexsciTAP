@@ -420,6 +420,9 @@ def test_every_request_leaves_a_record(fixture_root: Path):
         proc.terminate()
         proc.wait(timeout=10)
 
+    # Looking at a job must not fill the log with a parser's advice.
+    assert "XMLParsedAsHTMLWarning" not in log.read_text()
+
     versions = _records(log, "TAPV")
     assert len(versions) == 1 and versions[0]["python"]
 

@@ -88,6 +88,18 @@ def preload():
         except ImportError:
             pass
 
+    # The service reads its own job status documents, which are XML, with
+    # BeautifulSoup's HTML parser, and its tag look-ups rely on what that
+    # parser does to the names.  BeautifulSoup says so in seven lines of
+    # warning each time anyone looks at a job, which buries the server's log.
+    try:
+        import warnings
+
+        from bs4 import XMLParsedAsHTMLWarning
+        warnings.filterwarnings('ignore', category=XMLParsedAsHTMLWarning)
+    except ImportError:
+        pass
+
 
 class Handler(http.server.BaseHTTPRequestHandler):
 
