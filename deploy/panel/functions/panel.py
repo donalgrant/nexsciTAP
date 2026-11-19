@@ -1514,7 +1514,8 @@ def file_checks(r, ingest, by=''):
         if bad:
             add(key, 'warn', f"{len(bad)} of {given} given are not standard:  " + ', '.join(bad[:10]) + (' ...' if len(bad) > 10 else ''))
         else:
-            add(key, 'pass', f"{given} of {len(cols)} columns have one;  all of those are standard.")
+            add(key, 'pass', f"{given} of {len(cols)} columns have one;  all of those are standard." if given
+                else f"None of the {len(cols)} columns has one, so there is nothing to fault.")
     if 'noDescription' not in r:
         add('described', 'none', 'Not reached.')
     elif r['noDescription']:
