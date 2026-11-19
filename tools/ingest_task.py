@@ -61,6 +61,9 @@ def run_tool(args, report):
                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     print(done.stdout, flush=True)
     report['toolOutput'] = done.stdout[-4000:]
+    import re
+    dropped = re.search(r'\(([\d,]+) rows without a position dropped\)', done.stdout)
+    report['dropped'] = int(dropped.group(1).replace(',', '')) if dropped else 0
     if done.returncode != 0:
         last = [line for line in done.stdout.strip().splitlines() if line.strip()][-1:] or ['no output']
         raise RuntimeError(f'The conversion failed: {last[0]}')
@@ -90,6 +93,9 @@ def check(outdir, report):
     report['rows'] = one(f'SELECT count(*) FROM {src}')[0]
     if report['rows'] == 0:
         notes.append('The table has no rows.')
+    if report.get('dropped'):
+        notes.append(f"{report['dropped']:,} rows of the input had no position and were left out; "
+                     f"{report['rows']:,} of {report['rows'] + report['dropped']:,} remain.")
 
     described = con.execute(f'DESCRIBE SELECT * FROM {src}').fetchall()
     names = [d[0] for d in described]
@@ -150,6 +156,8 @@ def check(outdir, report):
     except Exception as e:
         notes.append(f'Repeated positions could not be counted: {e}')
 
+    search_test(con, src, outdir, files, report)
+
     try:
         cur = con.execute(f'SELECT * EXCLUDE (hpx29) FROM {src} LIMIT 8')
         heads = [d[0] for d in cur.description][:12]
@@ -157,6 +165,95 @@ def check(outdir, report):
                             'rows': [[None if v is None else str(v)[:40] for v in row[:12]] for row in cur.fetchall()]}
     except Exception as e:
         notes.append(f'No sample rows: {e}')
+
+
+def cone_cover(lon, lat, radius):
+    """
+    HEALPix cells sure to hold every point within `radius` degrees of a
+    position, as (order, cells): the cell the position is in and its eight
+    neighbours, at an order whose cells are at least four radii across.
+    (The library's own cone search leaves out about one point in 500.)
+    """
+    import math
+
+    import numpy as np
+    from astropy import units as u
+    from astropy_healpix import HEALPix
+
+    order = int(max(0, min(20, math.floor(math.log2(58.6 / (4 * radius))))))     # a cell is about 58.6 deg / 2**order across
+    hp = HEALPix(nside=2 ** order, order='nested')
+    cell = int(hp.lonlat_to_healpix(lon * u.deg, lat * u.deg))
+    with np.errstate(invalid='ignore'):
+        around = np.ravel(hp.neighbours(cell))
+    return order, sorted({cell} | {int(c) for c in around if c >= 0})
+
+
+def search_test(con, src, outdir, files, report):
+    """
+    Would searches on these files give right answers?  The service finds
+    rows by the index column alone, so a wrong index, or rows out of order,
+    gives wrong or slow results with no error.  Three checks; any failure
+    fails the ingest:
+
+      * within each file, and from file to file, rows are in index order;
+      * for a sample of rows, the index is the one their position gives;
+      * a set of cone searches gives the same rows whether found through
+        the index, as the service does, or by measuring the distance from
+        every row in the table.
+    """
+    import numpy as np
+    from astropy import units as u
+    from astropy_healpix import lonlat_to_healpix
+
+    test = report['searchTest'] = {}
+
+    def one(sql):
+        return con.execute(sql).fetchone()
+
+    spans = []
+    for f in files:
+        path = os.path.join(outdir, f)
+        back = one(f"SELECT count(*) FROM (SELECT hpx29, lag(hpx29) OVER (ORDER BY file_row_number) AS before "
+                   f"FROM read_parquet('{path}', file_row_number=true)) WHERE hpx29 < before")[0]
+        if back:
+            raise RuntimeError(f'The rows of {f} are not in index order ({back:,} places where the index goes down).')
+        spans.append(one(f"SELECT min(hpx29), max(hpx29) FROM read_parquet('{path}')"))
+    for (_, hi), (lo, _), f in zip(spans, spans[1:], files[1:]):
+        if lo < hi:
+            raise RuntimeError(f'{f} starts before the file ahead of it ends, in index order.')
+    test['sorted'] = True
+
+    sample = con.execute(f'SELECT ra, dec, hpx29 FROM {src} USING SAMPLE 20000 ROWS').fetchnumpy()
+    n = len(sample['ra'])
+    if n:
+        right = lonlat_to_healpix(sample['ra'] * u.deg, sample['dec'] * u.deg, 2 ** 29, order='nested')
+        wrong = int(np.sum(np.asarray(right, dtype=np.int64) != sample['hpx29']))
+        test['indexChecked'], test['indexWrong'] = n, wrong
+        if wrong:
+            raise RuntimeError(f'The index column does not match the positions: {wrong:,} of {n:,} sampled rows are wrong.')
+
+    radii = [5 / 3600, 30 / 3600, 0.05, 0.2, 1.0]
+    picks = np.linspace(0, n - 1, min(n, 25)).astype(int) if n else []
+    cones = []
+    for i, at in enumerate(picks):
+        lon, lat, radius = float(sample['ra'][at]), float(sample['dec'][at]), radii[i % len(radii)]
+        near = (f'2 * asin(sqrt(pow(sin(radians(dec - ({lat!r})) / 2), 2) + cos(radians({lat!r})) * cos(radians(dec)) '
+                f'* pow(sin(radians(ra - ({lon!r})) / 2), 2))) <= radians({radius!r})')
+        order, cells = cone_cover(lon, lat, radius)
+        shift = 2 * (29 - order)
+        through = ' OR '.join(f'hpx29 BETWEEN {c << shift} AND {((c + 1) << shift) - 1}' for c in cells)
+        tally = 'count(*), coalesce(sum(hpx29 % 1000003), 0)'
+        every = one(f'SELECT {tally} FROM {src} WHERE {near}')
+        index = one(f'SELECT {tally} FROM {src} WHERE ({through}) AND {near}')
+        cones.append({'ra': lon, 'dec': lat, 'radius': radius, 'count': int(every[0])})
+        if tuple(every) != tuple(index):
+            raise RuntimeError(f'A cone search of {radius * 3600:.0f} arcsec at RA {lon:.5f}, Dec {lat:.5f} finds '
+                               f'{index[0]:,} rows through the index and {every[0]:,} by measuring every row.')
+    test['cones'] = len(cones)
+    test['rowsFound'] = sum(c['count'] for c in cones)
+    # One of them, for the panel to ask the service once the table is published.
+    middling = [c for c in cones if 0 < c['count'] < 200000 and c['radius'] >= 0.05] or cones
+    report['checkCone'] = middling[len(middling) // 2] if middling else None
 
 
 def main():

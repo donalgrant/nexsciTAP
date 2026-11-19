@@ -376,6 +376,12 @@ const VIEW = {
           (vs.length ? `<div class="note" style="margin-top:4px">${vs.length} earlier version${vs.length === 1 ? '' : 's'}:  ${vs.slice(0, 4).map((v) => `<a href="#" data-restore="${esc(t.folder)}" data-version="${esc(v.version)}">${esc(stampText(v.version))}</a>`).join(', ')}</div>` : '') + '</td></tr>';
       }).join('') + `</table></div><p class="note">${bytes(d.totalBytes)} in <code>s3://${esc(d.bucket)}/${esc(d.prefix)}/</code>.  The service takes up to five minutes to show a change.  "Remove" keeps the files as an earlier version;  nothing here deletes a served table for good.</p></div>`;
 
+    if ((d.checks || []).length) h += '<div class="card gap"><h2>Checks after publishing</h2><table><tr><th>Table</th><th>Published</th><th>Expected</th><th>The service says</th><th></th></tr>' +
+      d.checks.map((c) => { const e = c.expect || {}, s = c.seen || {};
+        return `<tr><td class="mono">${esc(c.folder)}</td><td class="note">${when(c.since)}</td><td>${num(e.rows)} rows${e.cone ? ';  ' + num(e.cone.count) + ' in a test cone' : ''}</td>` +
+          `<td>${s.problem ? '<span class="note">' + esc(s.problem) + '</span>' : s.rows == null ? '' : num(s.rows) + ' rows' + (s.cone == null ? '' : ';  ' + num(s.cone) + ' in the cone')}</td>` +
+          `<td class="${c.status === 'VERIFIED' ? 'goodText' : c.status === 'FAILED' ? 'badText' : 'note'}">${{VERIFIED: 'served as staged', FAILED: 'NOT as staged', WAITING: 'waiting for the service'}[c.status]}</td></tr>`; }).join('') +
+      '</table><p class="note">After a publish the panel asks the service for the table\'s row count and one cone search, and compares them with what the conversion found in the files.  It looks every five minutes and gives the service twenty.</p></div>';
     h += '<div id="metaslot"></div>';
 
     const gone = Object.entries(d.versions || {}).filter(([f]) => !d.tables.some((t) => t.folder === f) && !(d.hidden || []).some((x) => x.folder === f));
@@ -566,6 +572,14 @@ function stagedCard(r) {
   h += `<div class="grid g4">${tile('Rows', num(r.rows), '')}${tile('Size', bytes(r.bytes), (r.files || []).length + ' file' + ((r.files || []).length === 1 ? '' : 's'))}${tile('Columns', num((r.columns || []).length - 1), `${r.noDescription} lack a description;  ${r.noUnit} have no unit`)}` +
        tile('Positions', `<span style="font-size:14px;font-weight:400">RA ${deg(p.raMin)} to ${deg(p.raMax)}<br>Dec ${deg(p.decMin)} to ${deg(p.decMax)}</span>`, r.samePosition ? num(r.samePosition) + ' rows share a position' : 'no repeated positions') + '</div>';
   if (r.description) h += `<p class="gap">${esc(r.description)}</p>`;
+  const t = r.searchTest;
+  if (t) h += `<p class="gap"><span class="dot ok"></span> <b>Search test passed.</b>  <span class="note">Rows are in index order;  ${num(t.indexChecked)} sampled index values match their positions;  ${num(t.cones)} cone searches found the same ${num(t.rowsFound)} rows through the index as by measuring every row.</span></p>`;
+  const c = r.compare;
+  if (c && c.problem) h += `<p class="note gap">Could not compare with the served table:  ${esc(c.problem)}</p>`;
+  else if (c) h += `<div class="${c.warn ? 'notice' : 'note'} gap" style="margin-bottom:0"><b>Against the table it replaces:</b>  rows ${num(c.rowsBefore)} \u2192 ${num(c.rowsAfter)}` +
+    (c.rowsAfter !== c.rowsBefore ? ` (${c.rowsAfter > c.rowsBefore ? '+' : ''}${num(c.rowsAfter - c.rowsBefore)})` : ' (unchanged)') +
+    (c.removed.length ? `;  <b>${c.removed.length} column${c.removed.length === 1 ? '' : 's'} removed:</b>  <span class="mono">${esc(c.removed.slice(0, 12).join(', '))}${c.removed.length > 12 ? ' \u2026' : ''}</span>` : ';  no column removed') +
+    (c.added.length ? `;  ${c.added.length} added:  <span class="mono">${esc(c.added.slice(0, 12).join(', '))}${c.added.length > 12 ? ' \u2026' : ''}</span>` : '') + '</div>';
   if ((r.notes || []).length) h += '<div class="notice gap" style="margin-bottom:0">' + r.notes.map(esc).join('<br>') + '</div>';
   if (r.sample) h += `<details class="gap"><summary class="note">First rows</summary><div class="scroll"><table><tr>${r.sample.columns.map((c) => `<th>${esc(c)}</th>`).join('')}</tr>${r.sample.rows.map((row) => `<tr>${row.map((v) => `<td class="mono">${v == null ? '<span class="note">null</span>' : esc(v)}</td>`).join('')}</tr>`).join('')}</table></div></details>`;
   h += `<details class="gap"><summary class="note">Columns</summary><div class="scroll"><table><tr><th>Column</th><th>Type</th><th>Unit</th><th class="num">Empty</th><th>Description</th></tr>${(r.columns || []).map((c) => `<tr><td class="mono">${esc(c.name)}</td><td class="note">${esc(c.type)}</td><td>${esc(c.unit)}</td><td class="num">${num(c.nulls)}</td><td class="note">${esc(c.description)}</td></tr>`).join('')}</table></div></details>`;

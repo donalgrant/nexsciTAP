@@ -499,6 +499,7 @@ def view_datasets(params):
             'totalBytes': sum(f['bytes'] for f in folders.values()),
             'staged': staged(), 'ingests': ingests(), 'hidden': area_folders('hidden/'),
             'incoming': incoming(), 'uploadArea': f's3://{STATE_BUCKET}/{INCOMING}',
+            'checks': list(reversed(load_state('verify', {}).get('list', [])))[:8],
             'versions': versions(), 'moves': moves()}
 
 
@@ -1007,8 +1008,42 @@ def staged():
             report = {'ok': False, 'error': f'The report could not be read: {e}'}
         report['folder'] = parts[1]
         report['replaces'] = bool(keys_under(f'{CATALOG_PREFIX}/{parts[1]}/')[:1])
+        if report['replaces'] and report.get('ok'):
+            report['compare'] = compare_with_served(parts[1], report)
         out.append(report)
     return out
+
+
+NOT_THE_TABLES_OWN = {'hpx29', 'x', 'y', 'z'}        # added on conversion and by the service
+
+
+def table_of(folder):
+    """The name the service gives a folder's table."""
+    for name, f in table_folders({folder: {}}).items():
+        if f == folder:
+            return name
+    return folder
+
+
+def compare_with_served(folder, report):
+    """What publishing this staged table would change, against the one served now."""
+    key = f"{folder}:{report.get('ended')}"
+    held = load_state('compare', {})
+    if held.get('key') == key:
+        return held['value']
+    table = table_of(folder)
+    try:
+        rows, _ = tap(f'SELECT count(*) AS n FROM {table}')
+        cols, _ = tap(f"SELECT column_name FROM TAP_SCHEMA.columns WHERE table_name = '{table}'")
+    except ServiceError as e:
+        return {'problem': str(e)}
+    before = {c['column_name'] for c in cols} - NOT_THE_TABLES_OWN
+    after = {c['name'] for c in report.get('columns', [])} - NOT_THE_TABLES_OWN
+    was, now_ = int(rows[0]['n']), int(report.get('rows') or 0)
+    value = {'rowsBefore': was, 'rowsAfter': now_, 'added': sorted(after - before), 'removed': sorted(before - after),
+             'warn': bool(before - after) or now_ < 0.9 * was}
+    save_state('compare', {'key': key, 'value': value})
+    return value
 
 
 def ingests():
@@ -1209,6 +1244,8 @@ def start_move(action, folder, who, **more):
 
     move = {'id': f'{int(time.time() * 1000)}', 'action': action, 'folder': folder, 'who': who,
             'started': time.time(), 'status': 'RUNNING', **{k: v for k, v in more.items() if k == 'version'}}
+    if action == 'publish':
+        move['expect'] = {'rows': report.get('rows'), 'cone': report.get('checkCone')}
     held.append(move)
     save_state('moves', {'list': held[-40:]})
     aws('lambda').invoke(FunctionName=os.environ['AWS_LAMBDA_FUNCTION_NAME'], InvocationType='Event',
@@ -1278,6 +1315,10 @@ def do_move(move):
             empty_folder(here, keep=names)
             detail['restored'] = move['version']
         status, error = 'DONE', None
+        if action == 'publish' and move.get('expect'):
+            checks = load_state('verify', {}).get('list', [])
+            checks.append({'folder': folder, 'since': time.time(), 'status': 'WAITING', 'expect': move['expect']})
+            save_state('verify', {'list': checks[-30:]})
     except Exception as e:
         print(f'move failed: {e!r}')
         status, error = 'FAILED', str(e)[:300]
@@ -1711,6 +1752,55 @@ def watch_handler(event, context):
 VIEWS['watch'] = view_watch
 
 
+VERIFY_WAIT = 20 * 60        # the service takes up to five minutes to see a change; allow several looks
+
+
+def verify_published():
+    """
+    Called by the timer.  After a publish, ask the service itself for the
+    table: the row count the ingest reported, and one cone search whose
+    answer the ingest worked out from the files.  Until the service's own
+    list catches up it may not know the table, or may still serve the one
+    replaced, so a wrong answer is final only after VERIFY_WAIT.
+    """
+    held = load_state('verify', {})
+    checks = held.get('list', [])
+    waiting = [c for c in checks if c['status'] == 'WAITING']
+    if not waiting:
+        return None
+    out = {}
+    for c in waiting:
+        table, expect, seen = table_of(c['folder']), c['expect'], {}
+        try:
+            rows, _ = tap(f'SELECT count(*) AS n FROM {table}')
+            seen['rows'] = int(rows[0]['n'])
+            cone = expect.get('cone')
+            if cone and seen['rows'] == expect['rows']:
+                got, _ = tap(f"SELECT count(*) AS n FROM {table} WHERE CONTAINS(POINT('ICRS', ra, dec), "
+                             f"CIRCLE('ICRS', {cone['ra']!r}, {cone['dec']!r}, {cone['radius']!r})) = 1")
+                seen['cone'] = int(got[0]['n'])
+        except ServiceError as e:
+            seen['problem'] = str(e)[:200]
+        c['seen'] = seen
+        good = seen.get('rows') == expect['rows'] and (not expect.get('cone') or seen.get('cone') == expect['cone']['count'])
+        if good:
+            c.update(status='VERIFIED', ended=time.time())
+            record('panel', 'publish-check', {'table': c['folder'], 'result': 'the service serves it as staged', **seen})
+        elif time.time() - c['since'] > VERIFY_WAIT:
+            c.update(status='FAILED', ended=time.time())
+            record('panel', 'publish-check', {'table': c['folder'], 'result': 'FAILED', 'expected': expect, **seen})
+            try:
+                announce(f"published table {c['folder']} is not served as staged",
+                         f"{c['folder']} was published {int((time.time() - c['since']) / 60)} minutes ago.  The ingest reported "
+                         f"{expect['rows']:,} rows" + (f" and {expect['cone']['count']:,} in a test cone" if expect.get('cone') else '')
+                         + f".  The service says:  {json.dumps(seen)}")
+            except Exception as e:
+                print(f'verify: could not announce: {e!r}')
+        out[c['folder']] = c['status']
+    save_state('verify', {'list': checks[-30:]})
+    return out
+
+
 _known = {}         # token -> (who, checked at), for the few minutes a function instance lives
 
 
@@ -1738,7 +1828,7 @@ def signed_in(headers):
 def tick():
     """The timer: keep the schedule, give the service back once it answers, run the canary."""
     out = {}
-    for name, step in (('schedule', keep_schedule), ('settled', settle), ('watch', keep_watch)):
+    for name, step in (('schedule', keep_schedule), ('settled', settle), ('verify', verify_published), ('watch', keep_watch)):
         try:
             out[name] = step()
         except Exception as e:
