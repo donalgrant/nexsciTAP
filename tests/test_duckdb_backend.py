@@ -236,10 +236,17 @@ def test_http_hosts_lets_a_listed_host_name_the_service(parquet_catalog, monkeyp
     assert configParam(str(parquet_catalog)).httpurl == public
 
 
-def _make_parquet(duckdb, path, columns='a.ra, a.dec, 7 AS hpx29'):
+def _make_parquet(duckdb, path, columns='a.ra, a.dec, a.hpx29'):
+    # The index must be the true one for each position: the catalog tool
+    # checks it, and leaves out a folder whose index is wrong.
+    from astropy import units as u
+    from astropy_healpix import lonlat_to_healpix
+    rows = [(10.0, -20.0), (11.0, -21.0)]
+    values = ', '.join(f"({ra}, {dec}, {int(lonlat_to_healpix(ra * u.deg, dec * u.deg, 2 ** 29, order='nested'))})"
+                       for ra, dec in rows)
     path.parent.mkdir(parents=True, exist_ok=True)
     con = duckdb.connect()
-    con.execute(f"COPY (SELECT {columns} FROM (VALUES (10.0, -20.0), (11.0, -21.0)) a(ra, dec)) "
+    con.execute(f"COPY (SELECT {columns} FROM (VALUES {values}) a(ra, dec, hpx29)) "
                 f"TO '{path}' (FORMAT parquet)")
     con.close()
 
@@ -267,7 +274,7 @@ def test_discover_serves_good_folders_and_skips_bad_ones(tmp_path):
     _make_parquet(duckdb, cat / 'renamed_folder' / 'part-00.parquet')
     _make_parquet(duckdb, cat / 'no_index' / 'part-00.parquet', columns='a.ra, a.dec')
     _make_parquet(duckdb, cat / 'bad-name' / 'part-00.parquet')
-    _make_parquet(duckdb, cat / 'has_xyz' / 'part-00.parquet', columns='a.ra, a.dec, 7 AS hpx29, 1 AS x')
+    _make_parquet(duckdb, cat / 'has_xyz' / 'part-00.parquet', columns='a.ra, a.dec, a.hpx29, 1 AS x')
     (cat / 'empty').mkdir()
 
     run = _catalog(tmp_path, '--table', f"nice={cat}/renamed_folder/*.parquet")
@@ -344,12 +351,12 @@ def test_discover_notices_a_file_replaced_under_the_same_name(tmp_path):
         finally:
             con.close()
 
-    _make_parquet(duckdb, f, columns="a.ra, a.dec, 7 AS hpx29, 'text' AS flux")
+    _make_parquet(duckdb, f, columns="a.ra, a.dec, a.hpx29, 'text' AS flux")
     assert _catalog(tmp_path).returncode == 0
     assert datatype('flux') == ('char',)
 
     f.unlink()
-    _make_parquet(duckdb, f, columns='a.ra, a.dec, 7 AS hpx29, 1.5 AS flux')
+    _make_parquet(duckdb, f, columns='a.ra, a.dec, a.hpx29, 1.5 AS flux')
     assert _catalog(tmp_path, '--if-changed').returncode == 0
     assert datatype('flux') == ('double',)
 

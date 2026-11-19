@@ -89,3 +89,65 @@ def test_the_cover_of_a_cone_holds_every_point_in_it():
             a1 = a0 + np.arctan2(np.sin(bearing) * np.sin(dist) * np.cos(b0), np.cos(dist) - np.sin(b0) * np.sin(b1))
             inside = lonlat_to_healpix((np.degrees(a1) % 360) * u.deg, np.degrees(b1) * u.deg, 2 ** order, order="nested")
             assert set(inside.tolist()) <= set(cells), (lon, lat, radius)
+
+
+def discover(root: Path, db: Path):
+    done = subprocess.run([sys.executable, str(TOOLS / "make_duckdb_catalog.py"), "--db", str(db),
+                           "--discover", str(root), "--require-column", "hpx29"], capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr
+    import json
+    said = [json.loads(line.split(" ", 1)[1]) for line in done.stderr.splitlines() if line.startswith("TAPC ")]
+    return {s["table"]: s for s in said}
+
+
+def test_the_service_refuses_files_whose_index_is_wrong_and_warns_of_slow_ones(converted: Path, tmp_path: Path):
+    """Files can reach the bucket without passing through an ingest; the service looks before it serves."""
+    import shutil
+    root = tmp_path / "catalogs"
+    shutil.copytree(converted, root / "good")
+    (root / "wrong").mkdir()
+    (root / "unsorted").mkdir()
+    damaged(converted, root / "wrong",
+            "SELECT * REPLACE (CASE WHEN id % 50 = 0 THEN hpx29 + 4096 ELSE hpx29 END AS hpx29) "
+            "FROM read_parquet('{src}') ORDER BY hpx29")
+    con = duckdb.connect()
+    con.execute(f"COPY (SELECT * FROM read_parquet('{converted}/*.parquet') ORDER BY mag) "
+                f"TO '{root}/unsorted/part-00.parquet' (FORMAT parquet, ROW_GROUP_SIZE 5000)")
+
+    said = discover(root, tmp_path / "catalog.duckdb")
+    assert said["good"]["served"] and not said["good"]["warnings"]
+    assert not said["wrong"]["served"] and "does not match the positions" in said["wrong"]["why"]
+    assert said["unsorted"]["served"] and "will be slow" in said["unsorted"]["warnings"][0]
+
+    served = duckdb.connect(str(tmp_path / "catalog.duckdb"), read_only=True)
+    names = {r[0] for r in served.execute("SELECT table_name FROM tap_schema.tables").fetchall()}
+    assert {"good", "unsorted"} <= names and "wrong" not in names
+
+
+@pytest.mark.parametrize("unit, fine", [("mag", True), ("deg", True), ("mas / yr", True), ("Jy/beam", True), ("", True),
+                                        ("micron", False), ("DN", False), ("---", False), ("log(cm.s**-2)", False)])
+def test_units_are_held_to_the_ivoa_standard(unit, fine):
+    assert (ingest_task.unit_problem(unit) is None) == fine
+
+
+@pytest.mark.parametrize("ucd, fine", [("pos.eq.ra;meta.main", True), ("phot.mag;em.IR.J", True), ("", True),
+                                       ("POS_EQ_RA_MAIN", False), ("phot.mag;em.opt.banana", False),
+                                       ("meta.main;pos.eq.ra", False)])
+def test_ucds_are_held_to_the_ivoa_list(ucd, fine):
+    assert (ingest_task.ucd_problem(ucd) is None) == fine
+
+
+def test_a_report_names_units_and_ucds_that_are_not_standard(tmp_path: Path):
+    (tmp_path / "in.csv").write_text("id,ra,dec,flux,size\n1,10.0,20.0,1.5,3\n2,11.0,21.0,2.5,4\n")
+    (tmp_path / "schema.csv").write_text("column_name,datatype,unit,ucd,description\n"
+                                         "ra,double,deg,pos.eq.ra;meta.main,Right ascension\n"
+                                         "flux,double,micron,phot.flux;em.banana,Flux\n"
+                                         "size,double,arcsec,phys.angSize,Size\n")
+    subprocess.run([sys.executable, str(TOOLS / "make_parquet_catalog.py"), str(tmp_path / "in.csv"), str(tmp_path / "out"),
+                    "--schema", str(tmp_path / "schema.csv")], check=True, capture_output=True)
+    report = {"notes": []}
+    ingest_task.check(str(tmp_path / "out"), report)
+    flux = next(c for c in report["columns"] if c["name"] == "flux")
+    assert "unitProblem" in flux and "ucdProblem" in flux
+    assert report["badUnits"] == 1 and report["badUcds"] == 1
+    assert not any("Problem" in k for c in report["columns"] if c["name"] != "flux" for k in c)

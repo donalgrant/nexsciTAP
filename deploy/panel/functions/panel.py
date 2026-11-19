@@ -246,6 +246,7 @@ def view_status(params):
         'state': state, 'desired': desired, 'running': running, 'pending': svc.get('pendingCount', 0),
         'taskCap': TASK_CAP, 'serviceUrl': SERVICE_URL, 'paused': paused,
         'schedule': load_state('schedule', dict(DEFAULT_SCHEDULE)), 'scheduleNow': scheduled_state(),
+        'canaryTables': [{'table': k, **v} for k, v in sorted(load_state('canary_tables', {}).items())],
         'canary': {'last': last, 'history': history[-72:],
                    'day': {'runs': len(day), 'failed': sum(1 for h in day if h['ok'] is False),
                            'skipped': sum(1 for h in day if h['ok'] is None)},
@@ -436,6 +437,36 @@ def table_folders(folders):
     return {names.get(folder, folder): folder for folder in folders}
 
 
+STATUS_WORD = 'TAPC'
+
+
+def discovery():
+    """What the service last said of each folder it found: served or not and why, and warnings (its TAPC lines)."""
+    held = load_state('discovery', {'tables': {}, 'cursor': 0})
+    since = max(held.get('cursor', 0), time.time() - 14 * 86400)
+    latest = since
+    try:
+        for e in log_events(f'"{STATUS_WORD}"', since, limit=5000):
+            m, t = e['message'], e['timestamp'] / 1000
+            i = m.find(STATUS_WORD + ' {')
+            if i < 0 or t <= since:
+                continue
+            try:
+                said = json.loads(m[i + len(STATUS_WORD) + 1:])
+            except ValueError:
+                continue
+            said['at'] = t
+            held['tables'][said.get('table', '?')] = said
+            latest = max(latest, t)
+    except ClientError as e:
+        print(f'discovery: {e!r}')
+        return held['tables']
+    if latest > since:
+        held['cursor'] = latest
+        save_state('discovery', held)
+    return held['tables']
+
+
 def view_datasets(params):
     folders = catalog_folders()
     by_table = table_folders(folders)
@@ -487,14 +518,19 @@ def view_datasets(params):
     except ClientError:
         pass
 
+    found = discovery()
     out = []
     for name in sorted(set(by_table) | set(served)):
         folder = by_table.get(name)
         f = folders.get(folder, {})
         s = served.get(name, {})
+        said = found.get(name) or {}
+        fresh = said.get('at', 0) >= (f.get('modified') or 0)          # said of the files that are there now
         out.append({'table': name, 'folder': folder, 'files': f.get('files'), 'bytes': f.get('bytes'),
                     'modified': f.get('modified'), 'served': name in served if served else None,
-                    'queries24h': use.get(name, 0), **s})
+                    'queries24h': use.get(name, 0),
+                    'notServedWhy': said.get('why') if fresh and said.get('served') is False else None,
+                    'warnings': said.get('warnings') if fresh and said.get('served') else None, **s})
     return {'tables': out, 'problem': problem, 'bucket': CATALOG_BUCKET, 'prefix': CATALOG_PREFIX,
             'totalBytes': sum(f['bytes'] for f in folders.values()),
             'staged': staged(), 'ingests': ingests(), 'hidden': area_folders('hidden/'),
@@ -1246,6 +1282,16 @@ def start_move(action, folder, who, **more):
             'started': time.time(), 'status': 'RUNNING', **{k: v for k, v in more.items() if k == 'version'}}
     if action == 'publish':
         move['expect'] = {'rows': report.get('rows'), 'cone': report.get('checkCone')}
+
+    # The canary must not ask a table for an answer that is about to change.
+    table = table_of(folder)
+    if action in ('publish', 'hide', 'remove'):
+        canary_table(table, on=False, why={'publish': 'being replaced; checked again once the service serves the new files',
+                                           'hide': 'hidden', 'remove': 'removed'}[action])
+    elif action == 'unhide':
+        canary_table(table, on=True, notBefore=time.time() + 420, why='')        # the files it had; give the service time to list it
+    elif action == 'restore':
+        canary_table(table, on=False, check=None, why='an earlier version was restored; no answer is known for it until it is published again')
     held.append(move)
     save_state('moves', {'list': held[-40:]})
     aws('lambda').invoke(FunctionName=os.environ['AWS_LAMBDA_FUNCTION_NAME'], InvocationType='Event',
@@ -1340,10 +1386,48 @@ VIEWS = {'record': view_record, 'jobs': view_jobs, 'columns': view_columns, 'ing
 
 # ---- canary ---------------------------------------------------------------
 
+def canary_table(table, **change):
+    """Note what the canary should ask of one table, or that it should leave it alone for now."""
+    held = load_state('canary_tables', {})
+    entry = held.setdefault(table, {'check': None, 'on': True})
+    entry.update(change, at=time.time())
+    save_state('canary_tables', held)
+
+
+def canary_checks():
+    """
+    What to ask this run.  The checks in canary.json are the pilot's first
+    tables as they stood when it was written.  A table published through
+    the panel since then is asked the cone the ingest worked out from its
+    files, once the service has been seen to serve it; a table that has
+    been hidden, removed or restored is left alone, since its answer is
+    gone or unknown.
+    """
+    with open(os.path.join(HERE, 'canary.json')) as f:
+        seed = json.load(f)['checks']
+    held, out, seen = load_state('canary_tables', {}), [], set()
+
+    def usable(entry):
+        return entry.get('on') and time.time() >= entry.get('notBefore', 0)
+
+    for c in seed:
+        m = re.search(r'\bFROM\s+(\w+)', c['query'], re.IGNORECASE)
+        table = m.group(1) if m else ''
+        entry = held.get(table)
+        seen.add(table)
+        if entry is None:
+            out.append(c)
+        elif usable(entry):
+            out.append(entry.get('check') or c)
+    for table, entry in sorted(held.items()):
+        if table not in seen and usable(entry) and entry.get('check'):
+            out.append(entry['check'])
+    return out[:12]
+
+
 def run_canary():
     """A few queries with known answers; the result is kept and published as metrics."""
-    with open(os.path.join(HERE, 'canary.json')) as f:
-        checks = json.load(f)['checks']
+    checks = canary_checks()
 
     svc = ecs_service()
     result = {'at': time.time(), 'ok': True, 'checks': [], 'ms': 0}
@@ -1785,6 +1869,12 @@ def verify_published():
         good = seen.get('rows') == expect['rows'] and (not expect.get('cone') or seen.get('cone') == expect['cone']['count'])
         if good:
             c.update(status='VERIFIED', ended=time.time())
+            cone = expect.get('cone')
+            canary_table(table, on=True, notBefore=0, why='', check=(
+                {'name': f'cone, {table}', 'expected': cone['count'],
+                 'query': f"SELECT count(*) AS n FROM {table} WHERE CONTAINS(POINT('ICRS',ra,dec),"
+                          f"CIRCLE('ICRS',{cone['ra']!r},{cone['dec']!r},{cone['radius']!r}))=1"} if cone else
+                {'name': f'row count, {table}', 'expected': expect['rows'], 'query': f'SELECT count(*) AS n FROM {table}'}))
             record('panel', 'publish-check', {'table': c['folder'], 'result': 'the service serves it as staged', **seen})
         elif time.time() - c['since'] > VERIFY_WAIT:
             c.update(status='FAILED', ended=time.time())

@@ -68,6 +68,74 @@ def tap_type(duck_type):
     return 'char', None
 
 
+STATUS_WORD = 'TAPC'
+
+
+def say(name, path, served, why='', warnings=()):
+    """One line a table for whoever watches the service: TAPC + JSON, on standard error."""
+    import json
+    print(STATUS_WORD + ' ' + json.dumps({'table': name, 'path': path, 'served': served, 'why': why,
+                                          'warnings': list(warnings)}, separators=(',', ':')),
+          file=sys.stderr, flush=True)
+
+
+def check_index(con, path, ra, dec, index):
+    """
+    Can searches on these files be trusted?  The service finds rows by the
+    index column alone, so files whose index does not match their positions
+    give wrong answers with no error.  Files made by make_parquet_catalog.py
+    are right by construction; this is for files that reach the folder some
+    other way.  It reads little: the footers, and the first rows of up to
+    eight files.
+
+    Raises ValueError if the index is wrong.  Returns warnings for what
+    makes searches slow but not wrong.
+    """
+    warnings = []
+
+    try:
+        groups = con.execute(
+            'SELECT file_name, row_group_id, TRY_CAST(stats_min AS BIGINT), TRY_CAST(stats_max AS BIGINT) '
+            'FROM parquet_metadata(?) WHERE path_in_schema = ? ORDER BY 1, 2', [path, index]).fetchall()
+    except Exception as e:
+        groups = []
+        warnings.append(f'the files\' statistics could not be read ({e})')
+
+    if groups:
+        if any(lo is None or hi is None for _, _, lo, hi in groups):
+            warnings.append(f'some row groups have no statistics for {index}, so searches cannot skip them')
+        else:
+            back = sum(1 for (f0, _, _, hi0), (f1, _, lo1, _) in zip(groups, groups[1:]) if f0 == f1 and lo1 < hi0)
+            if back:
+                warnings.append(f'the rows are not in {index} order ({back} of {len(groups)} row groups overlap '
+                                'the one before), so searches will be slow')
+
+    try:
+        import numpy as np
+        from astropy import units as u
+        from astropy_healpix import lonlat_to_healpix
+    except ImportError:
+        warnings.append('the index could not be checked against the positions (no HEALPix library here)')
+        return warnings
+
+    files = [r[0] for r in con.execute('SELECT file FROM glob(?) ORDER BY 1', [path]).fetchall()]
+    step = max(1, len(files) // 8)
+    checked = wrong = 0
+    for f in files[::step][:8]:
+        rows = con.execute(f'SELECT "{ra}", "{dec}", "{index}" FROM read_parquet(?) '
+                           f'WHERE "{ra}" IS NOT NULL AND "{dec}" IS NOT NULL LIMIT 2000', [f]).fetchnumpy()
+        if not len(rows[ra]):
+            continue
+        right = lonlat_to_healpix(np.asarray(rows[ra], dtype=float) * u.deg, np.asarray(rows[dec], dtype=float) * u.deg,
+                                  2 ** 29, order='nested')
+        checked += len(rows[ra])
+        wrong += int(np.sum(np.asarray(right, dtype=np.int64) != np.asarray(rows[index], dtype=np.int64)))
+    if wrong:
+        raise ValueError(f'the {index} column does not match the positions ({wrong:,} of {checked:,} rows looked at); '
+                         'searches would give wrong answers')
+    return warnings
+
+
 def main():
 
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -80,6 +148,8 @@ def main():
     p.add_argument('--require-column', action='append', default=[], metavar='COL',
                    help='Column a discovered folder must have besides the position columns '
                         '(the spatial index column).  Repeatable.')
+    p.add_argument('--no-index-check', action='store_true',
+                   help='Do not check the index column of each table against its positions.')
     p.add_argument('--if-changed', action='store_true',
                    help='Do nothing if the tables and their files are unchanged since the last run.')
     p.add_argument('--describe', action='append', default=[], metavar='NAME=TEXT',
@@ -120,6 +190,7 @@ def main():
                 continue
             if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', folder):
                 print(f'skipped {prefix}{folder}/: the folder name cannot be a table name', file=sys.stderr)
+                say(folder, prefix + folder + '/', False, 'the folder name cannot be a table name')
                 continue
             if any(folder.lower() == name.lower() for name, _, _ in tables):
                 print(f'skipped {prefix}{folder}/: a table named {folder} already exists', file=sys.stderr)
@@ -199,6 +270,20 @@ def main():
 
             cols = con.execute(f'DESCRIBE {name}').fetchall()
 
+            # The index is checked only where the service is told which column it is.
+            warnings = []
+            if args.require_column and not args.no_index_check:
+                try:
+                    warnings = check_index(con, path, ra, dec, args.require_column[0])
+                except ValueError:
+                    if discovered:
+                        raise
+                    # A table the operator named is served as asked, but not quietly.
+                    import traceback
+                    warnings = [traceback.format_exc().strip().splitlines()[-1].replace('ValueError: ', '')]
+                for w in warnings:
+                    print(f'warning: {path}: {w}', file=sys.stderr)
+
             # Units and descriptions, from the first file that carries them.
             row = con.execute('SELECT value FROM parquet_kv_metadata(?) WHERE key = ? ORDER BY file_name LIMIT 1',
                               [path, votable_metadata.CONTENT_KEY.encode()]).fetchone()
@@ -219,6 +304,7 @@ def main():
                 raise
             con.execute(f'DROP VIEW IF EXISTS {name}')
             print(f'skipped {path}: {e}', file=sys.stderr)
+            say(name, path, False, str(e))
             continue
 
         tindex += 1
@@ -241,6 +327,7 @@ def main():
                          known.get('unit', ''), known.get('ucd'), 0, principal, fmt, i + 1])
 
         print(f'{name}: {len(cols)} columns from {path}' + ('  (discovered)' if discovered else ''))
+        say(name, path, True, '', warnings)
 
     for i, t in enumerate(['schemas', 'tables', 'columns', 'keys', 'key_columns']):
         con.execute(f'INSERT INTO {ts}.tables VALUES (?, ?, ?, NULL, ?, ?)',

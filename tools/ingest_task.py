@@ -124,6 +124,24 @@ def check(outdir, report):
         'nulls': nulls.get(n),
     } for n, t in ((d[0], d[1]) for d in described)]
 
+    # Units and UCDs are stored as given; say which ones other software may not understand.
+    for kind, problem in (('unit', unit_problem), ('ucd', ucd_problem)):
+        bad = []
+        for c in report['columns']:
+            try:
+                why = problem(c[kind])
+            except Exception as e:
+                why = None
+                print(f'could not check the {kind} of {c["name"]}: {e!r}', flush=True)
+            if why:
+                c[kind + 'Problem'] = why
+                bad.append(f"{c['name']} ({c[kind]})")
+        report['bad' + kind.capitalize() + 's'] = len(bad)
+        if bad:
+            word = 'units' if kind == 'unit' else 'UCDs'
+            notes.append(f"{len(bad)} {word} are not written as the IVOA standard has them: "
+                         + ', '.join(bad[:8]) + (' ...' if len(bad) > 8 else ''))
+
     own = [c for c in report['columns'] if c['name'] != 'hpx29']
     report['noDescription'] = sum(1 for c in own if not c['description'])
     report['noUnit'] = sum(1 for c in own if not c['unit'])
@@ -165,6 +183,45 @@ def check(outdir, report):
                             'rows': [[None if v is None else str(v)[:40] for v in row[:12]] for row in cur.fetchall()]}
     except Exception as e:
         notes.append(f'No sample rows: {e}')
+
+
+def unit_problem(text):
+    """None if `text` is a unit as the IVOA writes them (VOUnits), else what is wrong with it."""
+    import warnings
+
+    from astropy import units as u
+
+    if not text:
+        return None
+
+    def reads(fmt):
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter('error')
+                u.Unit(text, format=fmt) if fmt else u.Unit(text)
+            return True
+        except Exception:
+            return False
+
+    if reads('vounit'):
+        return None
+    for fmt, name in (('cds', 'CDS'), ('fits', 'FITS'), (None, 'astropy')):
+        if reads(fmt):
+            return f'not a VOUnits unit (it reads as a {name} one)'
+    return 'not a unit any reader here understands'
+
+
+def ucd_problem(text):
+    """None if `text` is a valid UCD1+ from the IVOA's list of words, else what is wrong."""
+    from astropy.io.votable import ucd
+
+    if not text:
+        return None
+    try:
+        return None if ucd.check_ucd(text, check_controlled_vocabulary=True, has_colon=False) else \
+            'not a UCD the IVOA list allows (an unknown word, or words in the wrong order)'
+    except Exception as e:
+        return f'could not be checked ({e})'
 
 
 def cone_cover(lon, lat, radius):
