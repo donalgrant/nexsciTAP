@@ -102,7 +102,7 @@ footer { color: var(--quiet); font-size: 12px; text-align: center; padding: 0 24
 
 <script>
 'use strict';
-const TABS = ['Status', 'Activity', 'Load', 'Datasets', 'Cost', 'Components', 'Logs', 'Record'];
+const TABS = ['Status', 'Activity', 'Load', 'Datasets', 'Cost', 'Components', 'Watch', 'Logs', 'Record'];
 const $ = (s) => document.querySelector(s);
 const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
 const num = (v) => v == null ? '' : Number(v).toLocaleString('en-US');
@@ -470,6 +470,39 @@ const VIEW = {
   },
 };
 
+VIEW.Watch = async function (fresh) {
+  const w = await get('watch', null, fresh);
+  const alerting = w.rules.filter((r) => r.state === 'alert');
+  let h = alerting.length ? `<div class="notice err"><b>${alerting.length} rule${alerting.length === 1 ? ' is' : 's are'} failing:</b>  ${alerting.map((r) => esc(r.what + ' — ' + (r.detail || ''))).join(';  ')}</div>` : '';
+  if (!w.alertsTo) h += '<div class="notice">No address is set to receive alerts.</div>';
+  h += '<div class="card"><h2>Rules</h2><div class="scroll"><table><tr><th></th><th>Watching</th><th>Alerts when</th><th>Now</th><th>Since</th></tr>' +
+    w.rules.map((r) => `<tr><td><span class="dot ${r.state === 'ok' ? 'ok' : r.state === 'alert' ? 'bad' : ''}"></span></td><td>${esc(r.what)}</td><td class="note">${esc(r.threshold)}</td><td>${r.state === 'unknown' ? '<span class="note">not checked yet</span>' : esc(r.detail || '')}</td><td class="note" style="white-space:nowrap">${r.since ? when(r.since) : ''}</td></tr>`).join('') +
+    `</table></div><p class="note">Checked every five minutes, last ${ago(w.checked) || 'never'}.  A rule that starts or stops failing sends one email.  If the checking itself stops for 20 minutes, a separate AWS alarm says so.</p></div>`;
+
+  const rep = w.reports[0];
+  const tag = (v) => `<span class="pill ${v === 'quiet' ? 'running' : v === 'look' ? 'starting' : 'down'}">${v === 'quiet' ? 'Quiet' : v === 'look' ? 'Worth a look' : 'Needs action'}</span>`;
+  h += '<div class="card gap"><h2>Daily review</h2>';
+  if (!rep) h += '<p class="note">No review has been filed yet.  Once a day Claude reads a digest of the previous 24 hours and files a report here.  It can read the digest and write the report, and nothing else.</p>';
+  else {
+    h += `<p>${tag(rep.verdict)}&ensp;<b>${esc(rep.date)}</b>&ensp;${esc(rep.headline)}</p>` +
+      (rep.findings.length ? '<table>' + rep.findings.map((f) => `<tr><td style="white-space:nowrap" class="${f.severity === 'act' ? 'badText' : f.severity === 'look' ? 'warnText' : 'note'}">${esc(f.severity)}</td><td><b>${esc(f.title)}</b><div class="note">${esc(f.detail)}</div></td></tr>`).join('') + '</table>' : '<p class="note">Nothing to report.</p>') +
+      `<p class="note">Filed ${when(rep.at)} by ${esc(rep.by)}.  The review reads a day late and can miss things;  it is a second reader, not a guard.</p>`;
+    if (w.reports.length > 1) h += '<details class="gap"><summary class="note">Earlier reviews</summary><table>' + w.reports.slice(1).map((r) => `<tr><td style="white-space:nowrap">${esc(r.date)}</td><td>${tag(r.verdict)}</td><td>${esc(r.headline)}</td></tr>`).join('') + '</table></details>';
+  }
+  h += '</div>';
+
+  const d = w.door;
+  h += '<div class="grid g11 gap"><div class="card"><h2>Refused at the door, last 24 hours</h2>' +
+    (d.logging ? (d.refused ? `<p>${num(d.refused)} requests from ${num(d.addresses)} address${d.addresses === 1 ? '' : 'es'} outside the allowed ranges.</p><table><tr><th>Address</th><th class="num">Requests</th></tr>${d.top.map((x) => `<tr><td class="mono">${esc(x.who)}</td><td class="num">${num(x.n)}</td></tr>`).join('')}</table>` +
+        `<table class="gap"><tr><th>Asked for</th><th class="num">Times</th></tr>${d.paths.map((x) => `<tr><td class="mono q">${esc(x.who)}</td><td class="num">${num(x.n)}</td></tr>`).join('')}</table>` : '<p class="note">None seen.</p>') +
+      '<p class="note">From CloudFront\'s own log, which arrives some minutes to an hour late.  The panel\'s check of the door from outside is among them, every five minutes.</p>' : '<p class="note">CloudFront logging is not switched on, so requests refused at the door are not recorded anywhere.</p>') + '</div>';
+  h += '<div class="card"><h2>Sent to each client, last 24 hours</h2>' + (w.volume.length ? `<table><tr><th>Client</th><th class="num">Sent</th></tr>${w.volume.map((x) => `<tr><td class="mono">${esc(x.who)}</td><td class="num">${bytes(x.n)}</td></tr>`).join('')}</table>` : '<p class="note">Nothing yet.</p>') +
+    (w.refusedByLimits.length ? `<table class="gap"><tr><th>Refused by the limits</th><th class="num">Requests</th></tr>${w.refusedByLimits.map((x) => `<tr><td class="mono">${esc(x.who)}</td><td class="num">${num(x.n)}</td></tr>`).join('')}</table>` : '') +
+    '<p class="note">"firefly" is Firefly, on behalf of all of its users;  "panel" is this panel.</p></div></div>';
+
+  h += '<div class="card gap"><h2>Alerts</h2>' + (w.log.length ? '<table><tr><th>When</th><th>Rule</th><th></th><th>What was seen</th></tr>' + w.log.map((a) => `<tr><td class="note" style="white-space:nowrap">${when(a.at)}</td><td>${esc((w.rules.find((r) => r.name === a.rule) || {}).what || a.rule)}</td><td class="${a.state === 'alert' ? 'badText' : 'goodText'}">${a.state === 'alert' ? 'alert' : 'cleared'}</td><td class="note">${esc(a.detail)}</td></tr>`).join('') + '</table>' : '<p class="note">None so far.</p>') + '</div>';
+  return h;
+};
 VIEW.Record = async function (fresh) {
   const r = await get('record', null, fresh);
   return '<div class="card"><h2>Record of controls used</h2>' + (r.entries.length ? '<div class="scroll"><table><tr><th>When</th><th>From</th><th>Control</th><th>Detail</th></tr>' +

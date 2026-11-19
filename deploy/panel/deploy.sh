@@ -9,6 +9,7 @@
 #                  the panel's stack already has (empty on a first deployment)
 #
 # Environment:  STACK (default aiab-panel), SERVICE_STACK (aiab-fargate),
+# ALERT_EMAIL (where alerts go; default: keep what the stack has),
 # SIGN_IN (required | off; default: keep what the stack has, required at first),
 # CATALOG_BUCKET (ipac-archive-in-a-box-pilot), which is also where the
 # function's code is uploaded (under deploy/panel/), AWS_PROFILE, AWS_REGION.
@@ -27,6 +28,15 @@ SERVICE_URL=$(aws cloudformation describe-stacks --stack-name "$SERVICE_STACK" \
 OUT=$(mktemp -d)
 trap 'rm -rf "$OUT"' EXIT
 
+# A function that cannot be loaded takes the whole panel down, so try loading
+# it here first, with stand-ins for the AWS library it will find in Lambda.
+mkdir -p "$OUT/stubs/botocore"
+printf 'def client(*a, **k):\n    return None\n' > "$OUT/stubs/boto3.py"
+: > "$OUT/stubs/botocore/__init__.py"
+printf 'class ClientError(Exception):\n    pass\n' > "$OUT/stubs/botocore/exceptions.py"
+(cd functions && PYTHONPATH="$OUT/stubs" python3 -c "import panel; panel.handler; panel.watch_handler") \
+    || { echo "functions/panel.py does not load; nothing was deployed" >&2; exit 1; }
+
 aws cloudformation package --template-file stack.yaml --s3-bucket "$CATALOG_BUCKET" \
     --s3-prefix deploy/panel --output-template-file "$OUT/packaged.yaml" > /dev/null
 
@@ -43,10 +53,11 @@ CALLBACK=$(aws cloudformation describe-stacks --stack-name "$STACK" \
     --query "Stacks[0].Outputs[?OutputKey=='PanelUrl'].OutputValue" --output text 2>/dev/null || true)
 if [ -n "$CALLBACK" ] && [ "$CALLBACK" != "None" ]; then PARAMS+=("CallbackUrl=$CALLBACK"); fi
 if [ -n "${SIGN_IN:-}" ]; then PARAMS+=("SignIn=$SIGN_IN"); fi
+if [ -n "${ALERT_EMAIL:-}" ]; then PARAMS+=("AlertEmail=$ALERT_EMAIL"); fi
 if [ $# -ge 2 ]; then PARAMS+=("PanelSecret=$2"); fi
 
 aws cloudformation deploy --stack-name "$STACK" --template-file "$OUT/packaged.yaml" \
-    --capabilities CAPABILITY_IAM --no-fail-on-empty-changeset \
+    --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM --no-fail-on-empty-changeset \
     --tags Project=archive-in-a-box-pilot --parameter-overrides "${PARAMS[@]}"
 
 BUCKET=$(aws cloudformation describe-stacks --stack-name "$STACK" \

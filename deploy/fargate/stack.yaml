@@ -37,6 +37,13 @@ Parameters:
       Lets the control panel's functions (deploy/panel) reach the service from outside
       the allowed address ranges, by sending this value in the X-Panel-Secret header.
       Empty closes that door.
+  AccessLogBucket:
+    Type: String
+    Default: ''
+    Description: >-
+      Domain name of a bucket for CloudFront's own log (the control panel's
+      LogBucket, as <name>.s3.amazonaws.com).  It is the only record of
+      requests refused at the door.  Empty for no log.
   TapImage:
     Type: String
   ProxyImage:
@@ -125,6 +132,9 @@ Parameters:
     Type: String
     Default: ipac/firefly:2026.4.0
     Description: Public Firefly image the build copies into ECR.
+
+Conditions:
+  HaveAccessLog: !Not [!Equals [!Ref AccessLogBucket, '']]
 
 Resources:
 
@@ -385,6 +395,10 @@ Resources:
         HttpVersion: http2
         IPV6Enabled: false          # the access check understands IPv4 only
         PriceClass: PriceClass_100
+        Logging: !If
+          - HaveAccessLog
+          - {Bucket: !Ref AccessLogBucket, Prefix: service/, IncludeCookies: false}
+          - !Ref AWS::NoValue
         Origins:
           - Id: alb
             DomainName: !GetAtt LoadBalancer.DNSName

@@ -43,6 +43,10 @@ Parameters:
       The panel's own address, https://dxxxx.cloudfront.net/, where sign-in returns to.
       It is an output of this stack, so it is known from the second deployment on;
       deploy.sh fills it in.
+  AlertEmail:
+    Type: String
+    Default: ''
+    Description: Where alerts are sent.  Empty for none.  AWS asks the address to confirm before it sends any.
   SessionHours:
     Type: Number
     Default: 8
@@ -86,6 +90,7 @@ Parameters:
     Description: Disk of the conversion task in GiB (21 to 200); it holds the input and the output at once.
 
 Conditions:
+  HaveAlertEmail: !Not [!Equals [!Ref AlertEmail, '']]
   HaveCallback: !Not [!Equals [!Ref CallbackUrl, '']]
 
 Resources:
@@ -124,6 +129,124 @@ Resources:
             Condition:
               StringEquals:
                 AWS:SourceArn: !Sub arn:aws:cloudfront::${AWS::AccountId}:distribution/${Distribution}
+
+  # ---- watching (stage 4) --------------------------------------------------
+
+  # CloudFront's own logs, of this panel and (by the service stack's
+  # AccessLogBucket setting) of the service.  They are the only record of
+  # requests turned away at the door, which never reach the service.
+  LogBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      OwnershipControls:
+        Rules: [{ObjectOwnership: BucketOwnerPreferred}]     # CloudFront delivers its logs by an ACL grant
+      PublicAccessBlockConfiguration:
+        {BlockPublicAcls: true, BlockPublicPolicy: true, IgnorePublicAcls: true, RestrictPublicBuckets: true}
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: {SSEAlgorithm: AES256}
+      LifecycleConfiguration:
+        Rules:
+          - {Id: logs-are-kept-30-days, Status: Enabled, ExpirationInDays: 30}
+
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: Archive in a Box
+
+  AlertSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HaveAlertEmail
+    Properties:
+      TopicArn: !Ref AlertTopic
+      Protocol: email
+      Endpoint: !Ref AlertEmail
+
+  AlertTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics: [!Ref AlertTopic]
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal: {Service: cloudwatch.amazonaws.com}
+            Action: sns:Publish
+            Resource: !Ref AlertTopic
+
+  # The rules are checked by the function itself, so something else has to
+  # notice if the function stops: it reports each run, and silence is the alarm.
+  WatcherSilentAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: The control panel's timer has not run for 20 minutes, so nothing is watching the service.
+      Namespace: ArchiveInABox/Panel
+      MetricName: Tick
+      Dimensions: [{Name: Service, Value: !Ref ServiceStack}]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 4
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions: [!Ref AlertTopic]
+      OKActions: [!Ref AlertTopic]
+
+  # The same code as the panel's function, entered by another door that
+  # hands out a digest and takes in a report, and does nothing else.
+  WatchFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Archive in a Box control panel - digest for the daily review, and its report
+      Runtime: python3.12
+      Handler: panel.watch_handler
+      Code: functions/
+      Role: !GetAtt FunctionRole.Arn
+      Timeout: 120
+      MemorySize: 512
+      # The same settings as the panel's function, since it is the same code.
+      Environment:
+        Variables:
+          SERVICE_STACK: !Ref ServiceStack
+          SERVICE_URL: !Ref ServiceUrl
+          PANEL_SECRET: !Ref PanelSecret
+          CATALOG_BUCKET: !Ref CatalogBucket
+          CATALOG_PREFIX: !Ref CatalogPrefix
+          STATE_BUCKET: !Ref Bucket
+          ECR_PREFIX: !Ref ImagePrefix
+          BUILD_PROJECT: !Ref BuildProject
+          TASK_CAP: !Ref TaskCap
+          INGEST_CLUSTER: !Ref IngestCluster
+          INGEST_TASKDEF: !Sub ${AWS::StackName}-ingest
+          INGEST_SUBNETS: !Join [',', !Ref SubnetIds]
+          INGEST_SG: !Ref IngestSecurityGroup
+          INGEST_LOGS: !Ref IngestLogs
+          SIGN_IN: !Ref SignIn
+          SIGN_IN_HOST: !Sub ${UsersDomain}.auth.${AWS::Region}.amazoncognito.com
+          SIGN_IN_CLIENT: !Ref UsersClient
+          SIGN_IN_RETURN: !Ref CallbackUrl
+          ALERT_TOPIC: !Ref AlertTopic
+          LOG_BUCKET: !Ref LogBucket
+
+  WatchFunctionLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${WatchFunction}
+      RetentionInDays: 30
+
+  # For whoever reviews the logs each day.  Anyone in this account who may
+  # assume roles can take it; all it allows is calling the function above.
+  WatchRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${AWS::StackName}-watch
+      AssumeRolePolicyDocument:
+        Statement:
+          - {Effect: Allow, Principal: {AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'}, Action: sts:AssumeRole}
+      Policies:
+        - PolicyName: digest-and-report-only
+          PolicyDocument:
+            Statement:
+              - {Effect: Allow, Action: lambda:InvokeFunction, Resource: !GetAtt WatchFunction.Arn}
 
   # ---- who may sign in -----------------------------------------------------
   # Accounts are made by an administrator only (aws cognito-idp
@@ -304,6 +427,12 @@ Resources:
               - Effect: Allow
                 Action: lambda:InvokeFunction
                 Resource: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-Function-*
+        - PolicyName: watching
+          PolicyDocument:
+            Statement:
+              - {Effect: Allow, Action: sns:Publish, Resource: !Ref AlertTopic}
+              - {Effect: Allow, Action: s3:ListBucket, Resource: !GetAtt LogBucket.Arn}
+              - {Effect: Allow, Action: s3:GetObject, Resource: !Sub '${LogBucket.Arn}/*'}
         - PolicyName: own-state
           PolicyDocument:
             Statement:
@@ -341,6 +470,8 @@ Resources:
           SIGN_IN_HOST: !Sub ${UsersDomain}.auth.${AWS::Region}.amazoncognito.com
           SIGN_IN_CLIENT: !Ref UsersClient
           SIGN_IN_RETURN: !Ref CallbackUrl
+          ALERT_TOPIC: !Ref AlertTopic
+          LOG_BUCKET: !Ref LogBucket
 
   FunctionLogs:
     Type: AWS::Logs::LogGroup
@@ -538,6 +669,7 @@ Resources:
         IPV6Enabled: false          # the access check understands IPv4 only
         PriceClass: PriceClass_100
         DefaultRootObject: index.html
+        Logging: {Bucket: !GetAtt LogBucket.DomainName, Prefix: panel/, IncludeCookies: false}
         Origins:
           - Id: page
             DomainName: !GetAtt Bucket.RegionalDomainName
@@ -570,6 +702,12 @@ Resources:
               - {EventType: viewer-request, FunctionARN: !GetAtt AccessFunction.FunctionMetadata.FunctionARN}
 
 Outputs:
+  LogBucket:
+    Value: !Ref LogBucket
+  WatchFunction:
+    Value: !Ref WatchFunction
+  WatchRole:
+    Value: !GetAtt WatchRole.Arn
   UserPool:
     Value: !Ref Users
   UserPoolClient:
