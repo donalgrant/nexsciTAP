@@ -43,6 +43,19 @@ Parameters:
       The panel's own address, https://dxxxx.cloudfront.net/, where sign-in returns to.
       It is an output of this stack, so it is known from the second deployment on;
       deploy.sh fills it in.
+  DomainName:
+    Type: String
+    Default: ''
+    Description: >-
+      The panel's own name, e.g. aiab-admin.ipac.caltech.edu.  Empty to use the
+      Amazon name CloudFront gives.  The name's DNS entry must be a CNAME
+      to the distribution's cloudfront.net name.
+  CertificateArn:
+    Type: String
+    Default: ''
+    Description: >-
+      A certificate for DomainName from AWS Certificate Manager, issued in
+      us-east-1 (the only region CloudFront reads).  Needed with DomainName.
   AlertEmail:
     Type: String
     Default: ''
@@ -92,6 +105,7 @@ Parameters:
 Conditions:
   HaveAlertEmail: !Not [!Equals [!Ref AlertEmail, '']]
   HaveCallback: !Not [!Equals [!Ref CallbackUrl, '']]
+  HaveDomain: !Not [!Equals [!Ref DomainName, '']]
 
 Resources:
 
@@ -223,7 +237,7 @@ Resources:
           SIGN_IN: !Ref SignIn
           SIGN_IN_HOST: !Sub ${UsersDomain}.auth.${AWS::Region}.amazoncognito.com
           SIGN_IN_CLIENT: !Ref UsersClient
-          SIGN_IN_RETURN: !Ref CallbackUrl
+          SIGN_IN_RETURN: !If [HaveDomain, !Sub 'https://${DomainName}/', !Ref CallbackUrl]
           ALERT_TOPIC: !Ref AlertTopic
           LOG_BUCKET: !Ref LogBucket
 
@@ -298,8 +312,10 @@ Resources:
       AllowedOAuthFlows: [code]
       # The last scope is what lets the functions ask Cognito whose token they hold.
       AllowedOAuthScopes: [openid, email, aws.cognito.signin.user.admin]
-      CallbackURLs: [!If [HaveCallback, !Ref CallbackUrl, 'https://example.invalid/']]
-      LogoutURLs: [!If [HaveCallback, !Ref CallbackUrl, 'https://example.invalid/']]
+      CallbackURLs:
+        - !If [HaveDomain, !Sub 'https://${DomainName}/', !If [HaveCallback, !Ref CallbackUrl, 'https://example.invalid/']]
+      LogoutURLs:
+        - !If [HaveDomain, !Sub 'https://${DomainName}/', !If [HaveCallback, !Ref CallbackUrl, 'https://example.invalid/']]
       # The admin flow is for a test from the command line by someone who holds the account.
       ExplicitAuthFlows: [ALLOW_USER_SRP_AUTH, ALLOW_REFRESH_TOKEN_AUTH, ALLOW_ADMIN_USER_PASSWORD_AUTH]
       PreventUserExistenceErrors: ENABLED
@@ -469,7 +485,7 @@ Resources:
           SIGN_IN: !Ref SignIn
           SIGN_IN_HOST: !Sub ${UsersDomain}.auth.${AWS::Region}.amazoncognito.com
           SIGN_IN_CLIENT: !Ref UsersClient
-          SIGN_IN_RETURN: !Ref CallbackUrl
+          SIGN_IN_RETURN: !If [HaveDomain, !Sub 'https://${DomainName}/', !Ref CallbackUrl]
           ALERT_TOPIC: !Ref AlertTopic
           LOG_BUCKET: !Ref LogBucket
 
@@ -672,6 +688,11 @@ Resources:
         HttpVersion: http2
         IPV6Enabled: false          # the access check understands IPv4 only
         PriceClass: PriceClass_100
+        Aliases: !If [HaveDomain, [!Ref DomainName], !Ref AWS::NoValue]
+        ViewerCertificate: !If
+          - HaveDomain
+          - {AcmCertificateArn: !Ref CertificateArn, SslSupportMethod: sni-only, MinimumProtocolVersion: TLSv1.2_2021}
+          - !Ref AWS::NoValue
         DefaultRootObject: index.html
         Logging: {Bucket: !GetAtt LogBucket.DomainName, Prefix: panel/, IncludeCookies: false}
         Origins:
@@ -717,7 +738,10 @@ Outputs:
   UserPoolClient:
     Value: !Ref UsersClient
   PanelUrl:
-    Value: !Sub https://${Distribution.DomainName}/
+    Value: !If [HaveDomain, !Sub 'https://${DomainName}/', !Sub 'https://${Distribution.DomainName}/']
+  CloudFrontName:
+    Description: What the DNS entry for DomainName points to (a CNAME).
+    Value: !GetAtt Distribution.DomainName
   Bucket:
     Value: !Ref Bucket
   Function:

@@ -11,6 +11,8 @@
 # Environment:  STACK (default aiab-panel), SERVICE_STACK (aiab-fargate),
 # ALERT_EMAIL (where alerts go; default: keep what the stack has),
 # SIGN_IN (required | off; default: keep what the stack has, required at first),
+# DOMAIN_NAME and CERTIFICATE_ARN (the panel's own name and its certificate in
+# us-east-1; default: keep what the stack has, the Amazon name at first),
 # CATALOG_BUCKET (ipac-archive-in-a-box-pilot), which is also where the
 # function's code is uploaded (under deploy/panel/), AWS_PROFILE, AWS_REGION.
 
@@ -54,6 +56,7 @@ CALLBACK=$(aws cloudformation describe-stacks --stack-name "$STACK" \
 if [ -n "$CALLBACK" ] && [ "$CALLBACK" != "None" ]; then PARAMS+=("CallbackUrl=$CALLBACK"); fi
 if [ -n "${SIGN_IN:-}" ]; then PARAMS+=("SignIn=$SIGN_IN"); fi
 if [ -n "${ALERT_EMAIL:-}" ]; then PARAMS+=("AlertEmail=$ALERT_EMAIL"); fi
+if [ -n "${DOMAIN_NAME+x}" ]; then PARAMS+=("DomainName=$DOMAIN_NAME" "CertificateArn=${CERTIFICATE_ARN:-}"); fi
 if [ $# -ge 2 ]; then PARAMS+=("PanelSecret=$2"); fi
 
 aws cloudformation deploy --stack-name "$STACK" --template-file "$OUT/packaged.yaml" \

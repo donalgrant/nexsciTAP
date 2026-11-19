@@ -44,6 +44,19 @@ Parameters:
       Domain name of a bucket for CloudFront's own log (the control panel's
       LogBucket, as <name>.s3.amazonaws.com).  It is the only record of
       requests refused at the door.  Empty for no log.
+  DomainName:
+    Type: String
+    Default: ''
+    Description: >-
+      The service's own name, e.g. aiab.ipac.caltech.edu.  Empty to use the
+      Amazon name CloudFront gives.  The name's DNS entry must be a CNAME
+      to the distribution's cloudfront.net name.
+  CertificateArn:
+    Type: String
+    Default: ''
+    Description: >-
+      A certificate for DomainName from AWS Certificate Manager, issued in
+      us-east-1 (the only region CloudFront reads).  Needed with DomainName.
   TapImage:
     Type: String
   ProxyImage:
@@ -135,6 +148,7 @@ Parameters:
 
 Conditions:
   HaveAccessLog: !Not [!Equals [!Ref AccessLogBucket, '']]
+  HaveDomain: !Not [!Equals [!Ref DomainName, '']]
 
 Resources:
 
@@ -340,7 +354,10 @@ Resources:
 
   # ---- HTTPS front ----------------------------------------------------
   # CloudFront serves the site at https://<id>.cloudfront.net with Amazon's
-  # certificate, so no domain has to be registered.  Nothing is cached.
+  # certificate, so no domain has to be registered.  With DomainName and
+  # CertificateArn it serves the site under that name instead, and a request
+  # that still arrives under the Amazon name is sent on to it by the proxy.
+  # Nothing is cached.
 
   AccessFunction:
     Type: AWS::CloudFront::Function
@@ -395,6 +412,11 @@ Resources:
         HttpVersion: http2
         IPV6Enabled: false          # the access check understands IPv4 only
         PriceClass: PriceClass_100
+        Aliases: !If [HaveDomain, [!Ref DomainName], !Ref AWS::NoValue]
+        ViewerCertificate: !If
+          - HaveDomain
+          - {AcmCertificateArn: !Ref CertificateArn, SslSupportMethod: sni-only, MinimumProtocolVersion: TLSv1.2_2021}
+          - !Ref AWS::NoValue
         Logging: !If
           - HaveAccessLog
           - {Bucket: !Ref AccessLogBucket, Prefix: service/, IncludeCookies: false}
@@ -447,7 +469,8 @@ Resources:
           Essential: true
           Memory: 3584
           Environment:
-            - {Name: PUBLIC_URL, Value: !Sub 'https://${Distribution.DomainName}'}
+            - Name: PUBLIC_URL
+              Value: !If [HaveDomain, !Sub 'https://${DomainName}', !Sub 'https://${Distribution.DomainName}']
             # Firefly, beside it in the task, reaches it over plain HTTP.
             - {Name: HTTP_HOSTS, Value: 'http://localhost'}
             - {Name: TAP_PORT, Value: '8081'}
@@ -500,7 +523,7 @@ Resources:
           PortMappings:
             - {ContainerPort: 80}
           Environment:
-            - {Name: PUBLIC_HOST, Value: !GetAtt Distribution.DomainName}
+            - {Name: PUBLIC_HOST, Value: !If [HaveDomain, !Ref DomainName, !GetAtt Distribution.DomainName]}
             - {Name: PUBLIC_SCHEME, Value: https}
             - {Name: PROXY_COOKIE_FLAGS, Value: '# not needed over HTTPS'}
             - {Name: HIPS_URL, Value: !Ref HipsUrl}
@@ -623,8 +646,11 @@ Outputs:
   BuildProject:
     Value: !Ref BuildProject
   FireflyUrl:
-    Value: !Sub 'https://${Distribution.DomainName}/firefly/'
+    Value: !If [HaveDomain, !Sub 'https://${DomainName}/firefly/', !Sub 'https://${Distribution.DomainName}/firefly/']
   TapUrl:
-    Value: !Sub 'https://${Distribution.DomainName}/TAP'
+    Value: !If [HaveDomain, !Sub 'https://${DomainName}/TAP', !Sub 'https://${Distribution.DomainName}/TAP']
+  CloudFrontName:
+    Description: What the DNS entry for DomainName points to (a CNAME).
+    Value: !GetAtt Distribution.DomainName
   LogGroup:
     Value: !Ref LogGroup
