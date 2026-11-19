@@ -519,6 +519,8 @@ def view_datasets(params):
         pass
 
     found = discovery()
+    canary = canary_state()
+    verified = load_state('verify', {}).get('list', [])
     out = []
     for name in sorted(set(by_table) | set(served)):
         folder = by_table.get(name)
@@ -531,11 +533,12 @@ def view_datasets(params):
                     'queries24h': use.get(name, 0),
                     'notServedWhy': said.get('why') if fresh and said.get('served') is False else None,
                     'warnings': said.get('warnings') if fresh and said.get('served') else None, **s})
+        if folder:
+            out[-1].update(table_checks(name, folder, f, said if fresh else None, canary, verified))
     return {'tables': out, 'problem': problem, 'bucket': CATALOG_BUCKET, 'prefix': CATALOG_PREFIX,
             'totalBytes': sum(f['bytes'] for f in folders.values()),
             'staged': staged(), 'ingests': ingests(), 'hidden': area_folders('hidden/'),
             'incoming': incoming(), 'uploadArea': f's3://{STATE_BUCKET}/{INCOMING}',
-            'checks': list(reversed(load_state('verify', {}).get('list', [])))[:8],
             'versions': versions(), 'moves': moves()}
 
 
@@ -977,6 +980,10 @@ def control(body, who):
         return start_ingest(body, who)
     if action == 'describe':
         return start_describe(body, who)
+    if action == 'fulltest':
+        return start_full_test(body.get('folder'), who)
+    if action == 'ask':
+        return ask_again(body.get('folder'), who)
     if action in ('publish', 'discard', 'hide', 'unhide', 'remove', 'restore'):
         return start_move(action, body.get('folder'), who, confirm=body.get('confirm'), version=body.get('version'))
     raise Refused(f'No control named {action!r}.')
@@ -1046,6 +1053,10 @@ def staged():
         report['replaces'] = bool(keys_under(f'{CATALOG_PREFIX}/{parts[1]}/')[:1])
         if report['replaces'] and report.get('ok'):
             report['compare'] = compare_with_served(parts[1], report)
+        if report.get('ok'):
+            report['checks'] = file_checks(report, report) + [
+                replaced_check(report.get('compare'), report['replaces'], report.get('ended'))] + [
+                {'key': k, 'name': n, 'status': 'na', 'detail': 'Made after publishing.'} for k, n in LATER_CHECKS]
         out.append(report)
     return out
 
@@ -1099,6 +1110,10 @@ def ingests():
                     code = (t.get('containers') or [{}])[0].get('exitCode')
                     i['status'] = 'STAGED' if code == 0 else 'FAILED'
                     i['ended'] = (t.get('stoppedAt') or now()).timestamp()
+                    if i.get('what') == 'check':
+                        said = full_test(i['folder']) or {}
+                        record('panel', 'full-test-result', {'table': i['folder'], 'result': 'passed' if code == 0 else 'FAILED',
+                                                             'why': said.get('error')})
                     if code != 0:
                         i['reason'] = t.get('stoppedReason') or (t.get('containers') or [{}])[0].get('reason') or ''
                 else:
@@ -1153,9 +1168,9 @@ def run_ingest(folder, env, who, what):
     ingests()
     held = load_state('ingests', {}).get('list', [])
     if any(i['folder'] == folder and i.get('status') in ('STARTING', 'RUNNING') for i in held):
-        raise Refused(f'An ingest of {folder} is already running.')
+        raise Refused(f'A conversion or a test of {folder} is already running.')
 
-    env = dict(env, NAME=folder, DEST_BUCKET=CATALOG_BUCKET, DEST_PREFIX=f'staging/{folder}/')
+    env = dict({'DEST_BUCKET': CATALOG_BUCKET, 'DEST_PREFIX': f'staging/{folder}/'}, **env, NAME=folder)
     r = aws('ecs').run_task(
         cluster=INGEST_CLUSTER, taskDefinition=INGEST_TASKDEF, launchType='FARGATE', count=1,
         networkConfiguration={'awsvpcConfiguration': {
@@ -1282,6 +1297,7 @@ def start_move(action, folder, who, **more):
             'started': time.time(), 'status': 'RUNNING', **{k: v for k, v in more.items() if k == 'version'}}
     if action == 'publish':
         move['expect'] = {'rows': report.get('rows'), 'cone': report.get('checkCone')}
+        move['compare'] = report.get('compare')
 
     # The canary must not ask a table for an answer that is about to change.
     table = table_of(folder)
@@ -1331,13 +1347,22 @@ def do_move(move):
             # away old files the new set does not have.  The service reads
             # this folder throughout; for the seconds the copy takes it may
             # see a mixture of old and new files.
+            try:
+                report = json.loads(aws('s3').get_object(Bucket=CATALOG_BUCKET, Key=f'staging/{folder}/_report.json')['Body'].read())
+            except (ClientError, ValueError):
+                report = None
             if keys_under(here)[:1]:
                 detail['kept'] = f'versions/{folder}/{stamp()}/'
                 copy_folder(here, detail['kept'])
+                keep_checks(detail['kept'].split('/')[2], folder)
             names = copy_folder(f'staging/{folder}/', here)
             if not names:
                 raise RuntimeError('Staging held no files.')
             empty_folder(here, keep=names)
+            # The report of the checks goes with the table, to be read for as long as these files are served.
+            save_state(f'checks/{folder}', {'ingest': slim(report) if report else None, 'compare': move.get('compare'),
+                                            'replaced': bool(detail.get('kept')),
+                                            'published': {'at': time.time(), 'who': move.get('who')}})
             empty_folder(f'staging/{folder}/')
             detail['files'] = len(names)
         elif action == 'discard':
@@ -1352,13 +1377,18 @@ def do_move(move):
         elif action == 'remove':
             detail['kept'] = f'versions/{folder}/{stamp()}-removed/'
             copy_folder(here, detail['kept'])
+            keep_checks(detail['kept'].split('/')[2], folder)
             empty_folder(here)
         elif action == 'restore':
             if keys_under(here)[:1]:
                 detail['kept'] = f'versions/{folder}/{stamp()}/'
                 copy_folder(here, detail['kept'])
+                keep_checks(detail['kept'].split('/')[2], folder)
             names = copy_folder(f"versions/{folder}/{move['version']}/", here)
             empty_folder(here, keep=names)
+            was = load_state(f"checks/{folder}@{move['version']}", {}) or {}
+            save_state(f'checks/{folder}', dict({k: v for k, v in was.items() if k != 'asked'},
+                                                restored={'version': move['version'], 'at': time.time(), 'who': move.get('who')}))
             detail['restored'] = move['version']
         status, error = 'DONE', None
         if action == 'publish' and move.get('expect'):
@@ -1382,6 +1412,268 @@ def do_move(move):
 VIEWS = {'record': view_record, 'jobs': view_jobs, 'columns': view_columns, 'ingestlog': view_ingestlog,
          'status': view_status, 'load': view_load, 'activity': view_activity, 'datasets': view_datasets,
          'cost': view_cost, 'components': view_components, 'logs': view_logs}
+
+
+# ---- the checks on each table, one by one ----------------------------------
+#
+# What is known of the files a table is served from, check by check, and
+# where each answer came from.  The checks on the files are made by the
+# ingest task: when a table is converted (its report is kept at publishing,
+# in state/checks/<folder>.json) and again whenever an administrator asks
+# for the full test (state/fulltest/<folder>/_report.json).  A report
+# speaks only for the files it was made from, so one made from other files
+# than those in the folder now is not shown.
+
+FILE_CHECKS = (('sorted', 'Rows are in index order'), ('index', 'The index matches the positions'),
+               ('cones', 'Cone searches agree, found two ways'), ('dropped', 'Rows left out for lack of a position'),
+               ('positions', 'Positions are in range'), ('units', 'Units are IVOA units'),
+               ('ucds', 'UCDs are on the IVOA list'), ('described', 'Columns are described'))
+LATER_CHECKS = (('served', 'The service answers as the files say'), ('door', "The service's own look at the index"),
+                ('canary', 'Asked every five minutes'))
+
+
+def slim(report):
+    """A report as it is kept: without the sample rows and the conversion's output."""
+    return {k: v for k, v in report.items() if k not in ('sample', 'toolOutput', 'replaces', 'compare', 'checks')}
+
+
+def keep_checks(version, folder):
+    """The checks of the files now served go with them into an earlier version."""
+    was = load_state(f'checks/{folder}')
+    if was:
+        save_state(f'checks/{folder}@{version}', was)
+
+
+def full_test(folder):
+    return load_state(f'fulltest/{folder}/_report')
+
+
+def speaks_for(report, f):
+    """Was this report made from the files now in the folder?"""
+    return bool(report and f and report.get('bytes') == f.get('bytes') and len(report.get('files') or []) == f.get('files'))
+
+
+def file_checks(r, ingest, by=''):
+    """
+    The checks made on a table's files.  `r` is the report to read them
+    from, or None if none speaks for these files; `ingest` is the report of
+    their conversion, which alone knows what the conversion left out.
+    """
+    out = []
+
+    def add(key, status, detail, source=r):
+        out.append({'key': key, 'name': dict(FILE_CHECKS)[key], 'status': status, 'detail': detail,
+                    'at': (source or {}).get('ended'), 'by': by if source is r else 'at ingest'})
+
+    if not r:
+        for key, _ in FILE_CHECKS:
+            add(key, 'none', 'Not run on the files served now.')
+        return out
+
+    t, error = r.get('searchTest') or {}, None if r.get('ok') else (r.get('error') or 'The test did not finish.')
+    steps = (('sorted', bool(t.get('sorted')), f"{len(r.get('files') or [])} file(s), each in order, and in order from one to the next."),
+             ('index', t.get('indexWrong') == 0, f"{t.get('indexChecked') or 0:,} sampled rows;  none has a wrong index."),
+             ('cones', 'cones' in t, f"{t.get('cones') or 0} searches, 5 arcsec to 1 degree across, found the same "
+                                     f"{t.get('rowsFound') or 0:,} rows through the index as by measuring every row."))
+    for key, done, detail in steps:
+        if done:
+            add(key, 'pass', detail)
+        elif error:
+            add(key, 'fail', error)
+            error = None
+        else:
+            add(key, 'none', 'Not reached:  an earlier check failed.' if not r.get('ok') else 'Not run.')
+
+    if ingest and 'dropped' in ingest:
+        n = ingest['dropped']
+        add('dropped', 'warn' if n else 'pass', f"{n:,} rows of the input had no position and were left out." if n
+            else 'Every row of the input had a position.', ingest)
+    else:
+        add('dropped', 'na', 'Known only for a table converted through the panel.', None)
+
+    p, rows = r.get('position'), r.get('rows') or 0
+    if not p or p.get('raMin') is None:
+        add('positions', 'none', 'Not reached.' if not r.get('ok') else 'The range could not be read.')
+    else:
+        span = f"RA {p['raMin']:.4f} to {p['raMax']:.4f}, Dec {p['decMin']:.4f} to {p['decMax']:.4f}."
+        same = f"  {r['samePosition']:,} rows share a position with another." if r.get('samePosition') else ''
+        if p['raMin'] < 0 or p['raMax'] > 360 or p['decMin'] < -90 or p['decMax'] > 90:
+            add('positions', 'warn', span + '  Some are outside RA 0 to 360 or Dec -90 to 90.' + same)
+        elif p['raMax'] <= 24.0 and rows > 100:
+            add('positions', 'warn', span + '  No right ascension is above 24:  hours, not degrees?' + same)
+        else:
+            add('positions', 'pass', span + same)
+
+    cols = [c for c in r.get('columns') or [] if c.get('name') != 'hpx29']
+    for key, count, problem, word in (('units', 'badUnits', 'unitProblem', 'unit'), ('ucds', 'badUcds', 'ucdProblem', 'ucd')):
+        if count not in r:
+            add(key, 'none', 'Not reached.' if not r.get('ok') else 'This check is newer than the report.')
+            continue
+        bad = [f"{c['name']} ({c.get(word)})" for c in cols if c.get(problem)]
+        given = sum(1 for c in cols if c.get(word))
+        if bad:
+            add(key, 'warn', f"{len(bad)} of {given} given are not standard:  " + ', '.join(bad[:10]) + (' ...' if len(bad) > 10 else ''))
+        else:
+            add(key, 'pass', f"{given} of {len(cols)} columns have one;  all of those are standard.")
+    if 'noDescription' not in r:
+        add('described', 'none', 'Not reached.')
+    elif r['noDescription']:
+        add('described', 'warn', f"{r['noDescription']} of {len(cols)} columns have no description.")
+    else:
+        add('described', 'pass', f"All {len(cols)} columns have a description.")
+    return out
+
+
+def replaced_check(compare, replaced, at):
+    """How a table differed from the one it replaced, when it was published."""
+    one = {'key': 'replaced', 'name': 'Against the table it replaced', 'at': at, 'by': 'at ingest'}
+    if not replaced:
+        return dict(one, status='na', detail='It replaced nothing:  a new table.', at=None)
+    if not compare or compare.get('problem'):
+        return dict(one, status='none', detail='Not compared.' + (f"  {compare['problem']}" if compare else ''))
+    c = compare
+    detail = f"Rows {c['rowsBefore']:,} to {c['rowsAfter']:,}"
+    detail += f";  {len(c['removed'])} column(s) removed ({', '.join(c['removed'][:8])})" if c['removed'] else ';  no column removed'
+    detail += f";  {len(c['added'])} added." if c['added'] else '.'
+    return dict(one, status='warn' if c.get('warn') else 'pass', detail=detail)
+
+
+def canary_state():
+    with open(os.path.join(HERE, 'canary.json')) as f:
+        seed = {}
+        for c in json.load(f)['checks']:
+            m = re.search(r'\bFROM\s+(\w+)', c['query'], re.IGNORECASE)
+            seed[m.group(1) if m else ''] = c
+    return {'seed': seed, 'held': load_state('canary_tables', {}), 'last': (load_state('canary', {}) or {}).get('last') or {}}
+
+
+def cone_sql(table, cone):
+    return (f"SELECT count(*) AS n FROM {table} WHERE CONTAINS(POINT('ICRS',ra,dec),"
+            f"CIRCLE('ICRS',{cone['ra']!r},{cone['dec']!r},{cone['radius']!r}))=1")
+
+
+def table_checks(table, folder, f, said, canary, verified):
+    """Every check on one served table, as a list, with the report they were read from."""
+    rec = load_state(f'checks/{folder}', {}) or {}
+    ingest = rec.get('ingest') if speaks_for(rec.get('ingest'), f) else None
+    full = full_test(folder)
+    if not (full and full.get('started', 0) >= (f.get('modified') or 0) and (speaks_for(full, f) or not full.get('ok'))):
+        full = None
+    basis = full or ingest
+    out = file_checks(basis, ingest, 'full test' if full else 'at ingest')
+    out.append(replaced_check(rec.get('compare'), rec.get('replaced'), (rec.get('published') or {}).get('at')) if ingest
+               else {'key': 'replaced', 'name': 'Against the table it replaced', 'status': 'na',
+                     'detail': 'Known only for a table published through the panel.'})
+
+    def add(key, status, detail, at=None, by=None):
+        out.append({'key': key, 'name': dict(LATER_CHECKS)[key], 'status': status, 'detail': detail, 'at': at, 'by': by})
+
+    def answer(expect, seen):
+        want = f"The files hold {expect['rows']:,} rows" + (f" and {expect['cone']['count']:,} in a test cone" if expect.get('cone') else '')
+        if seen.get('problem'):
+            return want + f".  The service:  {seen['problem']}"
+        return want + f";  the service says {seen.get('rows', 0):,}" + (f" and {seen['cone']:,}." if 'cone' in seen else '.')
+
+    modified = f.get('modified') or 0
+    asked = rec.get('asked') if (rec.get('asked') or {}).get('at', 0) >= modified else None
+    after = next((v for v in reversed(verified) if v['folder'] == folder and v.get('since', 0) >= modified - 60), None)
+    if asked and (not after or after['status'] != 'WAITING'):
+        if not asked.get('expect') and asked['seen'].get('problem'):
+            add('served', 'fail', f"The service:  {asked['seen']['problem']}", asked['at'], 'asked by hand')
+        elif asked.get('ok') is None:
+            add('served', 'none', f"The service says {asked['seen'].get('rows', 0):,} rows, but no report says what these files hold.  "
+                                  'Run the full test first.', asked['at'], 'asked by hand')
+        else:
+            add('served', 'pass' if asked['ok'] else 'fail', answer(asked['expect'], asked['seen']), asked['at'], 'asked by hand')
+    elif after:
+        add('served', {'VERIFIED': 'pass', 'FAILED': 'fail', 'WAITING': 'waiting'}[after['status']],
+            answer(after['expect'], after.get('seen') or {}) if after.get('seen') else 'Waiting for the service to list the new files.',
+            after.get('ended') or after.get('since'), 'after publishing')
+    else:
+        add('served', 'none', 'Not asked since these files were put in place.')
+
+    if not said:
+        add('door', 'none', 'The service has not reported on these files.')
+    elif said.get('served') is False:
+        add('door', 'fail', f"Not served:  {said.get('why')}", said.get('at'), 'the service')
+    elif said.get('warnings'):
+        add('door', 'warn', '  '.join(said['warnings']), said.get('at'), 'the service')
+    else:
+        add('door', 'pass', 'It recomputed the index of the first rows of up to eight files and found it right, and the rows in order.',
+            said.get('at'), 'the service')
+
+    entry, seed = canary['held'].get(table), canary['seed'].get(table)
+    check = (entry or {}).get('check') or seed
+    if entry and not entry.get('on'):
+        add('canary', 'none', 'Not asked now:  ' + (entry.get('why') or 'switched off') + '.')
+    elif not check:
+        add('canary', 'none', 'No question with a known answer.  A passing "Ask the service again", after a full test, gives it one.')
+    else:
+        last = next((c for c in canary['last'].get('checks') or [] if c.get('name') == check['name']), None)
+        if not last:
+            add('canary', 'waiting', f"{check['name']}:  expects {check['expected']:,}.  Not asked on the last run"
+                                     + (f" ({canary['last'].get('skipped')})." if canary['last'].get('skipped') else '.'))
+        else:
+            add('canary', 'pass' if last.get('ok') else 'fail',
+                f"{check['name']}:  expects {check['expected']:,}, " + (f"got {last['got']:,}." if 'got' in last else str(last.get('error'))),
+                canary['last'].get('at'), 'the canary')
+    return {'checks': out, 'checkedFrom': {'kind': 'full test' if full else 'ingest' if ingest else None,
+                                           'at': (basis or {}).get('ended')},
+            'published': rec.get('published'), 'restored': rec.get('restored')}
+
+
+def start_full_test(folder, who):
+    """Run every check on a served table's files again.  It reads them and writes a report; nothing served changes."""
+    folder = folder_name(folder)
+    here = f'{CATALOG_PREFIX}/{folder}/'
+    if not keys_under(here)[:1]:
+        raise Refused(f'There is no served folder named {folder}.')
+    return run_ingest(folder, {'MODE': 'check', 'SRC_BUCKET': CATALOG_BUCKET, 'SRC_PREFIX': here,
+                               'DEST_BUCKET': STATE_BUCKET, 'DEST_PREFIX': f'state/fulltest/{folder}/'}, who, 'check')
+
+
+def ask_again(folder, who):
+    """Ask the service for a table's row count and one cone search, and compare with what its files were found to hold."""
+    folder = folder_name(folder)
+    f = catalog_folders().get(folder)
+    if not f:
+        raise Refused(f'There is no served folder named {folder}.')
+    table = table_of(folder)
+    rec = load_state(f'checks/{folder}', {}) or {}
+    full = full_test(folder)
+    basis = (full if full and full.get('ok') and full.get('started', 0) >= f['modified'] and speaks_for(full, f) else
+             rec.get('ingest') if speaks_for(rec.get('ingest'), f) else None)
+    expect = {'rows': basis.get('rows'), 'cone': basis.get('checkCone')} if basis else None
+    seen = {}
+    try:
+        rows, _ = tap(f'SELECT count(*) AS n FROM {table}')
+        seen['rows'] = int(rows[0]['n'])
+        if expect and expect.get('cone'):
+            got, _ = tap(cone_sql(table, expect['cone']))
+            seen['cone'] = int(got[0]['n'])
+    except ServiceError as e:
+        seen['problem'] = str(e)[:200]
+    ok = None
+    if expect:
+        ok = seen.get('rows') == expect['rows'] and (not expect.get('cone') or seen.get('cone') == expect['cone']['count'])
+    elif seen.get('problem'):
+        ok = False
+    rec['asked'] = {'at': time.time(), 'who': who, 'expect': expect, 'seen': seen, 'ok': ok}
+    save_state(f'checks/{folder}', rec)
+
+    # A right answer is one the canary can go on asking for, if it has none for this table.
+    entry = load_state('canary_tables', {}).get(table)
+    took = False
+    if ok and expect and expect.get('cone') and (entry is None or (entry.get('on') and not entry.get('check'))
+                                      or (entry.get('why') or '').startswith('an earlier version was restored')):
+        seeded = table in canary_state()['seed']
+        if not seeded or entry is not None:
+            canary_table(table, on=True, notBefore=0, why='', check={
+                'name': f'cone, {table}', 'expected': expect['cone']['count'], 'query': cone_sql(table, expect['cone'])})
+            took = True
+    record(who, 'ask-again', {'table': folder, 'result': {True: 'as the files say', False: 'NOT as the files say', None: 'nothing to compare with'}[ok],
+                              **seen})
+    return {'ok': ok, 'seen': seen, 'expect': expect, 'canary': took}
 
 
 # ---- canary ---------------------------------------------------------------

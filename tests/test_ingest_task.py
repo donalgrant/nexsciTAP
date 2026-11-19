@@ -151,3 +151,42 @@ def test_a_report_names_units_and_ucds_that_are_not_standard(tmp_path: Path):
     assert "unitProblem" in flux and "ucdProblem" in flux
     assert report["badUnits"] == 1 and report["badUcds"] == 1
     assert not any("Problem" in k for c in report["columns"] if c["name"] != "flux" for k in c)
+
+
+def test_a_served_table_can_be_checked_again_without_storing_anything(converted: Path, tmp_path: Path, monkeypatch):
+    """MODE=check fetches the served files, runs the checks, and writes the report and nothing else."""
+    import json
+    import shutil
+    import types
+
+    put, deleted = {}, []
+
+    class S3:
+        def get_paginator(self, _):
+            pages = [{"Contents": [{"Key": f"catalogs/t/{p.name}", "Size": p.stat().st_size}
+                                   for p in sorted(converted.glob("*.parquet"))]}]
+            return types.SimpleNamespace(paginate=lambda **kw: pages)
+
+        def download_file(self, bucket, key, to):
+            shutil.copy(converted / key.split("/")[-1], to)
+
+        def put_object(self, Bucket, Key, Body, **kw):
+            put[(Bucket, Key)] = Body
+
+        def upload_file(self, *a):
+            raise AssertionError("a check stores no table")
+
+        def delete_object(self, **kw):
+            deleted.append(kw)
+
+    monkeypatch.setitem(sys.modules, "boto3", types.SimpleNamespace(client=lambda name: S3()))
+    for k, v in dict(MODE="check", NAME="t", SRC_BUCKET="cat", SRC_PREFIX="catalogs/t/", DEST_BUCKET="panel",
+                     DEST_PREFIX="state/fulltest/t/", WORK=str(tmp_path / "work")).items():
+        monkeypatch.setenv(k, v)
+    with pytest.raises(SystemExit) as done:
+        ingest_task.main()
+    assert done.value.code == 0 and not deleted
+    assert list(put) == [("panel", "state/fulltest/t/_report.json")]
+    report = json.loads(put[("panel", "state/fulltest/t/_report.json")])
+    assert report["ok"] and report["mode"] == "check" and report["rows"] == 40000
+    assert report["searchTest"]["cones"] == 25 and "sample" not in report and "dropped" not in report

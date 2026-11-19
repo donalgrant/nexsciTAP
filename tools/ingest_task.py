@@ -15,12 +15,12 @@ person who has read the report.
 
 Everything is given in the environment:
 
-    MODE            convert | describe
+    MODE            convert | describe | check
     NAME            table name, for the report
     SRC_BUCKET      bucket of the input
     SRC_KEY         convert:  key of the file to convert, or, ending in "/", a folder
                     of CSV files or of Parquet files that make up one table
-    SRC_PREFIX      describe: folder of the catalog to describe, ending in "/"
+    SRC_PREFIX      describe, check: folder of the catalog, ending in "/"
     SCHEMA_KEY      optional (required to describe): key, in SRC_BUCKET or
                     SCHEMA_BUCKET, of the CSV of column types and metadata
     SCHEMA_BUCKET   bucket of SCHEMA_KEY, if not SRC_BUCKET
@@ -34,6 +34,11 @@ Everything is given in the environment:
 The report is DEST_PREFIX + "_report.json".  It is written whether the
 ingest worked or not, so the panel always has something to show; "ok" says
 which.  The exit status is 0 only if it worked.
+
+MODE=check converts nothing and stores no table.  It fetches a catalog as
+it is served and runs the same checks on it, writing only the report, so
+the checks can be run again on a table at any time, and on a table that
+was put in the bucket by hand.
 """
 
 import json
@@ -78,7 +83,7 @@ def check(outdir, report):
 
     files = sorted(f for f in os.listdir(outdir) if f.endswith('.parquet'))
     if not files:
-        raise RuntimeError('The conversion wrote no files.')
+        raise RuntimeError('There are no Parquet files to check.')
 
     report['files'] = [{'name': f, 'bytes': os.path.getsize(os.path.join(outdir, f))} for f in files]
     report['bytes'] = sum(f['bytes'] for f in report['files'])
@@ -326,7 +331,7 @@ def main():
     os.environ['WORK_DIR'] = work
 
     if not dest_bucket or not dest.endswith('/') or dest.count('/') < 2:
-        sys.exit('DEST_BUCKET and DEST_PREFIX (a folder inside the staging area, ending in "/") are required.')
+        sys.exit('DEST_BUCKET and DEST_PREFIX (a folder, ending in "/") are required.')
 
     report = {'ok': False, 'name': env('NAME'), 'mode': mode, 'started': time.time(), 'notes': [],
               'source': env('SRC_KEY') or env('SRC_PREFIX')}
@@ -380,8 +385,8 @@ def main():
                 args += ['--description', env('DESCRIPTION')]
             run_tool(args, report)
 
-        elif mode == 'describe':
-            if not schema:
+        elif mode in ('describe', 'check'):
+            if mode == 'describe' and not schema:
                 raise RuntimeError('Describing a catalog needs the list of column units and descriptions.')
             prefix = env('SRC_PREFIX')
             src = os.path.join(indir, 'catalog')
@@ -393,24 +398,29 @@ def main():
                         print(f'fetching {o["Key"]} ({o["Size"]:,} bytes)', flush=True)
                         s3.download_file(env('SRC_BUCKET'), o['Key'], os.path.join(src, name))
 
-            args = ['describe_parquet_catalog.py', src, outdir, '--schema', schema]
-            if env('DESCRIPTION'):
-                args += ['--description', env('DESCRIPTION')]
-            run_tool(args, report)
+            if mode == 'check':
+                outdir = src                    # the files as they are served
+            else:
+                args = ['describe_parquet_catalog.py', src, outdir, '--schema', schema]
+                if env('DESCRIPTION'):
+                    args += ['--description', env('DESCRIPTION')]
+                run_tool(args, report)
 
         else:
             raise RuntimeError(f'Unknown MODE {mode!r}')
 
         check(outdir, report)
+        if mode == 'check':
+            report.pop('sample', None)            # nothing is stored but the report
+        else:
+            # Staging holds this ingest and nothing from an earlier one.
+            for page in s3.get_paginator('list_objects_v2').paginate(Bucket=dest_bucket, Prefix=dest):
+                for o in page.get('Contents', []):
+                    s3.delete_object(Bucket=dest_bucket, Key=o['Key'])
 
-        # Staging holds this ingest and nothing from an earlier one.
-        for page in s3.get_paginator('list_objects_v2').paginate(Bucket=dest_bucket, Prefix=dest):
-            for o in page.get('Contents', []):
-                s3.delete_object(Bucket=dest_bucket, Key=o['Key'])
-
-        for f in report['files']:
-            print(f'storing {dest}{f["name"]}', flush=True)
-            s3.upload_file(os.path.join(outdir, f['name']), dest_bucket, dest + f['name'])
+            for f in report['files']:
+                print(f'storing {dest}{f["name"]}', flush=True)
+                s3.upload_file(os.path.join(outdir, f['name']), dest_bucket, dest + f['name'])
 
         report['ok'] = True
         status = 0
@@ -422,7 +432,7 @@ def main():
     report['ended'] = time.time()
     s3.put_object(Bucket=dest_bucket, Key=dest + REPORT, Body=json.dumps(report, default=str).encode(),
                   ContentType='application/json')
-    print(('staged ' if status == 0 else 'failed ') + dest, flush=True)
+    print((('checked ' if mode == 'check' else 'staged ') if status == 0 else 'failed ') + dest, flush=True)
     sys.exit(status)
 
 

@@ -362,26 +362,23 @@ const VIEW = {
     const failed = (d.moves || []).filter((m) => m.status === 'FAILED' && Date.now() / 1000 - m.started < 3600);
     if (failed.length) h += `<div class="notice err">${failed.map((m) => esc(m.action + ' ' + m.folder + ' failed:  ' + m.error)).join('<br>')}</div>`;
 
-    const converting = (d.ingests || []).filter((i) => i.status === 'RUNNING' || i.status === 'STARTING');
+    const live = (d.ingests || []).filter((i) => i.status === 'RUNNING' || i.status === 'STARTING');
+    const converting = live.filter((i) => i.what !== 'check'), testing = live.filter((i) => i.what === 'check').map((i) => i.folder);
+    if (testing.length) h += `<div class="notice">Running the full test of ${testing.map((x) => '<b>' + esc(x) + '</b>').join(', ')}.  It reads every row:  about a minute for a small table, several for a large one.  Nothing served changes.  The page refreshes by itself.</div>`;
     if (converting.length) h += `<div class="notice">Converting ${converting.map((i) => '<b>' + esc(i.folder) + '</b>' + (i.what === 'describe' ? ' (new metadata)' : '')).join(', ')}.  This takes about a minute for a small table and longer for a large one.  When it finishes, the result appears here, at the top of this page, with a <b>Publish</b> button.  The page refreshes by itself.</div>`;
     h += (d.staged || []).map(stagedCard).join('');
 
-    h += '<div class="card"><h2>Served</h2><div class="scroll"><table><tr><th>Table</th><th class="num">Rows</th><th class="num">Size</th><th class="num">Files</th><th class="num">Columns</th><th>Metadata</th><th class="num">Queries, 24 h</th><th>Changed</th><th></th></tr>' +
+    h += '<div class="card"><h2>Served</h2><div class="scroll"><table><tr><th>Table</th><th class="num">Rows</th><th class="num">Size</th><th class="num">Files</th><th class="num">Columns</th><th>Metadata</th><th>Checks</th><th class="num">Queries, 24 h</th><th>Changed</th><th></th></tr>' +
       d.tables.map((t) => {
         const meta = t.columns == null ? '<span class="note">not served yet</span>' : `<span class="note">${t.noDescription ? t.noDescription + ' lack a description' : 'all described'};  ${t.noUnit} have no unit</span>`;
         const vs = (d.versions || {})[t.folder] || [];
         return `<tr><td><span class="mono">${esc(t.table)}</span>${t.folder && t.folder !== t.table ? `<div class="note">folder ${esc(t.folder)}</div>` : ''}<div class="note">${esc(t.description || '')}</div>${t.notServedWhy ? `<div class="badText">Not served:  ${esc(t.notServedWhy)}</div>` : t.served === false ? '<div class="warnText">In the bucket, not served yet</div>' : ''}${(t.warnings || []).map((w) => `<div class="warnText">${esc(w)}</div>`).join('')}</td>` +
-          `<td class="num">${num(t.rows)}</td><td class="num">${bytes(t.bytes)}</td><td class="num">${num(t.files)}</td><td class="num">${num(t.columns)}</td><td>${meta}</td><td class="num">${num(t.queries24h)}</td><td class="note" style="white-space:nowrap">${when(t.modified)}</td>` +
+          `<td class="num">${num(t.rows)}</td><td class="num">${bytes(t.bytes)}</td><td class="num">${num(t.files)}</td><td class="num">${num(t.columns)}</td><td>${meta}</td><td style="white-space:nowrap">${t.checks ? `<a href="#" data-checks="${esc(t.folder)}">${checkSummary(t.checks, testing.includes(t.folder))}</a>` : ''}</td><td class="num">${num(t.queries24h)}</td><td class="note" style="white-space:nowrap">${when(t.modified)}</td>` +
           `<td style="white-space:nowrap">${t.folder ? `<button class="sm" data-meta="${esc(t.table)}" data-folder="${esc(t.folder)}" ${t.columns == null ? 'disabled' : ''}>Edit metadata</button> <button class="sm" data-hide="${esc(t.folder)}">Hide</button> <button class="sm" data-remove="${esc(t.folder)}">Remove</button>` : ''}` +
-          (vs.length ? `<div class="note" style="margin-top:4px">${vs.length} earlier version${vs.length === 1 ? '' : 's'}:  ${vs.slice(0, 4).map((v) => `<a href="#" data-restore="${esc(t.folder)}" data-version="${esc(v.version)}">${esc(stampText(v.version))}</a>`).join(', ')}</div>` : '') + '</td></tr>';
-      }).join('') + `</table></div><p class="note">${bytes(d.totalBytes)} in <code>s3://${esc(d.bucket)}/${esc(d.prefix)}/</code>.  The service takes up to five minutes to show a change.  "Remove" keeps the files as an earlier version;  nothing here deletes a served table for good.</p></div>`;
+          (vs.length ? `<div class="note" style="margin-top:4px">${vs.length} earlier version${vs.length === 1 ? '' : 's'}:  ${vs.slice(0, 4).map((v) => `<a href="#" data-restore="${esc(t.folder)}" data-version="${esc(v.version)}">${esc(stampText(v.version))}</a>`).join(', ')}</div>` : '') + '</td></tr>' +
+          (t.checks ? `<tr data-checkrow="${esc(t.folder)}" ${openChecks.has(t.folder) ? '' : 'hidden'}><td colspan="10">${checkPanel(t, testing.includes(t.folder))}</td></tr>` : '');
+      }).join('') + `</table></div><p class="note">Click a table's checks to see each one, when it was last made and what it found, and to run them again.  ${bytes(d.totalBytes)} in <code>s3://${esc(d.bucket)}/${esc(d.prefix)}/</code>.  The service takes up to five minutes to show a change.  "Remove" keeps the files as an earlier version;  nothing here deletes a served table for good.</p></div>`;
 
-    if ((d.checks || []).length) h += '<div class="card gap"><h2>Checks after publishing</h2><table><tr><th>Table</th><th>Published</th><th>Expected</th><th>The service says</th><th></th></tr>' +
-      d.checks.map((c) => { const e = c.expect || {}, s = c.seen || {};
-        return `<tr><td class="mono">${esc(c.folder)}</td><td class="note">${when(c.since)}</td><td>${num(e.rows)} rows${e.cone ? ';  ' + num(e.cone.count) + ' in a test cone' : ''}</td>` +
-          `<td>${s.problem ? '<span class="note">' + esc(s.problem) + '</span>' : s.rows == null ? '' : num(s.rows) + ' rows' + (s.cone == null ? '' : ';  ' + num(s.cone) + ' in the cone')}</td>` +
-          `<td class="${c.status === 'VERIFIED' ? 'goodText' : c.status === 'FAILED' ? 'badText' : 'note'}">${{VERIFIED: 'served as staged', FAILED: 'NOT as staged', WAITING: 'waiting for the service'}[c.status]}</td></tr>`; }).join('') +
-      '</table><p class="note">After a publish the panel asks the service for the table\'s row count and one cone search, and compares them with what the conversion found in the files.  It looks every five minutes and gives the service twenty.</p></div>';
     h += '<div id="metaslot"></div>';
 
     const gone = Object.entries(d.versions || {}).filter(([f]) => !d.tables.some((t) => t.folder === f) && !(d.hidden || []).some((x) => x.folder === f));
@@ -401,8 +398,8 @@ const VIEW = {
       '<p class="note" id="ustate">CSV, Parquet, FITS or VOTable, up to 5 GB from the browser.  Positions must be in degrees.  The column list is a CSV with a header and the columns <code>column_name, datatype, unit, ucd, description</code>;  it gives a CSV file its types and any file its units and descriptions.  The result goes to staging for you to look at before anything is served.</p></div>';
 
     if ((d.ingests || []).length) {
-      h += '<div class="card gap"><h2>Conversions</h2><table><tr><th>Table</th><th>Kind</th><th>Started</th><th>Took</th><th>State</th><th></th></tr>' +
-        d.ingests.map((i) => `<tr><td class="mono">${esc(i.folder)}</td><td>${i.what === 'describe' ? 'metadata' : 'new data'}</td><td class="note">${when(i.started)}</td><td class="num">${i.ended ? Math.round(i.ended - i.started) + ' s' : ''}</td>` +
+      h += '<div class="card gap"><h2>Conversions and full tests</h2><table><tr><th>Table</th><th>Kind</th><th>Started</th><th>Took</th><th>State</th><th></th></tr>' +
+        d.ingests.map((i) => `<tr><td class="mono">${esc(i.folder)}</td><td>${i.what === 'describe' ? 'metadata' : i.what === 'check' ? 'full test' : 'new data'}</td><td class="note">${when(i.started)}</td><td class="num">${i.ended ? Math.round(i.ended - i.started) + ' s' : ''}</td>` +
           `<td class="${i.status === 'FAILED' || i.status === 'GONE' ? 'badText' : i.status === 'STAGED' ? 'goodText' : ''}">${{STARTING: 'starting', RUNNING: 'running', STAGED: 'finished', FAILED: 'failed', GONE: 'lost'}[i.status] || esc(i.status)}${i.reason ? ' <span class="note">' + esc(i.reason) + '</span>' : ''}</td>` +
           `<td><button class="sm" data-log="${esc(i.task.split('/').pop())}">Log</button></td></tr>`).join('') + '</table><div id="logslot"></div></div>';
     }
@@ -564,6 +561,33 @@ async function convertIncoming(key) {
     show(true);
   } catch (e) { toast('Not started:  ' + e.message); }
 }
+const openChecks = new Set();
+const CHECK_WORD = {pass: 'pass', warn: 'warning', fail: 'FAILED', none: 'not run', waiting: 'waiting', na: '\u2014'};
+const CHECK_CLASS = {pass: 'goodText', warn: 'warnText', fail: 'badText', none: 'note', waiting: 'note', na: 'note'};
+function checkSummary(list, testing) {
+  const n = (s) => list.filter((c) => c.status === s).length, counted = list.filter((c) => c.status !== 'na').length;
+  const fail = n('fail'), warn = n('warn'), none = n('none'), wait = n('waiting'), pass = n('pass');
+  const dot = fail ? 'bad' : warn || wait ? 'warn' : none ? '' : 'ok';
+  const parts = [];
+  if (fail) parts.push(`<span class="badText">${fail} failed</span>`);
+  if (warn) parts.push(`<span class="warnText">${warn} warning${warn === 1 ? '' : 's'}</span>`);
+  parts.push(`${pass} of ${counted} pass`);
+  if (none) parts.push(`${none} not run`);
+  if (wait) parts.push(`${wait} waiting`);
+  return `<span class="dot ${dot}"></span> ${parts.join(', ')}${testing ? ' <span class="note">(testing\u2026)</span>' : ''}`;
+}
+function checkTable(list) {
+  return '<table class="gap"><tr><th>Check</th><th>Result</th><th>What was found</th><th>When</th><th>By</th></tr>' + list.map((c) =>
+    `<tr><td>${esc(c.name)}</td><td class="${CHECK_CLASS[c.status]}" style="white-space:nowrap">${CHECK_WORD[c.status]}</td><td class="note">${esc(c.detail)}</td><td class="note" style="white-space:nowrap">${c.at ? when(c.at) : ''}</td><td class="note" style="white-space:nowrap">${c.at ? esc(c.by || '') : ''}</td></tr>`).join('') + '</table>';
+}
+function checkPanel(t, testing) {
+  const from = t.checkedFrom || {}, f = esc(t.folder);
+  const basis = t.restored ? `These files are the earlier version ${esc(stampText(t.restored.version))}, restored ${when(t.restored.at)}.  ` : t.published ? `Published ${when(t.published.at)} by ${esc((t.published.who || '?').split(' ')[0])}.  ` : 'Put in the bucket by hand, or published before the panel kept these reports.  ';
+  const read = from.kind === 'full test' ? `The checks on the files are from the full test of ${when(from.at)}.` : from.kind === 'ingest' ? `The checks on the files are from its conversion, ${when(from.at)}.` : 'No test has been run on the files served now.';
+  return `<p class="note">${basis}${read}</p>${checkTable(t.checks)}` +
+    `<div class="tools gap"><button class="sm" data-ask="${f}">Ask the service again</button><button class="sm" data-fulltest="${f}" ${testing ? 'disabled' : ''}>${testing ? 'Full test running\u2026' : 'Run the full test'}</button>` +
+    '<span class="note">"Ask the service again" takes seconds:  the row count and one cone search, against what the files hold.  "Run the full test" reads every row in a task of its own, for a few cents:  about a minute for a small table, several for a large one.  Neither changes what is served.</span></div>';
+}
 function stagedCard(r) {
   const f = esc(r.folder);
   if (!r.ok) return `<div class="card" style="margin-bottom:16px"><h2>Staged:  <span class="mono">${f}</span> <span class="badText">failed</span></h2><p>${esc(r.error || 'The conversion did not finish.')}</p>${r.toolOutput ? `<details><summary class="note">Output of the conversion</summary><div class="log">${esc(r.toolOutput)}</div></details>` : ''}<div class="tools gap"><button data-discard="${f}">Discard</button></div></div>`;
@@ -572,8 +596,7 @@ function stagedCard(r) {
   h += `<div class="grid g4">${tile('Rows', num(r.rows), '')}${tile('Size', bytes(r.bytes), (r.files || []).length + ' file' + ((r.files || []).length === 1 ? '' : 's'))}${tile('Columns', num((r.columns || []).length - 1), `${r.noDescription} lack a description;  ${r.noUnit} have no unit`)}` +
        tile('Positions', `<span style="font-size:14px;font-weight:400">RA ${deg(p.raMin)} to ${deg(p.raMax)}<br>Dec ${deg(p.decMin)} to ${deg(p.decMax)}</span>`, r.samePosition ? num(r.samePosition) + ' rows share a position' : 'no repeated positions') + '</div>';
   if (r.description) h += `<p class="gap">${esc(r.description)}</p>`;
-  const t = r.searchTest;
-  if (t) h += `<p class="gap"><span class="dot ok"></span> <b>Search test passed.</b>  <span class="note">Rows are in index order;  ${num(t.indexChecked)} sampled index values match their positions;  ${num(t.cones)} cone searches found the same ${num(t.rowsFound)} rows through the index as by measuring every row.</span></p>`;
+  if (r.checks) h += `<details class="gap" open><summary>${checkSummary(r.checks)}</summary>${checkTable(r.checks)}</details>`;
   const c = r.compare;
   if (c && c.problem) h += `<p class="note gap">Could not compare with the served table:  ${esc(c.problem)}</p>`;
   else if (c) h += `<div class="${c.warn ? 'notice' : 'note'} gap" style="margin-bottom:0"><b>Against the table it replaces:</b>  rows ${num(c.rowsBefore)} \u2192 ${num(c.rowsAfter)}` +
@@ -596,6 +619,9 @@ function wireDatasets(d) {
   each('[data-restore]', (x) => { if (confirm(`Serve the version of ${x.restore} kept at ${stampText(x.version)}?\n\nWhat is served now, if anything, is kept as another earlier version.`)) move('restore', x.restore, {version: x.version}, 'Restoring ' + x.restore + '.'); });
   each('[data-log]', async (x) => { const slot = $('#logslot'); slot.innerHTML = '<p class="note">Reading…</p>'; try { const l = await api('ingestlog', {task: x.log}); slot.innerHTML = '<div class="log gap">' + (l.lines.map((y) => `<span class="t">${clock(y.at)}</span> ${esc(y.message)}`).join('\n') || 'No lines yet.') + '</div>'; } catch (e) { slot.innerHTML = `<p class="badText">${esc(e.message)}</p>`; } });
   each('[data-meta]', (x) => metaEditor(x.meta, x.folder));
+  each('[data-checks]', (x) => { const row = document.querySelector(`[data-checkrow="${x.checks}"]`); if (!row) return; row.hidden = !row.hidden; row.hidden ? openChecks.delete(x.checks) : openChecks.add(x.checks); });
+  each('[data-fulltest]', (x) => { if (confirm(`Run the full test of ${x.fulltest}?\n\nIt reads every row of the served files and changes nothing.`)) act({action: 'fulltest', folder: x.fulltest}, () => 'Full test of ' + x.fulltest + ' started.  Its results replace the list when it finishes.'); });
+  each('[data-ask]', (x) => act({action: 'ask', folder: x.ask}, (o) => o.ok === true ? `The service answers as the files of ${x.ask} say.${o.canary ? '  The canary will now ask this every five minutes.' : ''}` : o.ok === false ? `The service does NOT answer as the files of ${x.ask} say.  See the list.` : `The service says ${num(o.seen.rows)} rows.  There is no report to compare with;  run the full test first.`));
   each('[data-incoming]', (x) => convertIncoming(x.incoming));
   const again = $('#increfresh'); if (again) again.onclick = (e) => { e.preventDefault(); delete store['datasets{}']; show(true); };
   const go = $('#ugo'); if (go) go.onclick = () => uploadAndConvert();

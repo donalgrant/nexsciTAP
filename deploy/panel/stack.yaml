@@ -557,6 +557,10 @@ Resources:
               - Effect: Allow
                 Action: [s3:PutObject, s3:DeleteObject]
                 Resource: !Sub arn:aws:s3:::${CatalogBucket}/staging/*
+              # The report of a full test of a served table (MODE=check), which stores nothing else.
+              - Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub ${Bucket.Arn}/state/fulltest/*
 
   IngestSecurityGroup:
     Type: AWS::EC2::SecurityGroup
