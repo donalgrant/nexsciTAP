@@ -372,12 +372,12 @@ const VIEW = {
       d.tables.map((t) => {
         const meta = t.columns == null ? '<span class="note">not served yet</span>' : `<span class="note">${t.noDescription ? t.noDescription + ' lack a description' : 'all described'};  ${t.noUnit} have no unit</span>`;
         const vs = (d.versions || {})[t.folder] || [];
-        return `<tr><td><span class="mono">${esc(t.table)}</span>${t.folder && t.folder !== t.table ? `<div class="note">folder ${esc(t.folder)}</div>` : ''}<div class="note">${esc(t.description || '')}</div>${t.notServedWhy ? `<div class="badText">Not served:  ${esc(t.notServedWhy)}</div>` : t.served === false ? '<div class="warnText">In the bucket, not served yet</div>' : ''}${(t.warnings || []).map((w) => `<div class="warnText">${esc(w)}</div>`).join('')}</td>` +
+        return `<tr><td>${t.description ? `<a href="#" class="mono" data-desc="${esc(t.table)}" title="Show or hide the description">${esc(t.table)}</a>` : `<span class="mono">${esc(t.table)}</span>`}${t.folder && t.folder !== t.table ? `<div class="note">folder ${esc(t.folder)}</div>` : ''}${t.description ? `<div class="note" style="max-width:34em" data-descof="${esc(t.table)}" ${openDesc.has(t.table) ? '' : 'hidden'}>${esc(t.description)}</div>` : ''}${t.notServedWhy ? `<div class="badText">Not served:  ${esc(t.notServedWhy)}</div>` : t.served === false ? '<div class="warnText">In the bucket, not served yet</div>' : ''}${(t.warnings || []).map((w) => `<div class="warnText">${esc(w)}</div>`).join('')}</td>` +
           `<td class="num">${num(t.rows)}</td><td class="num">${bytes(t.bytes)}</td><td class="num">${num(t.files)}</td><td class="num">${num(t.columns)}</td><td>${meta}</td><td style="white-space:nowrap">${t.checks ? `<a href="#" data-checks="${esc(t.folder)}">${checkSummary(t.checks, testing.includes(t.folder))}</a>` : ''}</td><td class="num">${num(t.queries24h)}</td><td class="note" style="white-space:nowrap">${when(t.modified)}</td>` +
           `<td style="white-space:nowrap">${t.folder ? `<button class="sm" data-meta="${esc(t.table)}" data-folder="${esc(t.folder)}" ${t.columns == null ? 'disabled' : ''}>Edit metadata</button> <button class="sm" data-hide="${esc(t.folder)}">Hide</button> <button class="sm" data-remove="${esc(t.folder)}">Remove</button>` : ''}` +
           (vs.length ? `<div class="note" style="margin-top:4px">${vs.length} earlier version${vs.length === 1 ? '' : 's'}:  ${vs.slice(0, 4).map((v) => `<a href="#" data-restore="${esc(t.folder)}" data-version="${esc(v.version)}">${esc(stampText(v.version))}</a>`).join(', ')}</div>` : '') + '</td></tr>' +
           (t.checks ? `<tr data-checkrow="${esc(t.folder)}" ${openChecks.has(t.folder) ? '' : 'hidden'}><td colspan="10">${checkPanel(t, testing.includes(t.folder))}</td></tr>` : '');
-      }).join('') + `</table></div><p class="note">Click a table's checks to see each one, when it was last made and what it found, and to run them again.  ${bytes(d.totalBytes)} in <code>s3://${esc(d.bucket)}/${esc(d.prefix)}/</code>.  The service takes up to five minutes to show a change.  "Remove" keeps the files as an earlier version;  nothing here deletes a served table for good.</p></div>`;
+      }).join('') + `</table></div><p class="note">Click a table's name for its description.  Click its checks to see each one, when it was last made and what it found, and to run them again.  ${bytes(d.totalBytes)} in <code>s3://${esc(d.bucket)}/${esc(d.prefix)}/</code>.  The service takes up to five minutes to show a change.  "Remove" keeps the files as an earlier version;  nothing here deletes a served table for good.</p></div>`;
 
     h += '<div id="metaslot"></div>';
 
@@ -562,6 +562,7 @@ async function convertIncoming(key) {
   } catch (e) { toast('Not started:  ' + e.message); }
 }
 const openChecks = new Set();
+const openDesc = new Set();
 const CHECK_WORD = {pass: 'pass', warn: 'warning', fail: 'FAILED', none: 'not run', waiting: 'waiting', na: '\u2014'};
 const CHECK_CLASS = {pass: 'goodText', warn: 'warnText', fail: 'badText', none: 'note', waiting: 'note', na: 'note'};
 function checkSummary(list, testing) {
@@ -619,6 +620,7 @@ function wireDatasets(d) {
   each('[data-restore]', (x) => { if (confirm(`Serve the version of ${x.restore} kept at ${stampText(x.version)}?\n\nWhat is served now, if anything, is kept as another earlier version.`)) move('restore', x.restore, {version: x.version}, 'Restoring ' + x.restore + '.'); });
   each('[data-log]', async (x) => { const slot = $('#logslot'); slot.innerHTML = '<p class="note">Reading…</p>'; try { const l = await api('ingestlog', {task: x.log}); slot.innerHTML = '<div class="log gap">' + (l.lines.map((y) => `<span class="t">${clock(y.at)}</span> ${esc(y.message)}`).join('\n') || 'No lines yet.') + '</div>'; } catch (e) { slot.innerHTML = `<p class="badText">${esc(e.message)}</p>`; } });
   each('[data-meta]', (x) => metaEditor(x.meta, x.folder));
+  each('[data-desc]', (x) => { const el = document.querySelector(`[data-descof="${x.desc}"]`); if (!el) return; el.hidden = !el.hidden; el.hidden ? openDesc.delete(x.desc) : openDesc.add(x.desc); });
   each('[data-checks]', (x) => { const row = document.querySelector(`[data-checkrow="${x.checks}"]`); if (!row) return; row.hidden = !row.hidden; row.hidden ? openChecks.delete(x.checks) : openChecks.add(x.checks); });
   each('[data-fulltest]', (x) => { if (confirm(`Run the full test of ${x.fulltest}?\n\nIt reads every row of the served files and changes nothing.`)) act({action: 'fulltest', folder: x.fulltest}, () => 'Full test of ' + x.fulltest + ' started.  Its results replace the list when it finishes.'); });
   each('[data-ask]', (x) => act({action: 'ask', folder: x.ask}, (o) => o.ok === true ? `The service answers as the files of ${x.ask} say.${o.canary ? '  The canary will now ask this every five minutes.' : ''}` : o.ok === false ? `The service does NOT answer as the files of ${x.ask} say.  See the list.` : `The service says ${num(o.seen.rows)} rows.  There is no report to compare with;  run the full test first.`));
