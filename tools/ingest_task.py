@@ -205,9 +205,9 @@ def unit_problem(text):
 
     if reads('vounit'):
         return None
-    for fmt, name in (('cds', 'CDS'), ('fits', 'FITS'), (None, 'astropy')):
+    for fmt, name in (('cds', "the CDS form"), ('fits', "the FITS form"), (None, "astropy's own form")):
         if reads(fmt):
-            return f'not a VOUnits unit (it reads as a {name} one)'
+            return f'not a VOUnits unit (it is a unit in {name})'
     return 'not a unit any reader here understands'
 
 
