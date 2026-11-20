@@ -234,8 +234,8 @@ def main():
             new = 'dec'
         else:
             new = clean(col)
-            if new in ('ra', 'dec', 'hpx29', 'x', 'y', 'z'):
-                # x, y, z are added by the service's view; the rest are ours.
+            if new in ('ra', 'dec', 'hpx29', 'aiab_x', 'aiab_y', 'aiab_z'):
+                # The aiab_ three are added by the service's view; the rest are ours.
                 new = new + '_in'
         if new in names.values():
             sys.exit(f'Columns collide after cleaning their names: "{col}" -> "{new}"')

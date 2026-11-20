@@ -15,9 +15,12 @@ taken from the Parquet files when they carry them the IVOA way (written by
 make_parquet_catalog.py; see votable_metadata.py).  --describe overrides the
 table description.
 
-Each view adds the unit-vector columns x, y, z that the ADQL translator's
-exact cone test needs, computed from the RA and Dec columns, so the Parquet
-files only have to carry RA, Dec and one spatial index column.
+Each view adds the unit-vector columns aiab_x, aiab_y, aiab_z that the ADQL
+translator's exact cone test needs, computed from the RA and Dec columns, so
+the Parquet files only have to carry RA, Dec and one spatial index column.
+The names carry the service's prefix so that a catalog's own x, y or z (a
+quasar catalog's redshift, for one) is left alone; the service's SPTIND
+settings XCOL, YCOL and ZCOL must name the same three.
 
 Example:
 
@@ -49,6 +52,10 @@ import sys
 
 import duckdb
 import votable_metadata
+
+
+# The columns every view adds.  TAP.conf's XCOL, YCOL and ZCOL name the same three.
+UNIT_VECTOR = ('aiab_x', 'aiab_y', 'aiab_z')
 
 
 def tap_type(duck_type):
@@ -257,15 +264,15 @@ def main():
             if missing:
                 raise ValueError('no column ' + ', '.join(missing))
 
-            clash = [c for c in ('x', 'y', 'z') if c in have]
+            clash = [c for c in UNIT_VECTOR if c in have]
             if clash:
                 raise ValueError('columns named ' + ', '.join(clash) + ' clash with the ones the service adds')
 
             con.execute(f"""CREATE VIEW {name} AS
                 SELECT *,
-                       cos(radians({dec})) * cos(radians({ra})) AS x,
-                       cos(radians({dec})) * sin(radians({ra})) AS y,
-                       sin(radians({dec}))                      AS z
+                       cos(radians({dec})) * cos(radians({ra})) AS {UNIT_VECTOR[0]},
+                       cos(radians({dec})) * sin(radians({ra})) AS {UNIT_VECTOR[1]},
+                       sin(radians({dec}))                      AS {UNIT_VECTOR[2]}
                 FROM read_parquet('{path}')""")
 
             cols = con.execute(f'DESCRIBE {name}').fetchall()
@@ -318,10 +325,10 @@ def main():
                 fmt = f'{widths[cname]}s'
             if cname in (ra, dec):
                 fmt = '14.8f'
-            principal = 0 if cname in ('x', 'y', 'z') else 1
+            principal = 0 if cname in UNIT_VECTOR else 1
             known = about.get(cname, {})
-            if cname in ('x', 'y', 'z'):
-                known = {'description': f'{cname} component of the unit vector of (ra, dec); computed by the service'}
+            if cname in UNIT_VECTOR:
+                known = {'description': f'{cname[-1]} component of the unit vector of (ra, dec); computed by the service'}
             con.execute(f'INSERT INTO {ts}.columns VALUES (?, ?, ?, NULL, NULL, NULL, ?, ?, ?, ?, ?, ?, 0, ?, ?)',
                         [name, cname, dtype, known.get('description', ''), known.get('utype'),
                          known.get('unit', ''), known.get('ucd'), 0, principal, fmt, i + 1])

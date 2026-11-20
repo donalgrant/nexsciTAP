@@ -32,7 +32,7 @@ def test_csv_becomes_sorted_indexed_parquet(tmp_path):
     assert sorted(p.name for p in out.iterdir()) == ['part-00.parquet', 'part-01.parquet']
 
     con = duckdb.connect()
-    rows = con.execute(f"SELECT name, ra, dec, x_in, flux_1, hpx29 FROM read_parquet('{out}/*.parquet', "
+    rows = con.execute(f"SELECT name, ra, dec, x, flux_1, hpx29 FROM read_parquet('{out}/*.parquet', "
                        "filename=true, file_row_number=true) ORDER BY filename, file_row_number").fetchall()
 
     # The row without a position is gone; names are plain identifiers.
@@ -136,7 +136,7 @@ def test_units_and_descriptions_reach_tap_schema(tmp_path):
     assert cols['kmag'] == ('mag', 'phot.mag;em.IR.K', "K's magnitude, <Vega> & all")
     assert cols['name'] == ('', None, '')                                       # nothing said, nothing invented
     assert 'HEALPix' in cols['hpx29'][2]
-    assert 'unit vector' in cols['x'][2]
+    assert 'unit vector' in cols['aiab_x'][2]
 
     # The type column still does its first job.
     con = duckdb.connect()
@@ -264,3 +264,34 @@ def test_a_folder_of_csv_files_is_one_table(tmp_path, with_schema):
         == (['a', 'b', 'c'], 6)
     if with_schema:
         assert con.execute(f"SELECT typeof(n) FROM read_parquet('{out}/*.parquet') LIMIT 1").fetchone() == ('BIGINT',)
+
+
+def test_describe_can_give_a_column_its_name_back(tmp_path):
+    """A column an earlier conversion renamed out of the way gets its own name, and keeps what was said of it."""
+    duckdb = pytest.importorskip('duckdb')
+    pytest.importorskip('astropy_healpix')
+
+    old = tmp_path / 'old'
+    old.mkdir()
+    con = duckdb.connect()
+    src = tmp_path / 'in.csv'
+    src.write_text('ra,dec,z_in\n' + ''.join(f'{10 + i * 0.01},{-5 + i * 0.01},{i / 100}\n' for i in range(300)))
+    schema = tmp_path / 'schema.csv'
+    schema.write_text('column_name,unit,description\nz_in,,Redshift\n')
+    _tool('make_parquet_catalog.py', src, old, '--schema', schema, '--row-group', '100')
+
+    new = tmp_path / 'new'
+    said = _tool('describe_parquet_catalog.py', old, new, '--rename', 'z_in=z')
+    assert 'renamed: z_in -> z' in said
+    a = con.execute(f"SELECT ra, dec, hpx29, z_in FROM read_parquet('{old}/*.parquet', file_row_number=true) ORDER BY file_row_number").fetchall()
+    b = con.execute(f"SELECT ra, dec, hpx29, z FROM read_parquet('{new}/*.parquet', file_row_number=true) ORDER BY file_row_number").fetchall()
+    assert a == b
+
+    cols, _ = _tap_schema(duckdb, tmp_path, new)
+    assert cols['z'][2] == 'Redshift' and 'z_in' not in cols and 'unit vector' in cols['aiab_z'][2]
+
+    # Names the service or the converter owns are refused, and so is a name already taken.
+    for bad in ('z_in=ra', 'z_in=aiab_z', 'z_in=dec', 'nope=q'):
+        run = subprocess.run([sys.executable, str(REPO / 'tools' / 'describe_parquet_catalog.py'), str(old),
+                              str(tmp_path / 'never'), '--rename', bad], capture_output=True, text=True)
+        assert run.returncode != 0, bad

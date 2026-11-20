@@ -6,7 +6,8 @@
 """
 Add column units and descriptions to a catalog that is already converted.
 
-    describe_parquet_catalog.py INPUT OUTPUT_DIR --schema FILE [--description TEXT]
+    describe_parquet_catalog.py INPUT OUTPUT_DIR [--schema FILE] [--description TEXT]
+                                [--rename OLD=NEW ...]
 
 INPUT is the catalog's folder of Parquet files (a local directory, or an
 s3:// prefix DuckDB can read), as make_parquet_catalog.py wrote it.  Each file
@@ -23,10 +24,15 @@ FILE is the CSV make_parquet_catalog.py takes for --schema: a header, a
 column of names, and any of unit, ucd, utype, description.  A type column is
 ignored here, since the data is not touched.  Columns FILE does not list keep
 whatever the files already say about them.
+
+--rename gives a column another name, taking what the files say about it
+along; FILE, if given, speaks of the new names.  It is how a column that an
+earlier conversion renamed out of the way (z_in, say) gets its own name back.
 """
 
 import argparse
 import os
+import re
 import sys
 
 import duckdb
@@ -38,15 +44,22 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('input', help='folder of Parquet files')
     p.add_argument('output_dir')
-    p.add_argument('--schema', metavar='FILE', required=True)
+    p.add_argument('--schema', metavar='FILE')
+    p.add_argument('--rename', metavar='OLD=NEW', action='append', default=[],
+                   help='give a column another name; may be repeated')
     p.add_argument('--description', default=None, help='what the table is (default: keep what the files say)')
     args = p.parse_args()
 
     con = duckdb.connect()
     con.execute('SET preserve_insertion_order = true')
 
-    _, declared = read_schema(args.schema)
+    if not args.schema and not args.rename and args.description is None:
+        sys.exit('Nothing to do: give --schema, --rename or --description.')
+    _, declared = read_schema(args.schema) if args.schema else ({}, {})
     declared = {name.lower(): meta for name, meta in declared.items()}
+    renames = dict(pair.split('=', 1) for pair in args.rename if '=' in pair)
+    if len(renames) != len(args.rename):
+        sys.exit('--rename takes OLD=NEW')
 
     prefix = args.input.rstrip('/')
     files = [r[0] for r in con.execute('SELECT file FROM glob(?) ORDER BY 1', [prefix + '/*.parquet']).fetchall()]
@@ -57,11 +70,22 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
 
     cols = [(r[0], r[1]) for r in con.execute(f"DESCRIBE SELECT * FROM read_parquet('{prefix}/*.parquet')").fetchall()]
+    have = [c for c, _ in cols]
+    for old, new in renames.items():
+        if old not in have:
+            sys.exit(f'No column "{old}" to rename.  Columns: ' + ', '.join(have))
+        if not re.fullmatch(r'[a-z_][a-z0-9_]*', new) or new in ('ra', 'dec', 'hpx29') or new.startswith('aiab_'):
+            sys.exit(f'"{new}" cannot be a column name here.')
+        if new in have or list(renames.values()).count(new) > 1:
+            sys.exit(f'There is already a column "{new}".')
+    select = '*' + (' RENAME (' + ', '.join(f'"{o}" AS "{n}"' for o, n in renames.items()) + ')' if renames else '')
+    cols = [(renames.get(c, c), t) for c, t in cols]
 
     # What the files say already, which the schema file adds to or replaces.
     row = con.execute('SELECT value FROM parquet_kv_metadata(?) WHERE key = ? ORDER BY file_name LIMIT 1',
                       [files[0], votable_metadata.CONTENT_KEY.encode()]).fetchone()
     was_table, was = votable_metadata.parse(bytes(row[0]).decode('utf-8', 'replace')) if row else ('', {})
+    was = {renames.get(c, c): m for c, m in was.items()}
 
     meta = {c: {**was.get(c, {}), **declared.get(c.lower(), {})} for c, _ in cols}
     for pos in ('ra', 'dec'):
@@ -87,13 +111,15 @@ def main():
         # The row groups are what make positional searches fast; keep their size.
         group = con.execute('SELECT max(row_group_num_rows) FROM parquet_metadata(?)', [path]).fetchone()[0]
         out = os.path.join(args.output_dir, os.path.basename(path))
-        con.execute(f"""COPY (SELECT * FROM read_parquet('{path}'))
+        con.execute(f"""COPY (SELECT {select} FROM read_parquet('{path}'))
                         TO '{out}' (FORMAT parquet, COMPRESSION zstd, ROW_GROUP_SIZE {group}, {kv})""")
         rows = con.execute('SELECT count(*) FROM read_parquet(?)', [out]).fetchone()[0]
         print(f'{os.path.basename(path)}: {rows:,} rows', flush=True)
 
     named = [c for c, _ in cols]
     unknown = sorted(set(declared) - {c.lower() for c in named})
+    if renames:
+        print('renamed: ' + ', '.join(f'{o} -> {n}' for o, n in renames.items()))
     described = sum(1 for c in named if meta[c].get('description'))
     with_unit = sum(1 for c in named if meta[c].get('unit'))
     print(f'{described} of {len(named)} columns have a description, {with_unit} a unit'

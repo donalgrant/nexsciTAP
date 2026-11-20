@@ -25,8 +25,8 @@
     MODE=HPX
     LEVEL=14
     STORED_LEVEL=29
-    XCOL=x
-    YCOL=y
-    ZCOL=z
+    XCOL=aiab_x
+    YCOL=aiab_y
+    ZCOL=aiab_z
     COLNAME=hpx29
     ENCODING=BASE10

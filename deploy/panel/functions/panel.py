@@ -1061,7 +1061,7 @@ def staged():
     return out
 
 
-NOT_THE_TABLES_OWN = {'hpx29', 'x', 'y', 'z'}        # added on conversion and by the service
+NOT_THE_TABLES_OWN = {'hpx29', 'aiab_x', 'aiab_y', 'aiab_z'}        # added on conversion and by the service
 
 
 def table_of(folder):
@@ -1521,7 +1521,7 @@ def file_checks(r, ingest, by=''):
     if 'noDescription' not in r:
         add('described', 'none', 'Not reached.')
     elif r['noDescription']:
-        add('described', 'warn', f"{r['noDescription']} of {len(cols)} columns have no description.")
+        add('described', 'warn', f"{r['noDescription']} of {len(cols)} columns {'has' if r['noDescription'] == 1 else 'have'} no description.")
     else:
         add('described', 'pass', f"All {len(cols)} columns have a description.")
     return out

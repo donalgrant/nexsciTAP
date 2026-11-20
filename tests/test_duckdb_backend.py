@@ -84,9 +84,9 @@ def parquet_catalog(tmp_path):
 [SPTIND]
     MODE=HPX
     LEVEL=14
-    XCOL=x
-    YCOL=y
-    ZCOL=z
+    XCOL=aiab_x
+    YCOL=aiab_y
+    ZCOL=aiab_z
     COLNAME=hpx14
     ENCODING=BASE10
 """)
@@ -272,21 +272,24 @@ def test_discover_serves_good_folders_and_skips_bad_ones(tmp_path):
 
     _make_parquet(duckdb, cat / 'good_one' / 'part-00.parquet')
     _make_parquet(duckdb, cat / 'renamed_folder' / 'part-00.parquet')
+    # A catalog's own x, y or z is its own business:  a redshift named z, for one.
+    _make_parquet(duckdb, cat / 'own_z' / 'part-00.parquet', columns='a.ra, a.dec, a.hpx29, 2.5 AS z')
     _make_parquet(duckdb, cat / 'no_index' / 'part-00.parquet', columns='a.ra, a.dec')
     _make_parquet(duckdb, cat / 'bad-name' / 'part-00.parquet')
-    _make_parquet(duckdb, cat / 'has_xyz' / 'part-00.parquet', columns='a.ra, a.dec, a.hpx29, 1 AS x')
+    _make_parquet(duckdb, cat / 'has_xyz' / 'part-00.parquet', columns='a.ra, a.dec, a.hpx29, 1 AS aiab_x')
     (cat / 'empty').mkdir()
 
     run = _catalog(tmp_path, '--table', f"nice={cat}/renamed_folder/*.parquet")
     assert run.returncode == 0, run.stderr
 
     # The explicit name wins for its folder; the unusable folders are left out and said so.
-    assert _tables(duckdb, tmp_path) == ['good_one', 'nice']
+    assert _tables(duckdb, tmp_path) == ['good_one', 'nice', 'own_z']
     for folder in ('no_index', 'bad-name', 'has_xyz'):
         assert folder in run.stderr
 
     con = duckdb.connect(str(tmp_path / 'c.duckdb'), read_only=True)
-    assert con.execute('SELECT count(*), min(x) IS NOT NULL FROM good_one').fetchone() == (2, True)
+    assert con.execute('SELECT count(*), min(aiab_x) IS NOT NULL FROM good_one').fetchone() == (2, True)
+    assert con.execute('SELECT min(z), max(abs(aiab_z)) <= 1 FROM own_z').fetchone() == (2.5, True)
     con.close()
 
 

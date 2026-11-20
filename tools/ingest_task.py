@@ -21,7 +21,8 @@ Everything is given in the environment:
     SRC_KEY         convert:  key of the file to convert, or, ending in "/", a folder
                     of CSV files or of Parquet files that make up one table
     SRC_PREFIX      describe, check: folder of the catalog, ending in "/"
-    SCHEMA_KEY      optional (required to describe): key, in SRC_BUCKET or
+    RENAME          describe: columns to rename, as old=new,old=new
+    SCHEMA_KEY      optional (required to describe unless RENAME is given): key, in SRC_BUCKET or
                     SCHEMA_BUCKET, of the CSV of column types and metadata
     SCHEMA_BUCKET   bucket of SCHEMA_KEY, if not SRC_BUCKET
     DEST_BUCKET     bucket of the staging folder
@@ -155,7 +156,7 @@ def check(outdir, report):
         notes.append(f'{len(empty)} column(s) have no values at all: ' + ', '.join(empty[:12])
                      + (' ...' if len(empty) > 12 else ''))
     if report['noDescription']:
-        notes.append(f"{report['noDescription']} of {len(own)} columns have no description.")
+        notes.append(f"{report['noDescription']} of {len(own)} columns {'has' if report['noDescription'] == 1 else 'have'} no description.")
 
     for need in ('ra', 'dec', 'hpx29'):
         if need not in names:
@@ -386,8 +387,8 @@ def main():
             run_tool(args, report)
 
         elif mode in ('describe', 'check'):
-            if mode == 'describe' and not schema:
-                raise RuntimeError('Describing a catalog needs the list of column units and descriptions.')
+            if mode == 'describe' and not schema and not env('RENAME'):
+                raise RuntimeError('Describing a catalog needs the list of column units and descriptions, or columns to rename.')
             prefix = env('SRC_PREFIX')
             src = os.path.join(indir, 'catalog')
             os.makedirs(src, exist_ok=True)
@@ -401,7 +402,9 @@ def main():
             if mode == 'check':
                 outdir = src                    # the files as they are served
             else:
-                args = ['describe_parquet_catalog.py', src, outdir, '--schema', schema]
+                args = ['describe_parquet_catalog.py', src, outdir] + (['--schema', schema] if schema else [])
+                for pair in filter(None, (env('RENAME') or '').split(',')):
+                    args += ['--rename', pair.strip()]
                 if env('DESCRIPTION'):
                     args += ['--description', env('DESCRIPTION')]
                 run_tool(args, report)
