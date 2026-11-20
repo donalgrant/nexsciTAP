@@ -1,0 +1,31 @@
+# Every Python package in the service's image, at an exact version.
+# Taken from the running image on 20 November 2026 (pip freeze).  A rebuild installs
+# exactly these, so an upgrade of DuckDB or anything else is a change to this file,
+# made on purpose and followed by the tests and the validation runs.
+# ADQL is installed separately, without its dependencies; see Dockerfile.tap.
+astropy==8.0.3
+astropy-iers-data==0.2026.11.16.0.37.44
+astropy_healpix==2.0.1
+beautifulsoup4==4.15.0
+boto3==1.44.7
+botocore==1.44.7
+configobj==5.0.9
+Cython==3.3.1
+duckdb==2.0.1
+jmespath==1.1.0
+lxml==6.1.3
+numpy==2.5.5
+packaging==26.3
+pyarrow==26.0.1
+pyerfa==2.0.1.5
+python-dateutil==2.9.0.post0
+PyYAML==6.0.3
+s3transfer==0.19.3
+setuptools==84.2.1
+six==1.17.0
+soupsieve==4.1.3
+sqlparse==0.6.1
+typing_extensions==4.16.0
+urllib3==2.8.0
+wheel==0.48.0
+xmltodict==1.0.4

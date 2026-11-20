@@ -15,8 +15,10 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends build-essential ca-certificates util-linux \
  && rm -rf /var/lib/apt/lists/*
 
-RUN pip install --no-cache-dir cython numpy setuptools wheel configobj sqlparse \
-        astropy beautifulsoup4 lxml xmltodict duckdb pyarrow astropy-healpix boto3 \
+# Exact versions, so that a rebuild changes nothing it was not asked to change.
+# To upgrade a package, edit requirements.lock.
+COPY nexsciTAP/deploy/ec2/requirements.lock /tmp/requirements.lock
+RUN pip install --no-cache-dir -r /tmp/requirements.lock \
  && pip install --no-cache-dir --no-deps ADQL==1.0.6
 
 # spatial_index has no wheel for current Python and its setup.py no longer
