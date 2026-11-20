@@ -1203,10 +1203,12 @@ def start_ingest(body, who):
     schema = str(body.get('schemaKey') or '')
     if schema and (not schema.startswith('upload/') or '..' in schema):
         raise Refused('The column list was not uploaded.')
-    col = re.compile(r'[A-Za-z_][A-Za-z0-9_ .-]{0,63}')
+    # A heading is whatever the table's author wrote, "RA (deg)" for one.  It reaches the
+    # converter as one argument, never through a shell; a leading "-" would read as an option.
+    col = re.compile(r'[^\x00-\x1f\x7f-][^\x00-\x1f\x7f]{0,63}')
     ra, dec = str(body.get('ra') or 'ra').strip(), str(body.get('dec') or 'dec').strip()
     if not col.fullmatch(ra) or not col.fullmatch(dec):
-        raise Refused('Give the names of the two position columns as they appear in the file.')
+        raise Refused('The names of the two position columns must be 1 to 64 characters and must not start with "-".')
     return run_ingest(folder, {'MODE': 'convert', 'SRC_BUCKET': STATE_BUCKET, 'SRC_KEY': key, 'SCHEMA_KEY': schema,
                                'DESCRIPTION': str(body.get('description') or '')[:500], 'RA': ra, 'DEC': dec},
                       who, 'ingest')
