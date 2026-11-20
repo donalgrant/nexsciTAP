@@ -107,6 +107,15 @@ Parameters:
     Description: >
       Memory one query may use before it works from disk.  The TAP container
       has 3.5 GB; several heavy queries at once each take this much.
+  QueryThreads:
+    Type: Number
+    Default: 4
+    MinValue: 1
+    MaxValue: 16
+    Description: >
+      Threads DuckDB uses for one query.  More threads read S3 faster, but
+      each holds a block of every column it reads:  at 8, a scan of all 393
+      columns of the 2MASS XSC needed more than QueryMemory and failed.
   ClientLimit:
     Type: Number
     Default: 6
@@ -480,7 +489,7 @@ Resources:
             - {Name: DISCOVER_INTERVAL, Value: !Ref DiscoverInterval}
             - {Name: AWS_REGION, Value: !Ref AWS::Region}
             - {Name: DUCKDB_MEMORY, Value: !Ref QueryMemory}
-            - {Name: DUCKDB_THREADS, Value: '8'}
+            - {Name: DUCKDB_THREADS, Value: !Ref QueryThreads}
             - {Name: QUERY_TIMEOUT, Value: !Ref QueryTimeout}
             - {Name: MAXREC_LIMIT, Value: !Ref MaxRecLimit}
             - {Name: WORK_RETENTION_DAYS, Value: !Ref WorkRetentionDays}
