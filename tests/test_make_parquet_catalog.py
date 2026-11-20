@@ -237,3 +237,30 @@ def test_describe_adds_metadata_and_leaves_the_data_alone(tmp_path):
     cols, table = _tap_schema(duckdb, tmp_path, new)
     assert table == 'A described table'
     assert cols['kmag'] == ('mag', None, 'K magnitude') and cols['ra'][0] == 'deg' and 'HEALPix' in cols['hpx29'][2]
+
+
+@pytest.mark.parametrize('with_schema', [False, True])
+def test_a_folder_of_csv_files_is_one_table(tmp_path, with_schema):
+    """As the ingest task passes a folder: a pattern ending in a star, with or without a column file."""
+    duckdb = pytest.importorskip('duckdb')
+    pytest.importorskip('astropy_healpix')
+
+    src = tmp_path / 'in'
+    src.mkdir()
+    (src / 'part-0000.csv').write_text('name,ra,dec,n\na,10.0,5.0,1\nb,20.0,-5.0,2\n')
+    (src / 'part-0001.csv').write_text('name,ra,dec,n\nc,30.0,15.0,3\n')
+    out = tmp_path / 'out'
+    args = [sys.executable, str(REPO / 'tools' / 'make_parquet_catalog.py'), str(src / '*.csv*'), str(out)]
+    if with_schema:
+        schema = tmp_path / 'columns.csv'
+        schema.write_text('column_name,datatype,unit,ucd,description\nn,long,,,A count\nra,double,deg,,\n')
+        args += ['--schema', str(schema)]
+
+    run = subprocess.run(args, capture_output=True, text=True)
+    assert run.returncode == 0, run.stderr
+
+    con = duckdb.connect()
+    assert con.execute(f"SELECT list(name ORDER BY name), sum(n) FROM read_parquet('{out}/*.parquet')").fetchone() \
+        == (['a', 'b', 'c'], 6)
+    if with_schema:
+        assert con.execute(f"SELECT typeof(n) FROM read_parquet('{out}/*.parquet') LIMIT 1").fetchone() == ('BIGINT',)

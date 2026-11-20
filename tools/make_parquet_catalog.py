@@ -120,7 +120,8 @@ def read_schema(path):
 def read_input(con, path, types=None):
     """(DuckDB relation, {column: metadata the input itself carries}) for the input table."""
 
-    low = path.lower()
+    # A folder of files arrives as a pattern, "dir/*.csv*"; judge it by the name before the star.
+    low = path.lower().rstrip('*')
 
     if low.endswith(('.parquet', '.pq')) or '.parquet' in low:
         return con.sql(f"SELECT * FROM read_parquet('{path}')"), parquet_metadata(con, path)
