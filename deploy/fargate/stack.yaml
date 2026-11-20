@@ -103,19 +103,23 @@ Parameters:
       without deleting it; more than 1 share the work area and the load.
   QueryMemory:
     Type: String
-    Default: 600MB
+    Default: 1GB
     Description: >
       Memory one query may use before it works from disk.  The TAP container
-      has 3.5 GB; several heavy queries at once each take this much.
+      has 3.5 GB; several heavy queries at once each take this much.  It was
+      600MB until 20 November 2026.  At 1GB six heavy queries at once left the
+      task standing, and whole-column scans run about twice as fast.  A SELECT *
+      that scans all of a very wide table (hundreds of columns) needs about
+      1.5GB and still fails; smaller row groups for wide tables are the cure.
   QueryThreads:
     Type: Number
-    Default: 4
+    Default: 8
     MinValue: 1
     MaxValue: 16
     Description: >
-      Threads DuckDB uses for one query.  More threads read S3 faster, but
-      each holds a block of every column it reads:  at 8, a scan of all 393
-      columns of the 2MASS XSC needed more than QueryMemory and failed.
+      Threads DuckDB uses for one query.  More threads read S3 faster.  Fewer
+      threads use somewhat less memory on a scan of a wide table, but 4 did
+      not cure the out-of-memory failures that QueryMemory describes.
   ClientLimit:
     Type: Number
     Default: 6
