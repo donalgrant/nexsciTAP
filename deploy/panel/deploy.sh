@@ -24,6 +24,24 @@ STACK=${STACK:-aiab-panel}
 SERVICE_STACK=${SERVICE_STACK:-aiab-fargate}
 CATALOG_BUCKET=${CATALOG_BUCKET:-ipac-archive-in-a-box-pilot}
 
+# Deploy only what is on GitHub.  The panel has been replaced by older code
+# once already, from a second machine whose clone was behind; and code that is
+# deployed but not pushed is code the next machine cannot have.
+# FORCE=1 deploys anyway.
+if [ "${FORCE:-}" != 1 ] && git rev-parse --git-dir >/dev/null 2>&1; then
+    branch=$(git rev-parse --abbrev-ref HEAD)
+    git fetch --quiet origin "$branch" 2>/dev/null || { echo "Cannot reach GitHub to compare this clone with it;  FORCE=1 to deploy anyway." >&2; exit 1; }
+    behind=$(git rev-list --count "HEAD..origin/$branch")
+    ahead=$(git rev-list --count "origin/$branch..HEAD")
+    if [ "$behind" != 0 ]; then
+        echo "This clone is $behind commit(s) behind GitHub;  deploying it would put older code on the panel.  Run:  git pull --ff-only" >&2; exit 1
+    fi
+    if [ "$ahead" != 0 ] || [ -n "$(git status --porcelain --untracked-files=no -- .)" ]; then
+        echo "This clone has changes under deploy/panel that are not on GitHub.  Commit and push them first, so every machine deploys the same code." >&2; exit 1
+    fi
+fi
+COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
+
 SERVICE_URL=$(aws cloudformation describe-stacks --stack-name "$SERVICE_STACK" \
     --query "Stacks[0].Outputs[?OutputKey=='TapUrl'].OutputValue" --output text | sed 's#/TAP/*$##')
 
@@ -65,7 +83,9 @@ aws cloudformation deploy --stack-name "$STACK" --template-file "$OUT/packaged.y
 
 BUCKET=$(aws cloudformation describe-stacks --stack-name "$STACK" \
     --query "Stacks[0].Outputs[?OutputKey=='Bucket'].OutputValue" --output text)
-aws s3 sync site "s3://$BUCKET/site/" --delete --cache-control no-cache
+aws s3 sync site "s3://$BUCKET/site/" --delete --cache-control no-cache --exclude commit.txt
+# Which code the panel is running, readable at <panel address>/commit.txt.
+printf '%s\n' "$COMMIT" | aws s3 cp - "s3://$BUCKET/site/commit.txt" --cache-control no-cache --content-type text/plain
 
 aws cloudformation describe-stacks --stack-name "$STACK" \
     --query "Stacks[0].Outputs[?OutputKey=='PanelUrl'].OutputValue" --output text
