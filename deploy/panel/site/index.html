@@ -711,7 +711,7 @@ function limitEditor() {
       ? `<select data-set="${r[0]}"><option value="block" ${r[2] === 'block' ? 'selected' : ''}>refuses (${r[0] === 'Mode' ? 429 : 403})</option><option value="count" ${r[2] === 'count' ? 'selected' : ''}>only counts</option></select>`
       : `<input data-set="${r[0]}" size="10" style="text-align:right" value="${esc(r[2] ?? '')}">${r[3]}`;
   });
-  card.querySelector('.tools').innerHTML = '<button class="go" id="limsave">Save</button><button id="limcancel">Cancel</button><span class="note">A change to any limit of the service (all but the firewall's) restarts it on the new settings:  about five minutes, with the old task answering until the new one is ready.  An async job running on the old task is lost.  A change to the firewall takes about a minute and restarts nothing.  0 means no limit for the counts, and no cap for the two volumes, which are written like 20GB.</span>';
+  card.querySelector('.tools').innerHTML = '<button class="go" id="limsave">Save</button><button id="limcancel">Cancel</button><span class="note">A change to any limit of the service (all but the firewall\'s) restarts it on the new settings:  about five minutes, with the old task answering until the new one is ready.  An async job running on the old task is lost.  A change to the firewall takes about a minute and restarts nothing.  0 means no limit for the counts, and no cap for the two volumes, which are written like 20GB.</span>';
   $('#limcancel').onclick = () => show(true);
   $('#limsave').onclick = () => {
     const changes = {}, said = [];

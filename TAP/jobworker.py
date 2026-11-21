@@ -208,7 +208,62 @@ def mark_lost(jobdir, statuspath, stale=STALE):
     return True
 
 
+class _OneAtATime:
+    """
+    Held while a job counts the running jobs and takes its place, so that no
+    two jobs do that at once: a lock on a file beside the register, which
+    works across the tasks that share the work area.  If the lock cannot be
+    had in a few seconds the job goes on without it, and says so in the log;
+    the places taken by time (see admit) then keep the count nearly exact.
+    """
+
+    def __init__(self, register, wait=5.0):
+        self.path, self.wait, self.f = register + '.lock', wait, None
+
+    def __enter__(self):
+        try:
+            import fcntl
+            f = open(self.path, 'a')
+            until = time.time() + self.wait
+            while True:
+                try:
+                    fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    self.f = f
+                    break
+                except OSError:
+                    if time.time() > until:
+                        f.close()
+                        logging.error(f'No lock on {self.path} in {self.wait} s; counting the jobs without it')
+                        break
+                    time.sleep(0.01)
+        except Exception as e:
+            logging.error(f'Could not lock {self.path}: {e}')
+        return self
+
+    def __exit__(self, *a):
+        if self.f:
+            try:
+                self.f.close()          # closing gives the lock back
+            except OSError:
+                pass
+
+
 def admit(tapdir, jobid, client, total=0, per_client=0, exempt=(), shared=(), shared_limit=0):
+    """
+    Counts and takes the place with nothing else doing the same meanwhile.
+    """
+    if total <= 0 and (shared_limit if client in shared and client not in exempt else per_client) <= 0:
+        return None                 # no limit applies: nothing to count, no register
+    register = os.path.join(tapdir, RUNNING)
+    try:
+        os.makedirs(register, exist_ok=True)
+    except OSError:
+        pass
+    with _OneAtATime(register):
+        return _admit(tapdir, jobid, client, total, per_client, exempt, shared, shared_limit)
+
+
+def _admit(tapdir, jobid, client, total=0, per_client=0, exempt=(), shared=(), shared_limit=0):
     """
     Called by a job's worker before it runs the query.  Returns None and
     registers the job as running, or the message to fail the job with.
