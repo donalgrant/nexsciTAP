@@ -138,6 +138,29 @@ Parameters:
     Type: Number
     Default: 3
     Description: Async jobs one client address may have running at once (0 = no limit).
+  FireflyLimit:
+    Type: Number
+    Default: 8
+    Description: >
+      Requests all of Firefly's users together may have in progress at once,
+      per task (0 = no limit).  Firefly's server asks on their behalf from
+      inside the task and does not say which user it asks for.
+  FireflyAsyncLimit:
+    Type: Number
+    Default: 5
+    Description: >
+      Async jobs all of Firefly's users together may have running at once
+      (0 = no limit).  Keep it below AsyncLimit, so that Firefly cannot take
+      every place.
+  UploadUrls:
+    Type: String
+    Default: none
+    Description: >
+      Hosts an upload given as a URL may name, which the service then
+      fetches:  none, any (any public address), or a comma-separated list,
+      where an entry starting with a dot allows every host under it.
+      Uploads sent with the request, which is what Firefly and pyvo do, are
+      not affected.
   WorkRetentionDays:
     Type: Number
     Default: 7
@@ -498,7 +521,7 @@ Resources:
           HealthCheck:
             Command:
               - CMD-SHELL
-              - python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8081/TAP/availability', timeout=4)"
+              - python -c "import urllib.request as u; u.urlopen(u.Request('http://127.0.0.1:8081/TAP/availability', headers={'X-Viewer-IP': 'health'}), timeout=4)"
             Interval: 10
             Timeout: 5
             Retries: 3
@@ -520,10 +543,16 @@ Resources:
             - {Name: MAXREC_LIMIT, Value: !Ref MaxRecLimit}
             - {Name: WORK_RETENTION_DAYS, Value: !Ref WorkRetentionDays}
             # Who a request is from is what CloudFront says (AccessFunction).
-            # Firefly, in this task, sends no such header; all its users
-            # come from one address, so only the overall limits apply to it.
+            # Firefly, in this task, sends no such header and nothing else
+            # that says who its user is; all its users come from one
+            # address.  That address has limits of its own, for all of
+            # them together, set below the overall ones so that Firefly
+            # cannot take every place.
             - {Name: CLIENT_HEADER, Value: X-Viewer-IP}
-            - {Name: UNLIMITED_CLIENTS, Value: '127.0.0.1'}
+            - {Name: SHARED_CLIENTS, Value: '127.0.0.1'}
+            - {Name: SHARED_CLIENT_LIMIT, Value: !Ref FireflyLimit}
+            - {Name: SHARED_ASYNC_LIMIT, Value: !Ref FireflyAsyncLimit}
+            - {Name: UPLOAD_URLS, Value: !Ref UploadUrls}
             - {Name: CLIENT_LIMIT, Value: !Ref ClientLimit}
             - {Name: ASYNC_LIMIT, Value: !Ref AsyncLimit}
             - {Name: ASYNC_CLIENT_LIMIT, Value: !Ref AsyncClientLimit}

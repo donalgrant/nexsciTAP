@@ -113,6 +113,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
     client_header = ''
     client_limit = 0
     unlimited_clients = ()
+    shared_clients = ()
+    shared_client_limit = 0
     rundir = ''
     _place = None
 
@@ -122,9 +124,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
         named = re.sub(r'[^0-9A-Za-z.:_-]', '', named.split(',')[-1])[:64]
         return named or self.client_address[0]
 
+    def _limit(self, client):
+        """Requests this client may have in progress at once (0: no limit)."""
+        if client in self.unlimited_clients:
+            return 0
+        if client in self.shared_clients:
+            # An address many users share (a portal beside this service):
+            # its own limit, for all of them together.
+            return self.shared_client_limit
+        return self.client_limit
+
     def _admit(self, client):
         """Take a place for this request, unless the client has its share already."""
-        if self.client_limit <= 0 or client in self.unlimited_clients:
+        limit = self._limit(client)
+        if limit <= 0:
             return True
 
         # One file per request in progress, named by its process.
@@ -145,7 +158,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 except OSError:
                     pass
 
-        if held > self.client_limit:
+        if held > limit:
             os.remove(mine)
             return False
 
@@ -227,8 +240,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         client = self._client()
         if not self._admit(client):
-            body = (f'Too many requests in progress from {client} '
-                    f'(this service handles {self.client_limit} at once for one client).  Try again shortly.\n').encode()
+            if client in self.shared_clients:
+                body = (f'Too many requests in progress through this portal '
+                        f'(this service handles {self._limit(client)} at once for all its users).  Try again shortly.\n').encode()
+            else:
+                body = (f'Too many requests in progress from {client} '
+                        f'(this service handles {self._limit(client)} at once for one client).  Try again shortly.\n').encode()
             self.send_response(429)
             self.send_header('Retry-After', '5')
             self.send_header('Content-Type', 'text/plain')
@@ -516,6 +533,11 @@ def main():
     if isinstance(unlimited, str):
         unlimited = unlimited.split(',')
     Handler.unlimited_clients = tuple(u.strip() for u in unlimited if u.strip())
+    shared = web.get('SHARED_CLIENTS', '')
+    if isinstance(shared, str):
+        shared = shared.split(',')
+    Handler.shared_clients = tuple(u.strip() for u in shared if u.strip())
+    Handler.shared_client_limit = int(str(web.get('SHARED_CLIENT_LIMIT', '') or 0).strip() or 0)
 
     Server.max_children = args.max_children
 

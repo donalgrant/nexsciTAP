@@ -257,7 +257,7 @@ def test_job_whose_server_is_gone_is_reported_as_failed(fork_server, second_serv
 
 @pytest.fixture(scope="module")
 def fair_server(fixture_root: Path):
-    proc, base, _ = _serve(fixture_root, "fair", "CLIENT_LIMIT=2\nCLIENT_HEADER=X-Client\nUNLIMITED_CLIENTS=portal")
+    proc, base, _ = _serve(fixture_root, "fair", "CLIENT_LIMIT=2\nCLIENT_HEADER=X-Client\nUNLIMITED_CLIENTS=portal\nSHARED_CLIENTS=firefly\nSHARED_CLIENT_LIMIT=3")
     try:
         yield base
     finally:
@@ -291,6 +291,15 @@ def test_client_limit(fair_server):
         more = [_stalled_request(base, "portal") for _ in range(3)]
         time.sleep(0.3)
         assert requests.post(base + "/TAP/sync", data=ask, headers={"X-Client": "portal"}).status_code == 200
+        for s in more:
+            s.close()
+
+        # A shared client (a portal's address, many users) has its own limit:
+        # more than one client's two, and not unlimited.
+        more = [_stalled_request(base, "firefly") for _ in range(3)]
+        time.sleep(0.3)
+        r = requests.post(base + "/TAP/sync", data=ask, headers={"X-Client": "firefly"})
+        assert r.status_code == 429 and "portal" in r.text and "3 at once" in r.text
         for s in more:
             s.close()
     finally:

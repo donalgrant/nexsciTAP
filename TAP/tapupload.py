@@ -72,6 +72,9 @@ def save_uploads(form, workdir, allow_url=False):
     """
     Store the tables named by a request's UPLOAD parameter in `workdir`.
 
+    `allow_url`: False or empty, no URL is fetched; True, any public URL;
+    a list of hosts, those only (see host_allowed).
+
     `form` is the cgi.FieldStorage of the request.  Returns the list of
     upload table names saved (empty if the request has no UPLOAD).
     """
@@ -124,7 +127,7 @@ def save_uploads(form, workdir, allow_url=False):
             if not allow_url:
                 raise UploadError('This service accepts inline uploads only (UPLOAD=<name>,param:<part>).')
 
-            data = fetch_public_url(uri)
+            data = fetch_public_url(uri, hosts=None if allow_url is True else allow_url)
 
         else:
             raise UploadError('Unsupported UPLOAD uri: ' + uri)
@@ -195,8 +198,33 @@ def _public_addresses(host, port):
     return addresses
 
 
-def fetch_public_url(url, max_bytes=MAX_UPLOAD_BYTES):
-    """Fetch url, refusing anything that is not on the public Internet."""
+def host_allowed(host, hosts):
+    """
+    Is host on the list?  hosts None or containing "any": every host is.
+    An entry that starts with a dot allows every host under it.
+    """
+
+    if hosts is None or 'any' in hosts:
+        return True
+
+    host = (host or '').lower().rstrip('.')
+
+    for entry in hosts:
+        entry = entry.lower().rstrip('.')
+        if entry.startswith('.'):
+            if host.endswith(entry) or host == entry[1:]:
+                return True
+        elif host == entry:
+            return True
+
+    return False
+
+
+def fetch_public_url(url, max_bytes=MAX_UPLOAD_BYTES, hosts=None):
+    """
+    Fetch url, refusing anything that is not on the public Internet and,
+    when hosts is given, any host that is not on that list (see host_allowed).
+    """
 
     import http.client
     import socket
@@ -218,6 +246,10 @@ def fetch_public_url(url, max_bytes=MAX_UPLOAD_BYTES):
 
         if not host:
             raise UploadError('Upload URL has no host.')
+
+        if not host_allowed(host, hosts):
+            raise UploadError('This service does not fetch uploads from ' + host
+                              + '.  Send the table with the request (UPLOAD=<name>,param:<part>).')
 
         try:
             port = parts.port or (443 if scheme == 'https' else 80)

@@ -213,6 +213,28 @@ class configParam:
         self.async_client_limit = _number('ASYNC_CLIENT_LIMIT')
         self.unlimited_clients = _names('UNLIMITED_CLIENTS')
 
+        # SHARED_CLIENTS (comma-separated addresses) each stand for many
+        # users: a portal on the same host, whose requests all come from one
+        # address.  Such a client has its own limits, for all its users
+        # together: SHARED_CLIENT_LIMIT requests in progress (read by
+        # TAP/forkserver.py) and SHARED_ASYNC_LIMIT async jobs running.
+        # Set SHARED_ASYNC_LIMIT below ASYNC_LIMIT and the portal cannot
+        # take every place.
+
+        self.shared_clients = _names('SHARED_CLIENTS')
+        self.shared_async_limit = _number('SHARED_ASYNC_LIMIT')
+
+        # UPLOAD_URLS: which URLs an upload may name (UPLOAD=<name>,<url>),
+        # which this service then fetches.  Unset, empty or "none": no URL
+        # is fetched and only inline uploads are accepted.  "any": any
+        # public address.  Otherwise a comma-separated list of hosts; an
+        # entry that starts with a dot allows every host under it
+        # (".caltech.edu").  A redirect must lead to an allowed host too.
+
+        self.upload_urls = tuple(n.lower() for n in _names('UPLOAD_URLS'))
+        if self.upload_urls in ((), ('none',)):
+            self.upload_urls = ()
+
 
         # INFOMSG
 

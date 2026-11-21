@@ -747,7 +747,8 @@ class Tap:
 
         try:
             if str(self.config.connectInfo.get('dbms', '')).lower() == 'duckdb':
-                tapupload.save_uploads(self.form, self.userWorkdir, allow_url=True)
+                tapupload.save_uploads(self.form, self.userWorkdir,
+                                       allow_url=getattr(self.config, 'upload_urls', ()))
 
         except Exception as e:
             self.__printError__('votable', 'UPLOAD failed: ' + str(e), errcode='400')
@@ -3102,7 +3103,9 @@ class Tap:
             os.environ.get('TAP_CLIENT') or os.environ.get('REMOTE_ADDR', ''),
             total=getattr(self.config, 'async_limit', 0),
             per_client=getattr(self.config, 'async_client_limit', 0),
-            exempt=getattr(self.config, 'unlimited_clients', ()))
+            exempt=getattr(self.config, 'unlimited_clients', ()),
+            shared=getattr(self.config, 'shared_clients', ()),
+            shared_limit=getattr(self.config, 'shared_async_limit', 0))
 
         if refused:
             self.__writeAsyncError__(refused, self.statuspath,
@@ -3549,8 +3552,9 @@ class Tap:
             print ('')
             print ('    <!-- table upload (TAP_UPLOAD) -->')
             print ('    <uploadMethod ivo-id="ivo://ivoa.net/std/TAPRegExt#upload-inline"/>')
-            print ('    <uploadMethod ivo-id="ivo://ivoa.net/std/TAPRegExt#upload-http"/>')
-            print ('    <uploadMethod ivo-id="ivo://ivoa.net/std/TAPRegExt#upload-https"/>')
+            if getattr(self.config, 'upload_urls', ()):
+                print ('    <uploadMethod ivo-id="ivo://ivoa.net/std/TAPRegExt#upload-http"/>')
+                print ('    <uploadMethod ivo-id="ivo://ivoa.net/std/TAPRegExt#upload-https"/>')
 
         print ('  </capability>')
         print ('')

@@ -208,7 +208,7 @@ def mark_lost(jobdir, statuspath, stale=STALE):
     return True
 
 
-def admit(tapdir, jobid, client, total=0, per_client=0, exempt=()):
+def admit(tapdir, jobid, client, total=0, per_client=0, exempt=(), shared=(), shared_limit=0):
     """
     Called by a job's worker before it runs the query.  Returns None and
     registers the job as running, or the message to fail the job with.
@@ -216,9 +216,15 @@ def admit(tapdir, jobid, client, total=0, per_client=0, exempt=()):
     total       most jobs running at once in this work area   (0: no limit)
     per_client  most jobs one client may have running at once  (0: no limit)
     exempt      clients the per-client limit does not apply to
+    shared      clients that stand for many users (a portal on the same host)
+    shared_limit  most jobs such a client may have running at once (0: no limit)
     """
 
     global _registered
+
+    is_shared = client in shared and client not in exempt
+    if is_shared:
+        per_client = shared_limit
 
     if total <= 0 and per_client <= 0:
         return None
@@ -252,6 +258,10 @@ def admit(tapdir, jobid, client, total=0, per_client=0, exempt=()):
                 mine += f.read().strip() == client
         except OSError:
             pass
+
+    if per_client > 0 and is_shared and mine >= per_client:
+        return (f'This portal has {mine} jobs running for its users, the most this service runs for it at once.  '
+                'Submit this one again when one of them has finished.')
 
     if per_client > 0 and client not in exempt and mine >= per_client:
         return (f'You have {mine} jobs running, the most this service runs for one client at once.  '

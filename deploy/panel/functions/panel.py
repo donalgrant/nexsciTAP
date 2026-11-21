@@ -367,7 +367,8 @@ def view_load(params):
             'limitsStatus': (load_state('stack') or {}).get('status'),
             'limitsUndone': (load_state('stack') or {}).get('undone'),
             'limits': {k: params_now.get(k) for k in
-                       ('ClientLimit', 'AsyncLimit', 'AsyncClientLimit', 'QueryMemory', 'QueryTimeout', 'MaxRecLimit')}}
+                       ('ClientLimit', 'AsyncLimit', 'AsyncClientLimit', 'FireflyLimit', 'FireflyAsyncLimit',
+                        'QueryMemory', 'QueryTimeout', 'MaxRecLimit')}}
 
 
 FIREWALL_REGION = 'us-east-1'       # the only region CloudFront reads web ACLs from
@@ -1075,6 +1076,8 @@ LIMITS = {
     'ClientLimit': ('service', _whole(0, 100), 'requests in progress, one client, per task'),
     'AsyncClientLimit': ('service', _whole(0, 100), 'async jobs running, one client'),
     'AsyncLimit': ('service', _whole(0, 100), 'async jobs running, in all'),
+    'FireflyLimit': ('service', _whole(0, 100), "requests in progress, all of Firefly's users, per task"),
+    'FireflyAsyncLimit': ('service', _whole(0, 100), "async jobs running, all of Firefly's users"),
     'QueryMemory': ('service', _memory, 'memory, one query'),
     'QueryTimeout': ('service', _whole(10, 3600), 'seconds, one query'),
     'MaxRecLimit': ('service', _whole(1000, 50000000), 'rows, one result'),

@@ -362,7 +362,9 @@ const VIEW = {
     for (const [what, u] of [['the service', l.limitsUndone], ['the firewall', F && F.undone]])
       if (u && Date.now() / 1000 - u.at < 86400) h += `<div class="notice err gap">The last change to the limits of ${what} (${when(u.at)}) was not made.  CloudFormation undid it, and the limits are as they were.${u.why ? '  It said:  ' + esc(u.why) : ''}</div>`;
     const rows = [['ClientLimit', 'Requests in progress, one client, per task', L.ClientLimit, '', 'service'], ['AsyncClientLimit', 'Async jobs running, one client', L.AsyncClientLimit, '', 'service'],
-       ['AsyncLimit', 'Async jobs running, in all', L.AsyncLimit, '', 'service'], ['QueryMemory', 'Memory, one query', L.QueryMemory, '', 'service'],
+       ['AsyncLimit', 'Async jobs running, in all', L.AsyncLimit, '', 'service'],
+       ...(L.FireflyLimit != null ? [['FireflyLimit', 'Requests in progress, all of Firefly\'s users together, per task', L.FireflyLimit, '', 'service'], ['FireflyAsyncLimit', 'Async jobs running, all of Firefly\'s users together', L.FireflyAsyncLimit, '', 'service']] : []),
+       ['QueryMemory', 'Memory, one query', L.QueryMemory, '', 'service'],
        ['QueryTimeout', 'Time, one query', L.QueryTimeout, ' s', 'service'], ['MaxRecLimit', 'Rows, one result', L.MaxRecLimit, '', 'service'],
        ...(F && F.limit ? [['RateLimit', 'Requests in five minutes, one address (firewall)', F.limit, '', 'firewall'], ['Mode', 'Over that, the firewall', F.mode, '', 'firewall'],
                            ['OverallLimit', 'Requests in five minutes, all addresses (firewall;  counted, never refused)', F.overallLimit, '', 'firewall']] : [])];

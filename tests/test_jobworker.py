@@ -190,3 +190,24 @@ def test_stopped_job_gives_up_its_place_at_once(tmp_path):
     jobworker.stop(jobdir, 0)
     proc.wait(timeout=5)
     assert not (tmp_path / ".running" / "tap_j").exists()
+
+
+def test_shared_client_has_its_own_limit(tmp_path, monkeypatch):
+    """A portal's address stands for many users: its own limit, not one client's and not none."""
+    monkeypatch.setattr(jobworker, "owner", lambda path: ("host", 1, 0))
+    monkeypatch.setattr(jobworker.atexit, "register", lambda f: None)
+    kw = dict(total=8, per_client=1, shared=("127.0.0.1",), shared_limit=3)
+
+    for n in range(3):          # more than one client may have, up to the portal's own limit
+        assert jobworker.admit(str(tmp_path), f"tap_p{n}", "127.0.0.1", **kw) is None
+    refused = jobworker.admit(str(tmp_path), "tap_p3", "127.0.0.1", **kw)
+    assert refused and "portal" in refused
+
+    # Someone else still has a place: the portal could not take all eight.
+    assert jobworker.admit(str(tmp_path), "tap_q0", "alice", **kw) is None
+    refused = jobworker.admit(str(tmp_path), "tap_q1", "alice", **kw)
+    assert refused and "You have 1 jobs" in refused
+
+    # No shared limit set: the portal is held to the overall limit only.
+    kw["shared_limit"] = 0
+    assert jobworker.admit(str(tmp_path), "tap_p4", "127.0.0.1", **kw) is None

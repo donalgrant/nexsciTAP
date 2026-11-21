@@ -265,3 +265,52 @@ def test_url_fetch_enforces_the_size_cap(local_site):
 def test_url_fetch_reports_http_errors(local_site):
     with pytest.raises(tapupload.UploadError):
         tapupload.fetch_public_url(local_site + '/missing')
+
+
+def test_host_allowed():
+    ok = tapupload.host_allowed
+    assert ok('anywhere.example', None) and ok('anywhere.example', ('any',))
+    hosts = ('irsa.ipac.caltech.edu', '.stsci.edu')
+    assert ok('irsa.ipac.caltech.edu', hosts) and ok('IRSA.ipac.caltech.edu.', hosts)
+    assert ok('archive.stsci.edu', hosts) and ok('stsci.edu', hosts)
+    assert not ok('ipac.caltech.edu', hosts)
+    assert not ok('irsa.ipac.caltech.edu.evil.example', hosts)
+    assert not ok('evilstsci.edu', hosts)
+    assert not ok('', hosts) and not ok(None, hosts)
+
+
+def test_url_upload_refused_unless_allowed(tmp_path, monkeypatch):
+    """No URL is fetched unless the service says which; a listed host is, and no other."""
+
+    class Field:
+        def __init__(self, value): self.value = value
+
+    class Form(dict):
+        pass
+
+    fetched = []
+    monkeypatch.setattr(tapupload, '_public_addresses',
+                        lambda host, port: fetched.append(host) or (_ for _ in ()).throw(tapupload.UploadError('stop here')))
+    form = Form(UPLOAD=Field('t,https://elsewhere.example/t.vot'))
+
+    for off in (False, (), None):
+        with pytest.raises(tapupload.UploadError, match='inline uploads only'):
+            tapupload.save_uploads(form, str(tmp_path), allow_url=off)
+    assert fetched == []
+
+    with pytest.raises(tapupload.UploadError, match='does not fetch uploads from elsewhere.example'):
+        tapupload.save_uploads(form, str(tmp_path), allow_url=('irsa.ipac.caltech.edu',))
+    assert fetched == []
+
+    with pytest.raises(tapupload.UploadError, match='stop here'):      # allowed: it goes on to the address check
+        tapupload.save_uploads(form, str(tmp_path), allow_url=('.example',))
+    assert fetched == ['elsewhere.example']
+
+
+def test_redirect_to_a_host_not_listed_is_refused(local_site, monkeypatch):
+    from urllib.parse import urlsplit
+    host = urlsplit(local_site).hostname
+    monkeypatch.setattr(tapupload, '_public_addresses', lambda h, p: [h])
+    assert tapupload.fetch_public_url(local_site + '/table.vot', hosts=(host,)) == b'<VOTABLE/>'
+    with pytest.raises(tapupload.UploadError, match='does not fetch uploads from'):
+        tapupload.fetch_public_url(local_site + '/to-metadata', hosts=(host,))
