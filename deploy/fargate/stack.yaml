@@ -650,7 +650,9 @@ Resources:
           - {Name: IMAGE_PREFIX, Value: !Ref ImagePrefix}
           - {Name: REGISTRY, Value: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com'}
           - {Name: ECS_CLUSTER, Value: !Ref Cluster}
-          - {Name: ECS_SERVICE, Value: !GetAtt Service.Name}
+          # The service is named after the stack.  Naming it so here, not by the resource, keeps a
+          # change of the task definition (a new limit, say) from reaching into the build project.
+          - {Name: ECS_SERVICE, Value: !Ref AWS::StackName}
       Source:
         Type: NO_SOURCE
         # The steps themselves live in the repository being built.

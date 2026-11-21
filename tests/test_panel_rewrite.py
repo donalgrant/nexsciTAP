@@ -152,3 +152,35 @@ def test_the_firewall_is_found_from_the_service_stack(panel, monkeypatch):
     monkeypatch.setattr(panel, 'cached', lambda *a: (_ for _ in ()).throw(RuntimeError('no access')))
     got = panel.firewall(24, 300, panel.now())
     assert got['name'] == 'aiab-waf' and 'no access' in got['error'] and 'series' not in got
+
+
+NOW = {'service': {'ClientLimit': '6', 'AsyncLimit': '8', 'AsyncClientLimit': '3', 'QueryMemory': '1GB',
+                   'QueryTimeout': '300', 'MaxRecLimit': '2000000', 'DesiredCount': '1', 'PanelSecret': 'x'},
+       'firewall': {'RateLimit': '1000', 'OverallLimit': '5000', 'Mode': 'block'}}
+
+
+def test_a_change_of_limits_goes_to_the_stack_that_holds_it(panel):
+    got = panel.limit_changes({'ClientLimit': 8, 'QueryMemory': '1.5gb', 'RateLimit': '2,000', 'Mode': 'count',
+                               'AsyncLimit': '8', 'MaxRecLimit': 2000000}, NOW)
+    assert got == {'service': {'ClientLimit': ('6', '8'), 'QueryMemory': ('1GB', '1.5GB')},
+                   'firewall': {'RateLimit': ('1000', '2000'), 'Mode': ('block', 'count')}}
+    assert panel.limit_changes({'ClientLimit': '6', 'Mode': 'block'}, NOW) == {}      # as they are: no change
+
+
+@pytest.mark.parametrize('asked', [
+    {}, None, {'DesiredCount': 3}, {'PanelSecret': 'mine'}, {'TapImage': 'evil'},      # not limits
+    {'ClientLimit': -1}, {'ClientLimit': '6; rm'}, {'ClientLimit': 1000}, {'ClientLimit': 2.5},
+    {'QueryMemory': '8GB'}, {'QueryMemory': '100MB'}, {'QueryMemory': 'lots'}, {'QueryMemory': '1GB --x'},
+    {'QueryTimeout': 5}, {'MaxRecLimit': 10}, {'RateLimit': 5}, {'Mode': 'off'},
+    {'AsyncClientLimit': 9},                                # more for one client than for all (8)
+    {'AsyncLimit': 2},                                      # fewer in all than one client may have (3)
+])
+def test_limits_that_are_refused(panel, asked):
+    with pytest.raises(panel.Refused):
+        panel.limit_changes(asked, NOW)
+
+
+def test_limits_without_a_firewall(panel):
+    with pytest.raises(panel.Refused):
+        panel.limit_changes({'RateLimit': 500}, {'service': NOW['service']})
+    assert panel.limit_changes({'AsyncLimit': 0, 'AsyncClientLimit': 50}, NOW)       # 0 is no limit in all

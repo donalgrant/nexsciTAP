@@ -364,6 +364,7 @@ def view_load(params):
     params_now = stack_parameters()
     return {'hours': hours, 'period': period, 'series': series, 'workArea': work,
             'firewall': firewall(hours, period, end),
+            'limitsStatus': (load_state('stack') or {}).get('status'),
             'limits': {k: params_now.get(k) for k in
                        ('ClientLimit', 'AsyncLimit', 'AsyncClientLimit', 'QueryMemory', 'QueryTimeout', 'MaxRecLimit')}}
 
@@ -393,9 +394,11 @@ def firewall(hours, period, end):
         def make():
             # The web ACL and its stack have the same name (the template names it so).
             st = aws('cloudformation', FIREWALL_REGION).describe_stacks(StackName=name)['Stacks'][0]
-            return {'params': {p['ParameterKey']: p.get('ParameterValue', '') for p in st.get('Parameters', [])}}
-        settings = cached('firewall', 300, make)['params']
-        out.update(limit=int(settings.get('RateLimit') or 0), overallLimit=int(settings.get('OverallLimit') or 0),
+            return {'params': {p['ParameterKey']: p.get('ParameterValue', '') for p in st.get('Parameters', [])},
+                    'status': st['StackStatus']}
+        held = stack_state(make, 'firewall')
+        settings = held['params']
+        out.update(status=held.get('status'), limit=int(settings.get('RateLimit') or 0), overallLimit=int(settings.get('OverallLimit') or 0),
                    mode=settings.get('Mode') or '')
         want = [('allowed', 'AllowedRequests', 'ALL'), ('refused', 'BlockedRequests', f'{name}-PerAddress'),
                 ('overAddress', 'CountedRequests', f'{name}-PerAddress'), ('overAll', 'CountedRequests', f'{name}-Overall')]
@@ -417,7 +420,15 @@ def stack_parameters():
         return {'params': {p['ParameterKey']: p.get('ParameterValue', '') for p in st.get('Parameters', [])},
                 'status': st['StackStatus'],
                 'updated': (st.get('LastUpdatedTime') or st['CreationTime']).timestamp()}
-    return cached('stack', 300, make)['params']
+    return stack_state(make)['params']
+
+
+def stack_state(make=None, name='stack'):
+    """A stack's settings and status, kept five minutes; looked at again every 15 s while it is being changed."""
+    held = cached(name, 300, make)
+    if not str(held.get('status', '')).endswith('_COMPLETE'):
+        held = cached(name, 15, make)
+    return held
 
 
 QUERY_WORD = 'TAPQ'
@@ -1009,6 +1020,122 @@ def roll_back(tag, who):
     return {'live': tag, 'moved': moved, 'restarted': restarted}
 
 
+# ---- limits ---------------------------------------------------------------
+#
+# The limits are settings of two stacks: the service's, and the firewall's
+# in us-east-1.  The stacks stay their owners.  A change from the panel asks
+# CloudFormation to update the stack with its own template and every other
+# setting as it is, which is what tools/stack-set.sh does by hand; nothing
+# drifts.  CloudFormation acts with this function's permissions, which cover
+# a new task definition, the service's restart on it, and the web ACL.
+
+def _whole(low, high):
+    def check(v):
+        s = str(v).strip().replace(',', '')
+        if not re.fullmatch(r'\d{1,9}', s) or not low <= int(s) <= high:
+            raise ValueError(f'a whole number from {low:,} to {high:,}')
+        return str(int(s))
+    return check
+
+
+def _memory(v):
+    m = re.fullmatch(r'(\d+(?:\.\d+)?)\s*(MB|GB)', str(v).strip().upper())
+    mb = float(m.group(1)) * (1000 if m.group(2) == 'GB' else 1) if m else 0
+    if not 200 <= mb <= 3000:
+        raise ValueError('a size from 200MB to 3GB, written like 800MB or 1.5GB (the TAP container has 3.5 GB)')
+    return f'{m.group(1)}{m.group(2)}'
+
+
+def _mode(v):
+    if str(v).strip().lower() not in ('count', 'block'):
+        raise ValueError('"block" or "count"')
+    return str(v).strip().lower()
+
+
+LIMITS = {
+    # setting: (which stack, what it must be, what it is)
+    'ClientLimit': ('service', _whole(0, 100), 'requests in progress, one client, per task'),
+    'AsyncClientLimit': ('service', _whole(0, 100), 'async jobs running, one client'),
+    'AsyncLimit': ('service', _whole(0, 100), 'async jobs running, in all'),
+    'QueryMemory': ('service', _memory, 'memory, one query'),
+    'QueryTimeout': ('service', _whole(10, 3600), 'seconds, one query'),
+    'MaxRecLimit': ('service', _whole(1000, 50000000), 'rows, one result'),
+    'RateLimit': ('firewall', _whole(10, 1000000), 'requests in five minutes, one address'),
+    'OverallLimit': ('firewall', _whole(10, 10000000), 'requests in five minutes, all addresses (counted only)'),
+    'Mode': ('firewall', _mode, 'whether the firewall refuses or only counts'),
+}
+
+
+def limit_changes(asked, now):
+    """
+    What is to change, by stack: {'service': {setting: (old, new)}, 'firewall': {...}}.
+    asked is {setting: value}; now is {'service': {setting: value}, 'firewall': {...}}.
+    A value that is what the stack already has is not a change.
+    """
+    out = {}
+    if not isinstance(asked, dict) or not asked:
+        raise Refused('No limit was sent.')
+    for key, value in asked.items():
+        if key not in LIMITS:
+            raise Refused(f'{key!r} is not a limit that is changed from here.')
+        where, check, what = LIMITS[key]
+        try:
+            new = check(value)
+        except ValueError as e:
+            raise Refused(f'{key} ({what}) must be {e}.')
+        if where not in now:
+            raise Refused('The service has no firewall whose limit could be changed.')
+        old = str(now[where].get(key, ''))
+        if new != old:
+            out.setdefault(where, {})[key] = (old, new)
+    limit = lambda k: int(out.get('service', {}).get(k, (0, now.get('service', {}).get(k) or 0))[1])     # noqa: E731
+    if 'service' in out and 0 < limit('AsyncLimit') < limit('AsyncClientLimit'):
+        raise Refused('One client cannot be allowed more async jobs than there may be in all.')
+    return out
+
+
+def change_limits(body, who):
+    cf = {'service': (aws('cloudformation'), STACK)}
+    name = firewall_name()
+    if name:
+        cf['firewall'] = (aws('cloudformation', FIREWALL_REGION), name)
+    stacks = {where: c.describe_stacks(StackName=n)['Stacks'][0] for where, (c, n) in cf.items()}
+    now = {where: {p['ParameterKey']: p.get('ParameterValue', '') for p in st.get('Parameters', [])}
+           for where, st in stacks.items()}
+    changes = limit_changes(body.get('changes'), now)
+    if not changes:
+        raise Refused('Those are the limits in force already.')
+
+    notes = []
+    for where in changes:
+        status = stacks[where]['StackStatus']
+        if status not in ('CREATE_COMPLETE', 'UPDATE_COMPLETE', 'UPDATE_ROLLBACK_COMPLETE'):
+            raise Refused(f"The {where}'s settings are being changed now ({status}).  Wait for that to finish.")
+    if 'service' in changes:
+        svc = ecs_service()
+        if svc['desiredCount'] == 0:
+            raise Refused('The service is in standby.  Start it first:  a change of its limits restarts it, '
+                          'and would start it now.')
+        if len(svc.get('deployments', [])) > 1:
+            raise Refused('The service is restarting now.  Wait for that to finish.')
+        stack_count = int(now['service'].get('DesiredCount') or 1)
+        if svc['desiredCount'] != stack_count:
+            notes.append(f"The number of tasks returns to {stack_count}, the stack's own setting;  it was {svc['desiredCount']}.")
+
+    for where, change in changes.items():
+        c, n = cf[where]
+        c.update_stack(
+            StackName=n, UsePreviousTemplate=True,
+            Parameters=[{'ParameterKey': k, 'ParameterValue': change[k][1]} if k in change
+                        else {'ParameterKey': k, 'UsePreviousValue': True} for k in now[where]],
+            Capabilities=['CAPABILITY_IAM', 'CAPABILITY_NAMED_IAM'], Tags=stacks[where].get('Tags', []))
+        record(who, 'limits', {'of': where, **{k: f'{old} to {new}' for k, (old, new) in change.items()}})
+        # What is held of the stack is out of date from this moment.
+        aws('s3').delete_object(Bucket=STATE_BUCKET, Key=f"state/{'stack' if where == 'service' else 'firewall'}.json")
+    return {'changed': {where: {k: list(v) for k, v in change.items()} for where, change in changes.items()},
+            'restarts': 'service' in changes, 'notes': notes}
+
+
 JOB_ID = re.compile(r'tap_[A-Za-z0-9_]+')
 
 
@@ -1062,6 +1189,8 @@ def control(body, who):
         return roll_back(body.get('tag'), who)
     if action == 'abort':
         return abort_job(body.get('id'), who)
+    if action == 'limits':
+        return change_limits(body, who)
     if action == 'upload':
         return upload_slot(body)
     if action == 'ingest':
@@ -2091,7 +2220,7 @@ def check_rules(watch):
                      f'{worst} was sent {volume[worst] / 1e9:.1f} GB in about a day' if worst else 'no downloads')
 
     asked = [e for e in load_state('record', {}).get('entries', [])
-             if e['action'] in ('tasks', 'wake', 'standby', 'rollback', 'rebuild') and time.time() - e['at'] < 2400]
+             if e['action'] in ('tasks', 'wake', 'standby', 'rollback', 'rebuild', 'limits') and time.time() - e['at'] < 2400]
     deploying = any(time.time() - d['createdAt'].timestamp() < 2400 for d in svc.get('deployments', []))
     started = [e for e in svc.get('events', []) if 'has started' in e['message']
                and time.time() - e['createdAt'].timestamp() < 900]

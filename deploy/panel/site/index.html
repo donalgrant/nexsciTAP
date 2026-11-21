@@ -353,10 +353,23 @@ const VIEW = {
         tile('Over the overall mark', num(total(fs.overAll)), `requests after all addresses passed ${num(F.overallLimit)} in five minutes;  counted, not refused`) + '</div>' +
         `<div class="gap">${lines(fs.allowed, blocking ? fs.refused : fs.overAddress, '')}</div><p class="note">Requests per ${l.period / 60} minutes.  Blue let through, amber ${blocking ? 'refused' : 'over the limit (counted only)'}.  The firewall acts before the address check and before the paused page, so it counts requests the door then refuses.  Its numbers reach here a few minutes late.</p></div>`;
     }
-    h += '<div class="card gap"><h2>Limits in force</h2><table>' +
-      [...(F && F.limit ? [['Requests in five minutes, one address (firewall' + (F.mode === 'block' ? '' : ', counting only') + ')', num(F.limit)]] : []), ['Requests in progress, one client, per task', L.ClientLimit], ['Async jobs running, one client', L.AsyncClientLimit], ['Async jobs running, in all', L.AsyncLimit],
-       ['Memory, one query', L.QueryMemory], ['Time, one query', (L.QueryTimeout || '?') + ' s'], ['Rows, one result', num(L.MaxRecLimit)]]
-        .map((r) => `<tr><td>${r[0]}</td><td class="num">${esc(r[1] ?? '?')}</td></tr>`).join('') + '</table><p class="note">Settings of the service\'s stack, and of the firewall\'s.  They are not changed from here yet.</p></div>';
+    const busyLimits = [l.limitsStatus, F && F.status].some((x) => x && !/_COMPLETE$/.test(x));
+    if (busyLimits) {
+      h += '<div class="notice gap">The limits are being changed.  A change to the service restarts it on the new settings, which takes about five minutes;  a change to the firewall takes about a minute.  This page refreshes by itself.</div>';
+      clearTimeout(VIEW.Load.timer);
+      VIEW.Load.timer = setTimeout(() => { if (tab === 'Load' && !document.querySelector('#limsave')) { for (const k in store) delete store[k]; show(true); } }, 15000);
+    }
+    const rows = [['ClientLimit', 'Requests in progress, one client, per task', L.ClientLimit, '', 'service'], ['AsyncClientLimit', 'Async jobs running, one client', L.AsyncClientLimit, '', 'service'],
+       ['AsyncLimit', 'Async jobs running, in all', L.AsyncLimit, '', 'service'], ['QueryMemory', 'Memory, one query', L.QueryMemory, '', 'service'],
+       ['QueryTimeout', 'Time, one query', L.QueryTimeout, ' s', 'service'], ['MaxRecLimit', 'Rows, one result', L.MaxRecLimit, '', 'service'],
+       ...(F && F.limit ? [['RateLimit', 'Requests in five minutes, one address (firewall)', F.limit, '', 'firewall'], ['Mode', 'Over that, the firewall', F.mode, '', 'firewall'],
+                           ['OverallLimit', 'Requests in five minutes, all addresses (firewall;  counted, never refused)', F.overallLimit, '', 'firewall']] : [])];
+    limitRows = rows;
+    const shown = (r) => r[0] === 'Mode' ? (r[2] === 'block' ? 'refuses (429)' : 'only counts') : (/Limit$/.test(r[0]) && r[0] !== 'QueryMemory' ? num(r[2]) : esc(r[2] ?? '?')) + r[3];
+    h += '<div class="card gap" id="limits"><h2>Limits in force</h2><table>' +
+      rows.map((r) => `<tr><td>${r[1]}</td><td class="num" data-limit="${r[0]}">${shown(r)}</td></tr>`).join('') + '</table>' +
+      `<div class="tools gap"><button id="limedit" ${busyLimits ? 'disabled' : ''}>Change the limits</button><span class="note">Settings of the service's stack, and of the firewall's.  A change here asks CloudFormation to make it, so the stacks stay as the record of what is in force.</span></div></div>`;
+    setTimeout(() => { const b = $('#limedit'); if (b) b.onclick = limitEditor; });
     return h;
   },
 
@@ -669,6 +682,30 @@ async function uploadAndConvert() {
     window.scrollTo({top: 0, behavior: 'smooth'});
     show(true);
   } catch (e) { state.innerHTML = `<span class="badText">${esc(e.message)}</span>`; const b = $('#upbusy'); if (b) { b.disabled = false; b.id = 'ugo'; } }
+}
+let limitRows = [];
+function limitEditor() {
+  const card = $('#limits'); if (!card) return;
+  clearTimeout(VIEW.Load.timer);
+  card.querySelectorAll('td[data-limit]').forEach((td) => {
+    const r = limitRows.find((x) => x[0] === td.dataset.limit);
+    td.innerHTML = r[0] === 'Mode'
+      ? `<select data-set="Mode"><option value="block" ${r[2] === 'block' ? 'selected' : ''}>refuses (429)</option><option value="count" ${r[2] === 'count' ? 'selected' : ''}>only counts</option></select>`
+      : `<input data-set="${r[0]}" size="10" style="text-align:right" value="${esc(r[2] ?? '')}">${r[3]}`;
+  });
+  card.querySelector('.tools').innerHTML = '<button class="go" id="limsave">Save</button><button id="limcancel">Cancel</button><span class="note">A change to any of the first six restarts the service on the new settings:  about five minutes, with the old task answering until the new one is ready.  An async job running on the old task is lost.  A change to the firewall takes about a minute and restarts nothing.  0 means no limit for the first three.</span>';
+  $('#limcancel').onclick = () => show(true);
+  $('#limsave').onclick = () => {
+    const changes = {}, said = [];
+    card.querySelectorAll('[data-set]').forEach((el) => {
+      const r = limitRows.find((x) => x[0] === el.dataset.set), v = el.value.trim();
+      if (v !== String(r[2] ?? '')) { changes[r[0]] = v; said.push(`${r[1]}:  ${r[2]} to ${v}`); }
+    });
+    if (!said.length) return toast('Nothing was changed.');
+    const restarts = limitRows.some((r) => r[4] === 'service' && r[0] in changes);
+    if (!confirm('Change these limits?\n\n' + said.join('\n') + (restarts ? '\n\nThe service restarts on the new settings.  That takes about five minutes;  an async job running now is lost, and the number of tasks returns to the stack\'s own setting.' : '\n\nNothing restarts.'))) return;
+    act({action: 'limits', changes}, (out) => 'The change is under way' + (out.restarts ? ';  the service is restarting on the new settings.' : '.') + (out.notes && out.notes.length ? '  ' + out.notes.join('  ') : ''));
+  };
 }
 async function metaEditor(table, folder) {
   const slot = $('#metaslot');

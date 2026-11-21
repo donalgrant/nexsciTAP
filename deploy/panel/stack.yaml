@@ -385,6 +385,61 @@ Resources:
                 Effect: Allow
                 Action: ecs:UpdateService
                 Resource: !Sub arn:aws:ecs:${AWS::Region}:${AWS::AccountId}:service/${ServiceStack}/${ServiceStack}
+              # The limits.  The panel asks CloudFormation to update the service's stack, or the
+              # firewall's, with one setting changed.  CloudFormation acts with this role's own
+              # permissions, so what follows is all such an update can do: a new task definition,
+              # the service's restart on it, and the web ACL.  IAM cannot say which settings may
+              # change; the function does (LIMITS in functions/panel.py).
+              - Sid: LimitsAskTheStacks
+                Effect: Allow
+                Action: cloudformation:UpdateStack
+                Resource:
+                  - !Sub arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${ServiceStack}/*
+                  - !Sub arn:aws:cloudformation:us-east-1:${AWS::AccountId}:stack/aiab-waf*/*
+              - Sid: LimitsTaskDefinition
+                Effect: Allow
+                Action: [ecs:RegisterTaskDefinition, ecs:DeregisterTaskDefinition]
+                Resource: '*'               # neither can be held to one family
+              - Sid: LimitsTagsAndRollout
+                Effect: Allow
+                Action:
+                  - ecs:TagResource
+                  - ecs:UntagResource
+                  - ecs:ListTagsForResource
+                  - ecs:DescribeServiceDeployments
+                  - ecs:ListServiceDeployments
+                  - ecs:StopServiceDeployment
+                Resource:
+                  - !Sub arn:aws:ecs:${AWS::Region}:${AWS::AccountId}:task-definition/${ServiceStack}:*
+                  - !Sub arn:aws:ecs:${AWS::Region}:${AWS::AccountId}:service/${ServiceStack}/${ServiceStack}
+                  - !Sub arn:aws:ecs:${AWS::Region}:${AWS::AccountId}:service-deployment/${ServiceStack}/${ServiceStack}/*
+              - Sid: LimitsTaskRoles
+                Effect: Allow
+                Action: iam:GetRole
+                Resource:
+                  - !Sub arn:aws:iam::${AWS::AccountId}:role/${ServiceStack}-ExecutionRole-*
+                  - !Sub arn:aws:iam::${AWS::AccountId}:role/${ServiceStack}-TaskRole-*
+              - Sid: LimitsPassTaskRoles
+                Effect: Allow
+                Action: iam:PassRole
+                Resource:
+                  - !Sub arn:aws:iam::${AWS::AccountId}:role/${ServiceStack}-ExecutionRole-*
+                  - !Sub arn:aws:iam::${AWS::AccountId}:role/${ServiceStack}-TaskRole-*
+                Condition:
+                  StringEquals: {iam:PassedToService: ecs-tasks.amazonaws.com}
+              - Sid: LimitsFirewall
+                Effect: Allow
+                Action:
+                  - wafv2:GetWebACL
+                  - wafv2:UpdateWebACL
+                  - wafv2:ListTagsForResource
+                  - wafv2:TagResource
+                  - wafv2:UntagResource
+                Resource: !Sub arn:aws:wafv2:us-east-1:${AWS::AccountId}:global/webacl/aiab-waf*/*
+              - Sid: LimitsFirewallAccountCheck
+                Effect: Allow
+                Action: payments:GetConnectedAccount
+                Resource: '*'
               - Sid: PausedPage
                 Effect: Allow
                 Action: elasticloadbalancing:ModifyRule
