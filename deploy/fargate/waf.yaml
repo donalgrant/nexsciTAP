@@ -132,11 +132,27 @@ Resources:
             ManagedRuleGroupStatement:
               VendorName: AWS
               Name: AWSManagedRulesCommonRuleSet
-              # Rules that ordinary use of the service matches; they count
-              # and never refuse.  An uploaded table is far over the body
-              # size this set allows.
+              # Rules that ordinary use of this service matches, or may:
+              # they count and never refuse.  Seen on 20 November 2026 with
+              # the set only counting: an uploaded table is over the body
+              # size allowed and its XML reads as script (SizeRestrictions,
+              # CrossSiteScripting); Firefly's requests name the service as
+              # http://localhost/TAP (EC2MetaDataSSRF); and a client's job
+              # polling sent no User-Agent.  The other rules here look at
+              # the same places, the body and the query arguments, where a
+              # query or a URL is ordinary: a long query in a GET, a URL as
+              # an argument, comparisons written with < and >.
               RuleActionOverrides:
+                - {Name: NoUserAgent_HEADER, ActionToUse: {Count: {}}}
                 - {Name: SizeRestrictions_BODY, ActionToUse: {Count: {}}}
+                - {Name: SizeRestrictions_QUERYSTRING, ActionToUse: {Count: {}}}
+                - {Name: EC2MetaDataSSRF_BODY, ActionToUse: {Count: {}}}
+                - {Name: EC2MetaDataSSRF_QUERYARGUMENTS, ActionToUse: {Count: {}}}
+                - {Name: GenericRFI_BODY, ActionToUse: {Count: {}}}
+                - {Name: GenericRFI_QUERYARGUMENTS, ActionToUse: {Count: {}}}
+                - {Name: GenericLFI_BODY, ActionToUse: {Count: {}}}
+                - {Name: CrossSiteScripting_BODY, ActionToUse: {Count: {}}}
+                - {Name: CrossSiteScripting_QUERYARGUMENTS, ActionToUse: {Count: {}}}
           OverrideAction: !If [ManagedBlocking, {None: {}}, {Count: {}}]
           VisibilityConfig:
             SampledRequestsEnabled: true
