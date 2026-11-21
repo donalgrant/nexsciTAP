@@ -360,6 +360,8 @@ const VIEW = {
     const moving = (d.moves || []).filter((m) => m.status === 'RUNNING');
     if (moving.length) h += `<div class="notice">In progress:  ${moving.map((m) => esc(m.action + ' ' + m.folder)).join(', ')}.  This page refreshes by itself.</div>`;
     const failed = (d.moves || []).filter((m) => m.status === 'FAILED' && Date.now() / 1000 - m.started < 3600);
+    const lost = (d.moves || []).filter((m) => m.status === 'UNKNOWN');
+    if (lost.length) h += `<div class="notice">The record of how ${lost.map((m) => esc(m.action + ' ' + m.folder) + ' (' + when(m.started) + ')').join(', ')} ended was lost.  Open the table's Checks to see what is served.</div>`;
     if (failed.length) h += `<div class="notice err">${failed.map((m) => esc(m.action + ' ' + m.folder + ' failed:  ' + m.error)).join('<br>')}</div>`;
 
     const live = (d.ingests || []).filter((i) => i.status === 'RUNNING' || i.status === 'STARTING');

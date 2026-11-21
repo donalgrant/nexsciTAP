@@ -62,3 +62,17 @@ def test_renames_and_row_groups_reach_the_task(panel):
 def test_what_is_refused(panel, body):
     with pytest.raises(panel.Refused):
         panel.rewrite_settings(body)
+
+
+def test_a_move_whose_ending_was_lost_is_not_in_progress(panel, monkeypatch):
+    """The list of moves is shared; a move marked running beyond the function's time limit is not running."""
+    import time
+    now = time.time()
+    held = [{'id': '1', 'action': 'publish', 'folder': 'old', 'started': now - 90000, 'status': 'DONE'},
+            {'id': '2', 'action': 'publish', 'folder': 'lost', 'started': now - 7000, 'status': 'RUNNING'},
+            {'id': '3', 'action': 'publish', 'folder': 'busy', 'started': now - 30, 'status': 'RUNNING'},
+            {'id': '4', 'action': 'hide', 'folder': 'done', 'started': now - 60, 'status': 'DONE'}]
+    monkeypatch.setattr(panel, 'load_state', lambda name, default=None: {'list': held})
+    got = {m['folder']: m['status'] for m in panel.moves()}
+    assert got == {'lost': 'UNKNOWN', 'busy': 'RUNNING', 'done': 'DONE'}
+    assert held[1]['status'] == 'RUNNING'           # what is stored is not changed by reading it

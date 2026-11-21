@@ -1310,14 +1310,31 @@ def view_ingestlog(params):
 # a page waits.  A control starts the move as a second run of this function
 # and returns; the page watches "moves" in the datasets view.
 
+MOVE_LIMIT = 900        # the function's own time limit: no move runs longer
+
+
 def moves():
-    return [m for m in load_state('moves', {}).get('list', []) if time.time() - m.get('started', 0) < 86400][-10:]
+    """
+    The last day's moves.  The list is one object that every move reads and
+    writes, so the note of one's ending can be lost when another starts at
+    that moment (seen on 20 November 2026, with six publishes in 40 s).  A
+    move still marked as running after the function's time limit is not
+    running; say that its ending is not known, and do not call it in progress.
+    """
+    out = []
+    for m in load_state('moves', {}).get('list', []):
+        if time.time() - m.get('started', 0) >= 86400:
+            continue
+        if m.get('status') == 'RUNNING' and time.time() - m.get('started', 0) > MOVE_LIMIT:
+            m = dict(m, status='UNKNOWN', error='The record of how this ended was lost.  The checks of the table say what is served.')
+        out.append(m)
+    return out[-10:]
 
 
 def start_move(action, folder, who, **more):
     folder = folder_name(folder)
     held = load_state('moves', {}).get('list', [])
-    if any(m['folder'] == folder and m['status'] == 'RUNNING' and time.time() - m['started'] < 900 for m in held):
+    if any(m['folder'] == folder and m['status'] == 'RUNNING' and time.time() - m['started'] < MOVE_LIMIT for m in held):
         raise Refused(f'{folder} is already being moved.  Wait for that to finish.')
 
     here = f'{CATALOG_PREFIX}/{folder}/'
@@ -1359,6 +1376,8 @@ def start_move(action, folder, who, **more):
         canary_table(table, on=True, notBefore=time.time() + 420, why='')        # the files it had; give the service time to list it
     elif action == 'restore':
         canary_table(table, on=False, check=None, why='an earlier version was restored; no answer is known for it until it is published again')
+    # Read the list again: the checks above took seconds, and another move may have ended meanwhile.
+    held = load_state('moves', {}).get('list', [])
     held.append(move)
     save_state('moves', {'list': held[-40:]})
     aws('lambda').invoke(FunctionName=os.environ['AWS_LAMBDA_FUNCTION_NAME'], InvocationType='Event',
