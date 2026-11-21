@@ -1,0 +1,96 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Archive in a Box - a rate limit in front of the service.  A web ACL for the
+  service's CloudFront distribution.  CloudFront reads web ACLs from us-east-1
+  only, so this is a stack of its own, created there; its WebAclArn output is
+  given to the service's stack as the WebAclArn setting.
+
+Parameters:
+  RateLimit:
+    Type: Number
+    Default: 1000
+    MinValue: 10
+    Description: >-
+      Requests one address may make in five minutes.  On 19 to 21 November
+      2026 the busiest address made 144, during testing.
+  OverallLimit:
+    Type: Number
+    Default: 5000
+    MinValue: 10
+    Description: >-
+      Requests from all addresses together in five minutes, above which the
+      Overall rule counts.  It only counts: it is there to be seen, and to be
+      made a limit if access is widened.  The busiest five minutes of the
+      same three days had 156.
+  Mode:
+    Type: String
+    Default: count
+    AllowedValues: [count, block]
+    Description: >-
+      count: an address over RateLimit is only counted (the PerAddress
+      metric).  block: its requests are refused with status 429 until its
+      rate falls.
+
+Conditions:
+  Blocking: !Equals [!Ref Mode, block]
+
+Resources:
+  WebAcl:
+    Type: AWS::WAFv2::WebACL
+    Properties:
+      Name: !Sub ${AWS::StackName}
+      Scope: CLOUDFRONT
+      Description: Rate limit for the Archive in a Box service
+      DefaultAction: {Allow: {}}
+      VisibilityConfig:
+        SampledRequestsEnabled: true
+        CloudWatchMetricsEnabled: true
+        MetricName: !Sub ${AWS::StackName}
+      CustomResponseBodies:
+        slow-down:
+          ContentType: TEXT_PLAIN
+          Content: >-
+            Too many requests from this address in the last five minutes.
+            Wait a few minutes and try again.  For a large job, use one
+            asynchronous query in place of many small ones.
+      Rules:
+        - Name: PerAddress
+          Priority: 1
+          Statement:
+            RateBasedStatement:
+              Limit: !Ref RateLimit
+              EvaluationWindowSec: 300
+              AggregateKeyType: IP
+          Action: !If
+            - Blocking
+            - Block:
+                CustomResponse:
+                  ResponseCode: 429
+                  CustomResponseBodyKey: slow-down
+            - Count: {}
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: !Sub ${AWS::StackName}-PerAddress
+        - Name: Overall
+          Priority: 2
+          Statement:
+            RateBasedStatement:
+              Limit: !Ref OverallLimit
+              EvaluationWindowSec: 300
+              AggregateKeyType: CONSTANT
+              ScopeDownStatement:
+                ByteMatchStatement:
+                  FieldToMatch: {UriPath: {}}
+                  PositionalConstraint: STARTS_WITH
+                  SearchString: /
+                  TextTransformations: [{Priority: 0, Type: NONE}]
+          Action: {Count: {}}
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: !Sub ${AWS::StackName}-Overall
+
+Outputs:
+  WebAclArn:
+    Value: !GetAtt WebAcl.Arn

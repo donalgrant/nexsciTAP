@@ -57,6 +57,12 @@ Parameters:
     Description: >-
       A certificate for DomainName from AWS Certificate Manager, issued in
       us-east-1 (the only region CloudFront reads).  Needed with DomainName.
+  WebAclArn:
+    Type: String
+    Default: ''
+    Description: >-
+      A web ACL for the distribution, from deploy/fargate/waf.yaml (a stack
+      in us-east-1): the rate limit per address.  Empty for none.
   TapImage:
     Type: String
   ProxyImage:
@@ -162,6 +168,7 @@ Parameters:
 Conditions:
   HaveAccessLog: !Not [!Equals [!Ref AccessLogBucket, '']]
   HaveDomain: !Not [!Equals [!Ref DomainName, '']]
+  HaveWebAcl: !Not [!Equals [!Ref WebAclArn, '']]
 
 Resources:
 
@@ -426,6 +433,7 @@ Resources:
         IPV6Enabled: false          # the access check understands IPv4 only
         PriceClass: PriceClass_100
         Aliases: !If [HaveDomain, [!Ref DomainName], !Ref AWS::NoValue]
+        WebACLId: !If [HaveWebAcl, !Ref WebAclArn, !Ref AWS::NoValue]
         ViewerCertificate: !If
           - HaveDomain
           - {AcmCertificateArn: !Ref CertificateArn, SslSupportMethod: sni-only, MinimumProtocolVersion: TLSv1.2_2021}
