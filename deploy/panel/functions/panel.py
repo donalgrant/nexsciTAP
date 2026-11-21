@@ -1130,8 +1130,11 @@ def change_limits(body, who):
                         else {'ParameterKey': k, 'UsePreviousValue': True} for k in now[where]],
             Capabilities=['CAPABILITY_IAM', 'CAPABILITY_NAMED_IAM'], Tags=stacks[where].get('Tags', []))
         record(who, 'limits', {'of': where, **{k: f'{old} to {new}' for k, (old, new) in change.items()}})
-        # What is held of the stack is out of date from this moment.
-        aws('s3').delete_object(Bucket=STATE_BUCKET, Key=f"state/{'stack' if where == 'service' else 'firewall'}.json")
+        # What is held of the stack is out of date from this moment: mark it so, to be read again.
+        # (Overwritten, not deleted: this function may not delete from its bucket.)
+        save_state('stack' if where == 'service' else 'firewall',
+                   {'at': 0, 'status': 'UPDATE_IN_PROGRESS', 'updated': time.time(),
+                    'params': dict(now[where], **{k: v[1] for k, v in change.items()})})
     return {'changed': {where: {k: list(v) for k, v in change.items()} for where, change in changes.items()},
             'restarts': 'service' in changes, 'notes': notes}
 
