@@ -83,6 +83,8 @@ def main():
     for old, new in renames.items():
         if old not in have:
             sys.exit(f'No column "{old}" to rename.  Columns: ' + ', '.join(have))
+        if old in ('ra', 'dec', 'hpx29') or old.startswith('aiab_'):
+            sys.exit(f'"{old}" is a column the searches depend on and keeps its name.')
         if not re.fullmatch(r'[a-z_][a-z0-9_]*', new) or new in ('ra', 'dec', 'hpx29') or new.startswith('aiab_'):
             sys.exit(f'"{new}" cannot be a column name here.')
         if new in have or list(renames.values()).count(new) > 1:

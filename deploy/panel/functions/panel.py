@@ -1183,7 +1183,8 @@ def run_ingest(folder, env, who, what):
     task = r['tasks'][0]['taskArn']
     held.append({'folder': folder, 'task': task, 'started': time.time(), 'status': 'STARTING', 'what': what})
     save_state('ingests', {'list': held[-50:]})
-    record(who, what, {'table': folder, 'task': task.split('/')[-1], 'source': env.get('SRC_KEY') or env.get('SRC_PREFIX')})
+    record(who, what, {'table': folder, 'task': task.split('/')[-1], 'source': env.get('SRC_KEY') or env.get('SRC_PREFIX'),
+                       **{k: env[k] for k in ('RENAME', 'ROW_GROUP') if env.get(k)}})
     return {'folder': folder, 'task': task.split('/')[-1]}
 
 
@@ -1225,14 +1226,62 @@ def view_columns(params):
                         and 'computed by the service' not in (c.get('description') or '')]}
 
 
+COLUMN = re.compile(r'[a-z_][a-z0-9_]{0,62}')
+KEPT_NAMES = ('ra', 'dec', 'hpx29')
+
+
+def rewrite_settings(body):
+    """
+    What a rewrite of a served table changes besides its metadata: columns
+    renamed, and the size of the row groups.  Returns the settings for the
+    conversion task, {} when neither was asked for.
+    """
+    out = {}
+    pairs, seen_old, seen_new = [], set(), set()
+    for r in (body.get('rename') or [])[:200]:
+        old, new = str(r.get('from') or '').strip(), str(r.get('to') or '').strip()
+        if old == new:
+            continue
+        # The old name is whatever the files hold; it travels as OLD=NEW,OLD=NEW.
+        if not old or len(old) > 128 or re.search(r'[,=\x00-\x1f\x7f]', old):
+            raise Refused(f'The column {old!r} cannot be renamed from here.')
+        if old in KEPT_NAMES or old.startswith('aiab_'):
+            raise Refused(f'{old} is a column the searches depend on and keeps its name.')
+        if not COLUMN.fullmatch(new) or new in KEPT_NAMES or new.startswith('aiab_'):
+            raise Refused(f'{new!r} cannot be a column name:  lower-case letters, digits and "_", '
+                          'not starting with a digit, and not a name the service uses.')
+        if old in seen_old or new in seen_new:
+            raise Refused(f'{old} or {new} is named twice in the renames.')
+        seen_old.add(old)
+        seen_new.add(new)
+        pairs.append(f'{old}={new}')
+    if pairs:
+        out['RENAME'] = ','.join(pairs)
+    group = body.get('rowGroup')
+    if group not in (None, '', False):
+        group = str(group).strip().lower()
+        if group != 'auto' and not (group.isdigit() and 1000 <= int(group) <= 1000000):
+            raise Refused('Rows to a row group is "auto" or a number from 1,000 to 1,000,000.')
+        out['ROW_GROUP'] = group
+    return out
+
+
 def start_describe(body, who):
-    """Rewrite a served catalog's files with new units and descriptions, into staging."""
+    """
+    Rewrite a served catalog's files into staging: new units and descriptions,
+    columns renamed, row groups of another size, or any of these together.
+    """
     folder = folder_name(body.get('folder'))
     if not keys_under(f'{CATALOG_PREFIX}/{folder}/')[:1]:
         raise Refused(f'There is no served folder named {folder}.')
+    more = rewrite_settings(body)
     rows = body.get('columns') or []
-    if not rows:
+    if not rows and not more:
         raise Refused('No columns were sent.')
+    if not rows:
+        # Nothing said about the columns: they keep what the files say of them.
+        return run_ingest(folder, {'MODE': 'describe', 'SRC_BUCKET': CATALOG_BUCKET,
+                                   'SRC_PREFIX': f'{CATALOG_PREFIX}/{folder}/', **more}, who, 'describe')
     out = io.StringIO()
     w = csv.writer(out)
     w.writerow(['column_name', 'unit', 'ucd', 'description'])
@@ -1244,7 +1293,7 @@ def start_describe(body, who):
     aws('s3').put_object(Bucket=STATE_BUCKET, Key=key, Body=out.getvalue().encode(), ContentType='text/csv')
     return run_ingest(folder, {'MODE': 'describe', 'SRC_BUCKET': CATALOG_BUCKET,
                                'SRC_PREFIX': f'{CATALOG_PREFIX}/{folder}/', 'SCHEMA_BUCKET': STATE_BUCKET,
-                               'SCHEMA_KEY': key, 'DESCRIPTION': str(body.get('description') or '')[:500]},
+                               'SCHEMA_KEY': key, 'DESCRIPTION': str(body.get('description') or '')[:500], **more},
                       who, 'describe')
 
 

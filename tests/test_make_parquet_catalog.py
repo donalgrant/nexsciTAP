@@ -291,7 +291,7 @@ def test_describe_can_give_a_column_its_name_back(tmp_path):
     assert cols['z'][2] == 'Redshift' and 'z_in' not in cols and 'unit vector' in cols['aiab_z'][2]
 
     # Names the service or the converter owns are refused, and so is a name already taken.
-    for bad in ('z_in=ra', 'z_in=aiab_z', 'z_in=dec', 'nope=q'):
+    for bad in ('z_in=ra', 'z_in=aiab_z', 'z_in=dec', 'nope=q', 'ra=alpha', 'dec=delta', 'hpx29=cell'):
         run = subprocess.run([sys.executable, str(REPO / 'tools' / 'describe_parquet_catalog.py'), str(old),
                               str(tmp_path / 'never'), '--rename', bad], capture_output=True, text=True)
         assert run.returncode != 0, bad

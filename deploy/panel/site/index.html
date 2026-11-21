@@ -365,7 +365,7 @@ const VIEW = {
     const live = (d.ingests || []).filter((i) => i.status === 'RUNNING' || i.status === 'STARTING');
     const converting = live.filter((i) => i.what !== 'check'), testing = live.filter((i) => i.what === 'check').map((i) => i.folder);
     if (testing.length) h += `<div class="notice">Running the full test of ${testing.map((x) => '<b>' + esc(x) + '</b>').join(', ')}.  It reads every row:  about a minute for a small table, several for a large one.  Nothing served changes.  The page refreshes by itself.</div>`;
-    if (converting.length) h += `<div class="notice">Converting ${converting.map((i) => '<b>' + esc(i.folder) + '</b>' + (i.what === 'describe' ? ' (new metadata)' : '')).join(', ')}.  This takes about a minute for a small table and longer for a large one.  When it finishes, the result appears here, at the top of this page, with a <b>Publish</b> button.  The page refreshes by itself.</div>`;
+    if (converting.length) h += `<div class="notice">Converting ${converting.map((i) => '<b>' + esc(i.folder) + '</b>' + (i.what === 'describe' ? ' (rewritten from the served files)' : '')).join(', ')}.  This takes about a minute for a small table and longer for a large one.  When it finishes, the result appears here, at the top of this page, with a <b>Publish</b> button.  The page refreshes by itself.</div>`;
     h += (d.staged || []).map(stagedCard).join('');
 
     h += '<div class="card"><h2>Served</h2><div class="scroll"><table><tr><th>Table</th><th class="num">Rows</th><th class="num">Size</th><th class="num">Files</th><th class="num">Columns</th><th>Metadata</th><th>Checks</th><th class="num">Queries, 24 h</th><th>Changed</th><th></th></tr>' +
@@ -374,7 +374,7 @@ const VIEW = {
         const vs = (d.versions || {})[t.folder] || [];
         return `<tr><td>${t.description ? `<a href="#" class="mono" data-desc="${esc(t.table)}" title="Show or hide the description">${esc(t.table)}</a>` : `<span class="mono">${esc(t.table)}</span>`}${t.folder && t.folder !== t.table ? `<div class="note">folder ${esc(t.folder)}</div>` : ''}${t.description ? `<div class="note" style="max-width:34em" data-descof="${esc(t.table)}" ${openDesc.has(t.table) ? '' : 'hidden'}>${esc(t.description)}</div>` : ''}${t.notServedWhy ? `<div class="badText">Not served:  ${esc(t.notServedWhy)}</div>` : t.served === false ? '<div class="warnText">In the bucket, not served yet</div>' : ''}${(t.warnings || []).map((w) => `<div class="warnText">${esc(w)}</div>`).join('')}</td>` +
           `<td class="num">${num(t.rows)}</td><td class="num">${bytes(t.bytes)}</td><td class="num">${num(t.files)}</td><td class="num">${num(t.columns)}</td><td>${meta}</td><td style="white-space:nowrap">${t.checks ? `<a href="#" data-checks="${esc(t.folder)}">${checkSummary(t.checks, testing.includes(t.folder))}</a>` : ''}</td><td class="num">${num(t.queries24h)}</td><td class="note" style="white-space:nowrap">${when(t.modified)}</td>` +
-          `<td style="white-space:nowrap">${t.folder ? `<button class="sm" data-meta="${esc(t.table)}" data-folder="${esc(t.folder)}" ${t.columns == null ? 'disabled' : ''}>Edit metadata</button> <button class="sm" data-hide="${esc(t.folder)}">Hide</button> <button class="sm" data-remove="${esc(t.folder)}">Remove</button>` : ''}` +
+          `<td style="white-space:nowrap">${t.folder ? `<button class="sm" data-meta="${esc(t.table)}" data-folder="${esc(t.folder)}" ${t.columns == null ? 'disabled' : ''}>Edit</button> <button class="sm" data-hide="${esc(t.folder)}">Hide</button> <button class="sm" data-remove="${esc(t.folder)}">Remove</button>` : ''}` +
           (vs.length ? `<div class="note" style="margin-top:4px">${vs.length} earlier version${vs.length === 1 ? '' : 's'}:  ${vs.slice(0, 4).map((v) => `<a href="#" data-restore="${esc(t.folder)}" data-version="${esc(v.version)}">${esc(stampText(v.version))}</a>`).join(', ')}</div>` : '') + '</td></tr>' +
           (t.checks ? `<tr data-checkrow="${esc(t.folder)}" ${openChecks.has(t.folder) ? '' : 'hidden'}><td colspan="10">${checkPanel(t, testing.includes(t.folder))}</td></tr>` : '');
       }).join('') + `</table></div><p class="note">Click a table's name for its description.  Click its checks to see each one, when it was last made and what it found, and to run them again.  ${bytes(d.totalBytes)} in <code>s3://${esc(d.bucket)}/${esc(d.prefix)}/</code>.  The service takes up to five minutes to show a change.  "Remove" keeps the files as an earlier version;  nothing here deletes a served table for good.</p></div>`;
@@ -399,7 +399,7 @@ const VIEW = {
 
     if ((d.ingests || []).length) {
       h += '<div class="card gap"><h2>Conversions and full tests</h2><table><tr><th>Table</th><th>Kind</th><th>Started</th><th>Took</th><th>State</th><th></th></tr>' +
-        d.ingests.map((i) => `<tr><td class="mono">${esc(i.folder)}</td><td>${i.what === 'describe' ? 'metadata' : i.what === 'check' ? 'full test' : 'new data'}</td><td class="note">${when(i.started)}</td><td class="num">${i.ended ? Math.round(i.ended - i.started) + ' s' : ''}</td>` +
+        d.ingests.map((i) => `<tr><td class="mono">${esc(i.folder)}</td><td>${i.what === 'describe' ? 'rewrite' : i.what === 'check' ? 'full test' : 'new data'}</td><td class="note">${when(i.started)}</td><td class="num">${i.ended ? Math.round(i.ended - i.started) + ' s' : ''}</td>` +
           `<td class="${i.status === 'FAILED' || i.status === 'GONE' ? 'badText' : i.status === 'STAGED' ? 'goodText' : ''}">${{STARTING: 'starting', RUNNING: 'running', STAGED: 'finished', FAILED: 'failed', GONE: 'lost'}[i.status] || esc(i.status)}${i.reason ? ' <span class="note">' + esc(i.reason) + '</span>' : ''}</td>` +
           `<td><button class="sm" data-log="${esc(i.task.split('/').pop())}">Log</button></td></tr>`).join('') + '</table><div id="logslot"></div></div>';
     }
@@ -607,7 +607,7 @@ function stagedCard(r) {
   if ((r.notes || []).length) h += '<div class="notice gap" style="margin-bottom:0">' + r.notes.map(esc).join('<br>') + '</div>';
   if (r.sample) h += `<details class="gap"><summary class="note">First rows</summary><div class="scroll"><table><tr>${r.sample.columns.map((c) => `<th>${esc(c)}</th>`).join('')}</tr>${r.sample.rows.map((row) => `<tr>${row.map((v) => `<td class="mono">${v == null ? '<span class="note">null</span>' : esc(v)}</td>`).join('')}</tr>`).join('')}</table></div></details>`;
   h += `<details class="gap"><summary class="note">Columns</summary><div class="scroll"><table><tr><th>Column</th><th>Type</th><th>Unit</th><th class="num">Empty</th><th>Description</th></tr>${(r.columns || []).map((c) => `<tr><td class="mono">${esc(c.name)}</td><td class="note">${esc(c.type)}</td><td>${esc(c.unit)}${c.unitProblem ? `<div class="warnText">${esc(c.unitProblem)}</div>` : ''}</td><td class="num">${num(c.nulls)}</td><td class="note">${esc(c.description)}${c.ucd ? `<div class="mono">${esc(c.ucd)}</div>` : ''}${c.ucdProblem ? `<div class="warnText">UCD ${esc(c.ucdProblem)}</div>` : ''}</td></tr>`).join('')}</table></div></details>`;
-  return h + `<div class="tools gap"><button class="go" data-publish="${f}" data-replaces="${r.replaces ? 1 : ''}">Publish</button><button data-discard="${f}">Discard</button><span class="note">Converted ${when(r.ended)}${r.mode === 'describe' ? ';  metadata only, the data is unchanged' : ''}.</span></div></div>`;
+  return h + `<div class="tools gap"><button class="go" data-publish="${f}" data-replaces="${r.replaces ? 1 : ''}">Publish</button><button data-discard="${f}">Discard</button><span class="note">Converted ${when(r.ended)}${r.mode === 'describe' ? ';  rewritten from the served files, with the same rows' : ''}.</span></div></div>`;
 }
 function wireDatasets(d) {
   const each = (sel, fn) => document.querySelectorAll(sel).forEach((b) => { b.onclick = (e) => { e.preventDefault(); fn(b.dataset); }; });
@@ -663,17 +663,25 @@ async function metaEditor(table, folder) {
   slot.innerHTML = '<div class="card gap"><p class="note">Reading the columns…</p></div>';
   try {
     const c = await api('columns', {table});
-    slot.innerHTML = `<div class="card gap" id="meta"><h2>Metadata of <span class="mono">${esc(table)}</span></h2>` +
+    slot.innerHTML = `<div class="card gap" id="meta"><h2>Metadata and columns of <span class="mono">${esc(table)}</span></h2>` +
       `<label>Description of the table <input id="mdesc" style="width:100%" value="${esc(c.description)}"></label>` +
       '<div class="scroll gap" style="max-height:55vh;overflow:auto"><table><tr><th>Column</th><th>Type</th><th>Unit</th><th>UCD</th><th style="width:55%">Description</th></tr>' +
-      c.columns.map((x, i) => `<tr><td class="mono">${esc(x.column_name)}</td><td class="note">${esc(x.datatype)}</td><td><input data-i="${i}" data-k="unit" size="9" value="${esc(x.unit)}"></td><td><input data-i="${i}" data-k="ucd" size="16" value="${esc(x.ucd)}"></td><td><input data-i="${i}" data-k="description" style="width:100%" value="${esc(x.description)}"></td></tr>`).join('') +
-      '</table></div><div class="tools gap"><button class="go" id="msave">Save to staging</button><button id="mcancel">Cancel</button><span class="note">Saving rewrites the files with the new metadata, which takes about a minute.  The result then appears at the top of this page with a Publish button.  The data does not change, and nothing is served until you publish.</span></div></div>';
+      c.columns.map((x, i) => `<tr><td class="mono">${x.column_name === 'ra' || x.column_name === 'dec' ? esc(x.column_name) : `<input data-i="${i}" data-k="name" class="mono" size="18" value="${esc(x.column_name)}">`}</td><td class="note">${esc(x.datatype)}</td><td><input data-i="${i}" data-k="unit" size="9" value="${esc(x.unit)}"></td><td><input data-i="${i}" data-k="ucd" size="16" value="${esc(x.ucd)}"></td><td><input data-i="${i}" data-k="description" style="width:100%" value="${esc(x.description)}"></td></tr>`).join('') +
+      '</table></div>' +
+      `<label class="gap" style="display:block"><input type="checkbox" id="mregroup"> Also write the rows in row groups sized for this table's ${c.columns.length} columns.  <span class="note">For a table written before 20 November 2026, or placed in the bucket by hand, on which a query for every column runs out of memory.  The rows and their order stay the same.</span></label>` +
+      '<div class="tools gap"><button class="go" id="msave">Save to staging</button><button id="mcancel">Cancel</button><span class="note">Saving rewrites the files, which takes about a minute for a small table.  The result then appears at the top of this page with a Publish button.  A column takes a new name if you change it here (<span class="mono">ra</span> and <span class="mono">dec</span> keep theirs);  queries that use the old name must change.  The rows do not change, and nothing is served until you publish.</span></div></div>';
     slot.scrollIntoView({behavior: 'smooth'});
     $('#mcancel').onclick = () => { slot.innerHTML = ''; };
     $('#msave').onclick = () => {
       slot.querySelectorAll('input[data-i]').forEach((el) => { c.columns[+el.dataset.i][el.dataset.k] = el.value; });
-      act({action: 'describe', folder, description: $('#mdesc').value, columns: c.columns.map((x) => ({column_name: x.column_name, unit: x.unit, ucd: x.ucd, description: x.description}))},
-          () => { window.scrollTo({top: 0, behavior: 'smooth'}); return 'Rewriting ' + folder + ' with the new metadata.  In about a minute it appears at the top of this page, to publish.'; });
+      const named = (x) => (x.name == null ? x.column_name : x.name.trim());
+      const rename = c.columns.filter((x) => named(x) !== x.column_name).map((x) => ({from: x.column_name, to: named(x)}));
+      const bad = rename.find((r) => !/^[a-z_][a-z0-9_]{0,62}$/.test(r.to));
+      if (bad) return toast(`"${bad.to}" cannot be a column name:  lower-case letters, digits and "_", not starting with a digit.`);
+      if (rename.length && !confirm('Rename ' + rename.map((r) => r.from + ' to ' + r.to).join(', ') + '?\n\nOnce published, queries that use the old name' + (rename.length > 1 ? 's' : '') + ' will fail.')) return;
+      act({action: 'describe', folder, description: $('#mdesc').value, rename, rowGroup: $('#mregroup').checked ? 'auto' : '',
+           columns: c.columns.map((x) => ({column_name: named(x), unit: x.unit, ucd: x.ucd, description: x.description}))},
+          () => { window.scrollTo({top: 0, behavior: 'smooth'}); return 'Rewriting ' + folder + '.  In about a minute it appears at the top of this page, to publish.'; });
     };
   } catch (e) { slot.innerHTML = `<div class="notice err gap">The columns could not be read:  ${esc(e.message)}</div>`; }
 }
