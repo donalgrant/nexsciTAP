@@ -528,7 +528,7 @@ def _read_requests(start, end, deadline):
         for e in page['events']:
             r = _record(e['message'])
             if r is not None:
-                out.append((e['timestamp'] // 3600000, r))
+                out.append((e['timestamp'] // 3600000, r, e.get('eventId') or f"{e['timestamp']}:{e['message']}"))
         if time.time() > deadline:
             return out, False
     return out, True
@@ -540,6 +540,8 @@ def _read_requests(start, end, deadline):
 # (state/tapq/<hour>.json) and held in memory while this copy of the function
 # lives.  Only the hour in progress is read from CloudWatch each time.
 _hours = {}
+_live = {}
+LIVE_OVERLAP = 180      # seconds read again each time, for lines that arrive late
 HOUR_SETTLED = 600      # an hour is kept once it has been over this long: log lines arrive a little late
 HOUR_BLOCK = 24         # hours read from CloudWatch in one go when several are missing
 HOURS_HELD = 24 * 8
@@ -567,7 +569,7 @@ def query_records(hours, budget=20):
         if not whole:
             break                                           # not kept: the next look reads it again
         for h in block:
-            _hours[h] = [r for hour, r in got if hour == h]
+            _hours[h] = [r for hour, r, _ in got if hour == h]
             try:
                 save_state(f'tapq/{h}', _hours[h])
             except ClientError as e:
@@ -578,8 +580,18 @@ def query_records(hours, budget=20):
     recs = []
     for h in range(first, closed + 1):
         recs.extend(_hours.get(h, ()))
-    live, _ = _read_requests((closed + 1) * 3600, at + 60, max(deadline, time.time() + 8))
-    recs.extend(r for _, r in live)
+    # The hours not yet kept: read whole the first time, and after that only
+    # the last few minutes, added to what this copy of the function holds.
+    start = (closed + 1) * 3600
+    if _live.get('start') != start:
+        _live.clear()
+        _live.update(start=start, until=start, seen={})
+    live, whole = _read_requests(max(start, _live['until'] - LIVE_OVERLAP), at + 60, max(deadline, time.time() + 8))
+    for _, r, key in live:
+        _live['seen'][key] = r
+    if whole:
+        _live['until'] = at
+    recs.extend(sorted(_live['seen'].values(), key=lambda r: r.get('t', 0)))
     return [r for r in recs if r.get('t', since) >= since]
 
 

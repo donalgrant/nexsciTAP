@@ -241,6 +241,7 @@ def test_the_request_log_is_read_once_an_hour(panel, monkeypatch):
     monkeypatch.setattr(panel, 'load_state', lambda name, default=None: kept.get(name, default))
     monkeypatch.setattr(panel, 'save_state', lambda name, value: kept.__setitem__(name, json.loads(json.dumps(value))))
     monkeypatch.setattr(panel, '_hours', {})
+    monkeypatch.setattr(panel, '_live', {})
 
     first = panel.query_records(24)
     assert [r['n'] for r in first] == sorted(r['n'] for r in first)             # oldest first
@@ -251,9 +252,13 @@ def test_the_request_log_is_read_once_an_hour(panel, monkeypatch):
     asked.clear()
     assert panel.query_records(24) == first
     assert len(asked) == 1 and asked[0][0] >= this_hour - 1                     # only the open end is read again
+    lines.append((at - 1, {'t': at - 1, 'path': '/sync', 'n': this_hour + 1}))  # a request made since
+    assert panel.query_records(24) == first + [lines[-1][1]]
+    first = first + [lines[-1][1]]
 
     asked.clear()
     monkeypatch.setattr(panel, '_hours', {})                                    # a new copy of the function
+    monkeypatch.setattr(panel, '_live', {})
     assert panel.query_records(24) == first
     assert len(asked) == 1                                                      # the kept hours came from the bucket
     assert len(panel.query_records(3)) < len(first)
