@@ -521,7 +521,11 @@ Resources:
           HealthCheck:
             Command:
               - CMD-SHELL
-              - python -c "import urllib.request as u; u.urlopen(u.Request('http://127.0.0.1:8081/TAP/availability', headers={'X-Viewer-IP': 'health'}), timeout=4)"
+              # It names itself, so that it is not counted with Firefly's
+              # requests, which come from the same address.
+              - >-
+                python -c "import urllib.request as u;
+                u.urlopen(u.Request('http://127.0.0.1:8081/TAP/availability', headers=dict([('X-Viewer-IP', 'health')])), timeout=4)"
             Interval: 10
             Timeout: 5
             Retries: 3
