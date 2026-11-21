@@ -400,6 +400,10 @@ Resources:
                 Effect: Allow
                 Action: [ec2:DescribeVpcs, ec2:DescribeSubnets]
                 Resource: '*'
+              - Sid: LimitsStackReadsItsDistribution   # read only: the stack's outputs give the distribution's name
+                Effect: Allow
+                Action: [cloudfront:GetDistribution, cloudfront:GetDistributionConfig, cloudfront:ListTagsForResource]
+                Resource: !Sub arn:aws:cloudfront::${AWS::AccountId}:distribution/*
               - Sid: LimitsWhyAChangeFailed
                 Effect: Allow
                 Action: cloudformation:DescribeStackEvents
