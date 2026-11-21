@@ -485,10 +485,24 @@ Resources:
               AccessPointId: !Ref WorkAccessPoint
               IAM: ENABLED
       ContainerDefinitions:
+        # The load balancer asks only the proxy whether the task is well, and
+        # the proxy answers for itself.  So the proxy starts last, once TAP and
+        # Firefly each say they are ready (the HealthCheck of each, and the
+        # proxy's DependsOn).  Without this a new task took requests while TAP
+        # was still starting, and a restart answered a few of them with 502
+        # (seen 20 November 2026).  It also stops the proxy first.
         - Name: tap
           Image: !Ref TapImage
           Essential: true
           Memory: 3584
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8081/TAP/availability', timeout=4)"
+            Interval: 10
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 60
           Environment:
             - Name: PUBLIC_URL
               Value: !If [HaveDomain, !Sub 'https://${DomainName}', !Sub 'https://${Distribution.DomainName}']
@@ -525,6 +539,12 @@ Resources:
           Image: !Ref FireflyImage
           Essential: true
           Memory: 3584
+          HealthCheck:
+            Command: [CMD-SHELL, 'curl -fs -o /dev/null http://127.0.0.1:8080/firefly/healthz']
+            Interval: 10
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 120
           Environment:
             - {Name: ADMIN_PASSWORD, Value: !Ref FireflyAdminPassword}
             # Lists the TAP service in Firefly's own menu, by the name
@@ -541,6 +561,9 @@ Resources:
           Image: !Ref ProxyImage
           Essential: true
           Memory: 256
+          DependsOn:
+            - {ContainerName: tap, Condition: HEALTHY}
+            - {ContainerName: firefly, Condition: HEALTHY}
           PortMappings:
             - {ContainerPort: 80}
           Environment:
