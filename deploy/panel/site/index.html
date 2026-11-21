@@ -351,7 +351,7 @@ const VIEW = {
         tile(blocking ? 'Refused' : 'Would be refused', num(total(blocking ? fs.refused : fs.overAddress)), blocking ? 'answered 429, over the limit for one address' : 'over the limit for one address;  counting only') +
         tile('Limit, one address', num(F.limit), 'requests in five minutes') +
         tile('Over the overall mark', num(total(fs.overAll)), `requests after all addresses passed ${num(F.overallLimit)} in five minutes;  counted, not refused`) + '</div>' +
-        `<div class="gap">${lines(fs.allowed, blocking ? fs.refused : fs.overAddress, '')}</div><p class="note">Requests per ${l.period / 60} minutes.  Blue let through, amber ${blocking ? 'refused' : 'over the limit (counted only)'}.  The firewall acts before the address check and before the paused page, so it counts requests the door then refuses.  Its numbers reach here a few minutes late.</p></div>`;
+        `<div class="gap">${lines(fs.allowed, blocking ? fs.refused : fs.overAddress, '')}</div><p class="note">Requests per ${l.period / 60} minutes.  Blue let through, amber ${blocking ? 'refused' : 'over the limit (counted only)'}.  The firewall acts before the address check and before the paused page, so it counts requests the door then refuses.  Its numbers reach here a few minutes late.</p>` + ruleSets(F) + '</div>';
     }
     const busyLimits = [l.limitsStatus, F && F.status].some((x) => x && !/_COMPLETE$/.test(x));
     if (busyLimits) {
@@ -367,9 +367,10 @@ const VIEW = {
        ['QueryMemory', 'Memory, one query', L.QueryMemory, '', 'service'],
        ['QueryTimeout', 'Time, one query', L.QueryTimeout, ' s', 'service'], ['MaxRecLimit', 'Rows, one result', L.MaxRecLimit, '', 'service'],
        ...(F && F.limit ? [['RateLimit', 'Requests in five minutes, one address (firewall)', F.limit, '', 'firewall'], ['Mode', 'Over that, the firewall', F.mode, '', 'firewall'],
+                           ...(F.managed ? [['ManagedRules', 'On a match with one of AWS\'s rule sets, the firewall', F.managed, '', 'firewall']] : []),
                            ['OverallLimit', 'Requests in five minutes, all addresses (firewall;  counted, never refused)', F.overallLimit, '', 'firewall']] : [])];
     limitRows = rows;
-    const shown = (r) => r[0] === 'Mode' ? (r[2] === 'block' ? 'refuses (429)' : 'only counts') : (/Limit$/.test(r[0]) && r[0] !== 'QueryMemory' ? num(r[2]) : esc(r[2] ?? '?')) + r[3];
+    const shown = (r) => r[0] === 'Mode' ? (r[2] === 'block' ? 'refuses (429)' : 'only counts') : r[0] === 'ManagedRules' ? (r[2] === 'block' ? 'refuses (403)' : 'only counts') : (/Limit$/.test(r[0]) && r[0] !== 'QueryMemory' ? num(r[2]) : esc(r[2] ?? '?')) + r[3];
     h += '<div class="card gap" id="limits"><h2>Limits in force</h2><table>' +
       rows.map((r) => `<tr><td>${r[1]}</td><td class="num" data-limit="${r[0]}">${shown(r)}</td></tr>`).join('') + '</table>' +
       `<div class="tools gap"><button id="limedit" ${busyLimits ? 'disabled' : ''}>Change the limits</button><span class="note">Settings of the service's stack, and of the firewall's.  A change here asks CloudFormation to make it, so the stacks stay as the record of what is in force.</span></div></div>`;
@@ -688,13 +689,25 @@ async function uploadAndConvert() {
   } catch (e) { state.innerHTML = `<span class="badText">${esc(e.message)}</span>`; const b = $('#upbusy'); if (b) { b.disabled = false; b.id = 'ugo'; } }
 }
 let limitRows = [];
+// What AWS's rule sets matched: a table inside the Firewall card.  Nothing when the firewall has none.
+function ruleSets(F) {
+  if (!F.managed) return '';
+  const blocking = F.managed === 'block';
+  let h = `<h3 class="gap">AWS's rule sets</h3>`;
+  if (F.rulesError) return h + `<p class="note">Their numbers could not be read:  ${esc(F.rulesError)}</p>`;
+  const rows = F.rules || [];
+  if (!rows.length) return h + `<p class="note">Nothing matched in this period.  A match is ${blocking ? 'refused with status 403, except for the rules ordinary use matches, which are only counted' : 'only counted'}.</p>`;
+  return h + '<table><tr><th>Set</th><th>Rule</th><th class="num">Refused (403)</th><th class="num">Counted, let through</th></tr>' +
+    rows.map((r) => `<tr><td>${esc(r.set)}</td><td>${esc(r.rule)}</td><td class="num">${num(r.refused)}</td><td class="num">${num(r.counted)}</td></tr>`).join('') +
+    `</table><p class="note">Only rules that matched something are listed.  ${blocking ? 'A rule with requests under "Counted" is one that ordinary use of the service matches (an uploaded table, Firefly\'s own requests, a client with no User-Agent), so it never refuses.' : 'The rule sets are only counting:  nothing is refused.'}  If something ordinary was refused, its rule is the one to move to counting in <code>deploy/fargate/waf.yaml</code>.</p>`;
+}
 function limitEditor() {
   const card = $('#limits'); if (!card) return;
   clearTimeout(VIEW.Load.timer);
   card.querySelectorAll('td[data-limit]').forEach((td) => {
     const r = limitRows.find((x) => x[0] === td.dataset.limit);
-    td.innerHTML = r[0] === 'Mode'
-      ? `<select data-set="Mode"><option value="block" ${r[2] === 'block' ? 'selected' : ''}>refuses (429)</option><option value="count" ${r[2] === 'count' ? 'selected' : ''}>only counts</option></select>`
+    td.innerHTML = r[0] === 'Mode' || r[0] === 'ManagedRules'
+      ? `<select data-set="${r[0]}"><option value="block" ${r[2] === 'block' ? 'selected' : ''}>refuses (${r[0] === 'Mode' ? 429 : 403})</option><option value="count" ${r[2] === 'count' ? 'selected' : ''}>only counts</option></select>`
       : `<input data-set="${r[0]}" size="10" style="text-align:right" value="${esc(r[2] ?? '')}">${r[3]}`;
   });
   card.querySelector('.tools').innerHTML = '<button class="go" id="limsave">Save</button><button id="limcancel">Cancel</button><span class="note">A change to any of the first six restarts the service on the new settings:  about five minutes, with the old task answering until the new one is ready.  An async job running on the old task is lost.  A change to the firewall takes about a minute and restarts nothing.  0 means no limit for the first three.</span>';

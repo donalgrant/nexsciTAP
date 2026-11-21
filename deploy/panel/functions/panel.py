@@ -402,7 +402,7 @@ def firewall(hours, period, end):
         held = stack_state(make, 'firewall')
         settings = held['params']
         out.update(status=held.get('status'), undone=held.get('undone'), limit=int(settings.get('RateLimit') or 0), overallLimit=int(settings.get('OverallLimit') or 0),
-                   mode=settings.get('Mode') or '')
+                   mode=settings.get('Mode') or '', managed=settings.get('ManagedRules') or '')
         want = [('allowed', 'AllowedRequests', 'ALL'), ('refused', 'BlockedRequests', f'{name}-PerAddress'),
                 ('overAddress', 'CountedRequests', f'{name}-PerAddress'), ('overAll', 'CountedRequests', f'{name}-Overall')]
         r = aws('cloudwatch', FIREWALL_REGION).get_metric_data(
@@ -414,7 +414,46 @@ def firewall(hours, period, end):
     except Exception as e:
         print(f'firewall: {e!r}')
         out['error'] = str(e)[:200]
+        return out
+    try:
+        out['rules'] = firewall_rules(name, hours, end)
+    except Exception as e:                  # the rate limit's numbers are still worth showing
+        print(f'firewall rules: {e!r}')
+        out['rulesError'] = str(e)[:200]
     return out
+
+
+def firewall_rules(name, hours, end):
+    """
+    What AWS's rule sets on the web ACL matched in the period, one entry for
+    each rule that matched anything: [{'set', 'rule', 'refused', 'counted'}],
+    the busiest first.  CloudWatch has a metric only for a rule that has
+    matched, so the rules are found by a search and not from a list.
+    """
+    period = max(300, int(hours * 3600))
+    def search(i, what):
+        return {'Id': i, 'ReturnData': True, 'Expression':
+                "SEARCH('{AWS/WAFV2,ManagedRuleGroup,ManagedRuleGroupRule,WebACL} "
+                f'WebACL="{name}" MetricName="{what}"\', \'Sum\', {period})'}
+    r = aws('cloudwatch', FIREWALL_REGION).get_metric_data(
+        MetricDataQueries=[search('refused', 'BlockedRequests'), search('counted', 'CountedRequests')],
+        StartTime=end - timedelta(hours=hours), EndTime=end)
+    return rule_totals(r['MetricDataResults'])
+
+
+def rule_totals(results):
+    """The search's results as rows.  A result's label is 'set rule metric' (CloudWatch's default for a search)."""
+    rows = {}
+    for res in results:
+        words = (res.get('Label') or '').split()
+        if len(words) < 2 or res.get('Id') not in ('refused', 'counted'):
+            continue
+        total = int(round(sum(res.get('Values') or [])))
+        if total:
+            row = rows.setdefault((words[0], words[1]), {'set': words[0].replace('AWSManagedRules', ''), 'rule': words[1],
+                                                         'refused': 0, 'counted': 0})
+            row[res['Id']] += total
+    return sorted(rows.values(), key=lambda x: -(x['refused'] + x['counted']))
 
 
 def stack_parameters():
@@ -1084,6 +1123,7 @@ LIMITS = {
     'RateLimit': ('firewall', _whole(10, 1000000), 'requests in five minutes, one address'),
     'OverallLimit': ('firewall', _whole(10, 10000000), 'requests in five minutes, all addresses (counted only)'),
     'Mode': ('firewall', _mode, 'whether the firewall refuses or only counts'),
+    'ManagedRules': ('firewall', _mode, "whether AWS's rule sets refuse or only count"),
 }
 
 

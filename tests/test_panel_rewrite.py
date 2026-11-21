@@ -154,6 +154,26 @@ def test_the_firewall_is_found_from_the_service_stack(panel, monkeypatch):
     assert got['name'] == 'aiab-waf' and 'no access' in got['error'] and 'series' not in got
 
 
+def test_what_the_rule_sets_matched(panel):
+    """One row for each rule that matched, refused and counted side by side, the busiest first."""
+    results = [{'Id': 'refused', 'Label': 'AWSManagedRulesAmazonIpReputationList AWSManagedReconnaissanceList BlockedRequests', 'Values': [10.0, 2.0]},
+               {'Id': 'refused', 'Label': 'AWSManagedRulesCommonRuleSet NoUserAgent_HEADER BlockedRequests', 'Values': [3.0]},
+               {'Id': 'counted', 'Label': 'AWSManagedRulesCommonRuleSet NoUserAgent_HEADER CountedRequests', 'Values': [40.0]},
+               {'Id': 'counted', 'Label': 'AWSManagedRulesCommonRuleSet SizeRestrictions_BODY CountedRequests', 'Values': []},
+               {'Id': 'counted', 'Label': '', 'Values': [5.0]}, {'Id': 'other', 'Label': 'a b c', 'Values': [5.0]}]
+    assert panel.rule_totals(results) == [
+        {'set': 'CommonRuleSet', 'rule': 'NoUserAgent_HEADER', 'refused': 3, 'counted': 40},
+        {'set': 'AmazonIpReputationList', 'rule': 'AWSManagedReconnaissanceList', 'refused': 12, 'counted': 0}]
+    assert panel.rule_totals([]) == []
+
+
+def test_the_rule_sets_can_be_set_to_count(panel):
+    now = {'service': {}, 'firewall': {'RateLimit': '1000', 'Mode': 'block', 'ManagedRules': 'block'}}
+    assert panel.limit_changes({'ManagedRules': 'count'}, now) == {'firewall': {'ManagedRules': ('block', 'count')}}
+    with pytest.raises(panel.Refused):
+        panel.limit_changes({'ManagedRules': 'off'}, now)
+
+
 NOW = {'service': {'ClientLimit': '6', 'AsyncLimit': '8', 'AsyncClientLimit': '3', 'QueryMemory': '1GB',
                    'QueryTimeout': '300', 'MaxRecLimit': '2000000', 'DesiredCount': '1', 'PanelSecret': 'x'},
        'firewall': {'RateLimit': '1000', 'OverallLimit': '5000', 'Mode': 'block'}}
