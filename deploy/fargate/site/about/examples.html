@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Archive in a Box:  using the TAP service</title>
+<link rel="stylesheet" href="/about/site.css">
+</head>
+<body>
+<header><div class="wrap">
+  <a href="/"><img src="/about/ipac.png" alt="IPAC"></a>
+  <a class="name" href="/">Archive in a Box</a>
+  <img class="caltech" src="/about/caltech.png" alt="Caltech">
+</div></header>
+
+<main><div class="wrap doc">
+  <h1>Using the TAP service</h1>
+  <p class="lede">The service speaks the IVOA Table Access Protocol, so any TAP client works with it.  Queries are written in ADQL.</p>
+  <div class="addr"><code class="tapurl">https://aiab.ipac.caltech.edu/TAP</code><button class="copy" type="button">Copy</button></div>
+  <p class="toc"><a href="#pyvo">pyvo</a><a href="#upload">Your own table</a><a href="#astroquery">astroquery</a><a href="#curl">curl</a><a href="#topcat">TOPCAT</a><a href="#async">Sync and async</a><a href="#refused">Refusals</a><a href="#know">Worth knowing</a></p>
+
+  <section id="pyvo">
+    <h2>pyvo</h2>
+    <p>What the service holds, then a cone search.</p>
+<pre>import pyvo
+tap = pyvo.dal.TAPService('https://aiab.ipac.caltech.edu/TAP')
+
+<span class="c"># what is here?</span>
+for t in tap.search("SELECT table_name, description FROM TAP_SCHEMA.tables WHERE schema_name = 'main'"):
+    print(t['table_name'], t['description'])
+
+<span class="c"># AllWISE sources within half a degree of a position</span>
+cone = tap.search("""
+    SELECT designation, ra, dec, w1mpro, w2mpro
+    FROM allwise
+    WHERE CONTAINS(POINT('ICRS', ra, dec), CIRCLE('ICRS', 43.457, -73.135, 0.5)) = 1
+""").to_table()</pre>
+    <p>That cone returns 15,662 sources.  Boxes and polygons work the same way, with <code>BOX</code> and <code>POLYGON</code> in place of <code>CIRCLE</code>.</p>
+  </section>
+
+  <section id="upload">
+    <h2>Cross-match with your own table</h2>
+    <p>Send a table with the query and name it <code>TAP_UPLOAD.<i>name</i></code>.  Any table with positions will do;  an astropy table is the simplest.  Here, <code>galaxies</code> has columns <code>designation</code>, <code>ra</code> and <code>dec</code>.</p>
+<pre>match = tap.run_async("""
+    SELECT g.designation AS galaxy, w.designation AS wise, w.w1mpro, w.w2mpro
+    FROM allwise w, TAP_UPLOAD.mine g
+    WHERE CONTAINS(POINT('ICRS', w.ra, w.dec),
+                   CIRCLE('ICRS', g.ra, g.dec, 0.000833)) = 1      <span class="c">-- 3 arcsec, written as a number</span>
+""", uploads={'mine': galaxies}).to_table()</pre>
+    <p>With 949 uploaded positions against the 58.6 million rows of <code>allwise</code>, this takes about 5 seconds.  The table must be sent with the request;  an upload given as a URL is refused.</p>
+  </section>
+
+  <section id="astroquery">
+    <h2>astroquery</h2>
+<pre>from astroquery.utils.tap.core import TapPlus
+tap = TapPlus(url='https://aiab.ipac.caltech.edu/TAP', verbose=False)
+
+<span class="c"># the brightest SDSS DR16 quasars beyond redshift 5</span>
+job = tap.launch_job("""
+    SELECT TOP 10 sdss_name, ra, dec, z, psfmag_i
+    FROM sdss_dr16q
+    WHERE z &gt; 5 AND psfmag_i &gt; 0
+    ORDER BY psfmag_i""")
+print(job.get_results())
+
+<span class="c"># an asynchronous job:  Chandra sources within 2 degrees of the Orion Nebula</span>
+job = tap.launch_job_async("""
+    SELECT name, ra, dec, significance
+    FROM heasarc_csc
+    WHERE CONTAINS(POINT('ICRS', ra, dec), CIRCLE('ICRS', 83.82, -5.39, 2.0)) = 1""")
+orion = job.get_results()</pre>
+  </section>
+
+  <section id="curl">
+    <h2>curl</h2>
+<pre><span class="c"># a cone search, answered as CSV</span>
+curl -s https://aiab.ipac.caltech.edu/TAP/sync \
+     --data-urlencode "LANG=ADQL" --data-urlencode "FORMAT=csv" \
+     --data-urlencode "QUERY=SELECT TOP 5 source_id, ra, dec, phot_g_mean_mag FROM gaia_bright
+                             WHERE CONTAINS(POINT('ICRS', ra, dec), CIRCLE('ICRS', 83.82, -5.39, 5.0)) = 1
+                             ORDER BY phot_g_mean_mag"
+
+<span class="c"># the standard TAP documents:  tables and columns, and what the service can do</span>
+curl -s https://aiab.ipac.caltech.edu/TAP/tables
+curl -s https://aiab.ipac.caltech.edu/TAP/capabilities</pre>
+    <p><code>FORMAT</code> may also be <code>votable</code> (the default), <code>ipac</code>, <code>tsv</code> or <code>json</code>.</p>
+  </section>
+
+  <section id="topcat">
+    <h2>TOPCAT</h2>
+    <p>In the VO menu choose "Table Access Protocol (TAP) Query", enter the address above as the TAP URL and press "Use Service".  The tables and their columns appear on the left;  type ADQL below and press "Run Query".  A table already loaded in TOPCAT can be used in a query as <code>TAP_UPLOAD.t1</code>.</p>
+  </section>
+
+  <section id="async">
+    <h2>Sync and async</h2>
+    <p>A synchronous query (<code>/TAP/sync</code>, pyvo's <code>search</code>) keeps the connection open until the answer comes.  It must start answering within 60 seconds, or the connection is closed with status 504 while the query runs on to no purpose.</p>
+    <p style="margin:0">An asynchronous job (<code>/TAP/async</code>, pyvo's <code>run_async</code> or <code>submit_job</code>) is started, polled and fetched, and may take up to 300 seconds.  Its result is kept for 7 days.  Use it for anything that scans a whole large table, and for uploads of any size.</p>
+  </section>
+
+  <section id="refused">
+    <h2>What a refusal means</h2>
+    <table>
+      <thead><tr><th>What you see</th><th>Why, and what to do</th></tr></thead>
+      <tbody>
+      <tr><td>403</td><td>The request came from outside IPAC and Caltech, which is all the pilot admits.  From elsewhere, use the Caltech VPN.</td></tr>
+      <tr><td>"This archive is paused"</td><td>The service is switched off outside its hours to save cost.  Nothing is lost;  ask its administrator to start it.</td></tr>
+      <tr><td>429, "too many requests in progress"</td><td>One address may have 6 requests in progress at once.  Wait for one to finish.</td></tr>
+      <tr><td>An async job fails, "jobs running"</td><td>One address may have 3 async jobs running, and the service runs 8 in all.  Submit it again when one has finished.</td></tr>
+      <tr><td>429 with a volume and a time to try again</td><td>One address is sent at most 20 GB in a day.  Ask for fewer columns or rows, or wait the time given.</td></tr>
+      <tr><td>429, plain</td><td>More than 1,000 requests from one address in five minutes.  It clears a few minutes after the requests slow down.</td></tr>
+      <tr><td>504</td><td>A synchronous query took more than 60 seconds to start answering.  Send it as an async job.</td></tr>
+      <tr><td>An error naming memory or time</td><td>A query may use 1 GB of memory and 300 seconds.  Select fewer columns, or narrow the search by position.</td></tr>
+      <tr><td>A result of exactly 2,000,000 rows</td><td>That is the most one query returns.  Split the query, by position or by a range of a column.</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section id="know">
+    <h2>Worth knowing</h2>
+    <ul class="plain" style="margin:0">
+      <li>The radius of a cross-match must be written as a number.  <code>CIRCLE('ICRS', g.ra, g.dec, 3.0 / 3600)</code> is refused;  write <code>0.000833</code>.</li>
+      <li>Positions are <code>ra</code> and <code>dec</code>, in degrees, in every table.</li>
+      <li>Each table also carries columns the service adds for its own index:  <code>hpx29</code>, <code>aiab_x</code>, <code>aiab_y</code> and <code>aiab_z</code>.  They can be ignored.</li>
+      <li>A mistaken column name is answered with the engine's own message, which shows the query as it was rewritten.</li>
+      <li>Column units and descriptions are in <a href="/TAP/tables">/TAP/tables</a> and in <code>TAP_SCHEMA.columns</code>.</li>
+    </ul>
+  </section>
+</div></main>
+
+<footer><div class="wrap">
+  <p class="credit">Archive in a Box is a pilot of IPAC at Caltech.  It is built on nexsciTAP, from the NASA Exoplanet Science Institute (NExScI), and on Firefly, from the NASA/IPAC Infrared Science Archive (IRSA).</p>
+</div></footer>
+<script src="/about/site.js"></script>
+</body>
+</html>

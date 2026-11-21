@@ -1,0 +1,58 @@
+/* The service's own pages:  the front page and the examples. */
+:root { --navy:#1F3A5F; --blue:#2E6DA4; --lblue:#DCE8F4; --orange:#E8730C;
+        --text:#1d2733; --muted:#5b6876; --line:#d5dbe3; --bg:#f6f8fb; }
+* { box-sizing:border-box; }
+body { margin:0; font:16px/1.5 -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; color:var(--text); background:#fff; }
+a { color:var(--blue); }
+.wrap { max-width:1040px; margin:0 auto; padding:0 20px; }
+header { border-bottom:3px solid var(--navy); }
+header .wrap { display:flex; align-items:center; justify-content:space-between; gap:16px; padding-top:14px; padding-bottom:14px; }
+header img { display:block; height:44px; width:auto; }
+header img.caltech { height:38px; }
+header .name { flex:1; text-align:center; font-weight:700; color:var(--navy); font-size:18px; text-decoration:none; }
+.hero { background:var(--bg); border-bottom:1px solid var(--line); padding:34px 0 30px; }
+h1 { margin:0 0 8px; font-size:34px; line-height:1.15; color:var(--navy); }
+.lede { margin:0 0 22px; max-width:46em; font-size:18px; color:#33414f; }
+.doors { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+.door { display:block; text-decoration:none; border-radius:10px; padding:18px 20px; border:2px solid; }
+.door b { display:block; font-size:21px; margin-bottom:2px; }
+.door span { font-size:14.5px; }
+.door.ff { background:var(--orange); border-color:var(--orange); color:#fff; }
+.door.tap { background:#fff; border-color:var(--blue); color:var(--navy); }
+.door.tap span { color:var(--muted); }
+.door:hover { filter:brightness(.97); }
+.status { margin:16px 0 0; font-size:14px; color:var(--muted); }
+main { padding:28px 0 8px; }
+.grid { display:grid; grid-template-columns:1.15fr 1fr; gap:22px; }
+.stack { display:grid; gap:22px; align-content:start; min-width:0; }
+section { border:1px solid var(--line); border-radius:10px; padding:18px 20px; background:#fff; min-width:0; }
+h2 { margin:0 0 10px; font-size:18px; color:var(--navy); }
+h3 { margin:18px 0 6px; font-size:16px; color:var(--navy); }
+p { margin:0 0 10px; }
+table { width:100%; border-collapse:collapse; font-size:14.5px; }
+th, td { text-align:left; padding:6px 8px 6px 0; border-bottom:1px solid #e8ecf1; vertical-align:top; }
+th { font-size:12.5px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); font-weight:600; }
+td code { color:var(--navy); font-weight:600; }
+.more { margin:10px 0 0; font-size:14px; }
+.addr { display:flex; gap:8px; align-items:center; background:var(--lblue); border-radius:8px; padding:9px 12px; margin-bottom:12px; overflow-x:auto; }
+.addr code { flex:1; font-size:14.5px; color:var(--navy); white-space:nowrap; }
+.copy { border:1px solid var(--blue); background:#fff; color:var(--blue); border-radius:6px; padding:3px 10px; font-size:13px; cursor:pointer; }
+pre { margin:0 0 12px; background:#f4f5f7; border:1px solid #c9ced6; border-radius:8px; padding:12px 14px; font:13px/1.5 ui-monospace, Menlo, Consolas, monospace; overflow-x:auto; }
+pre .c { color:#8a5a00; }
+code { font-family:ui-monospace, Menlo, Consolas, monospace; font-size:.92em; }
+ul.plain { margin:0 0 10px; padding-left:1.1em; }
+ul.plain li { margin-bottom:5px; }
+.links a { display:inline-block; margin:0 14px 4px 0; }
+.doc { max-width:820px; }
+.doc section { margin-bottom:22px; }
+.toc a { display:inline-block; margin:0 14px 4px 0; }
+footer { margin-top:30px; border-top:1px solid var(--line); background:var(--bg); padding:22px 0 26px; }
+.marks { display:flex; flex-wrap:wrap; align-items:center; gap:14px 26px; margin-bottom:14px; }
+.marks img { height:34px; width:auto; display:block; }
+.marks img.caltech { height:30px; }
+.credit { font-size:13.5px; color:var(--muted); max-width:60em; margin:0; }
+@media (max-width:760px) {
+  .doors, .grid { grid-template-columns:1fr; }
+  h1 { font-size:27px; }
+  header .name { display:none; }
+}

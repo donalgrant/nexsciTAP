@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Archive in a Box</title>
+<link rel="stylesheet" href="/about/site.css">
+</head>
+<body>
+<header><div class="wrap">
+  <img src="/about/ipac.png" alt="IPAC">
+  <a class="name" href="/">Archive in a Box</a>
+  <img class="caltech" src="/about/caltech.png" alt="Caltech">
+</div></header>
+
+<div class="hero"><div class="wrap">
+  <h1>Archive in a Box</h1>
+  <p class="lede">A small astronomical archive, run as a pilot at IPAC.  It serves catalogs of up to about 100 million rows, with positional search and cross-match against a table of your own, through Firefly in the browser or any TAP client.</p>
+  <div class="doors">
+    <a class="door ff" href="/firefly/"><b>Search with Firefly</b><span>Cone, polygon and multi-object searches in the browser, with tables, charts and sky images.</span></a>
+    <a class="door tap" href="#tap"><b>Query with TAP</b><span>ADQL from pyvo, astroquery, TOPCAT or curl.  The address and an example are below.</span></a>
+  </div>
+  <p class="status">A pilot:  open to IPAC and Caltech addresses only, and normally running on weekdays, 07:30 to 19:30 Pacific.</p>
+</div></div>
+
+<main><div class="wrap grid">
+  <div class="stack">
+    <section>
+      <h2>Catalogs</h2>
+      <table id="catalogs">
+        <thead><tr><th>Table</th><th>What it is</th></tr></thead>
+        <tbody><tr><td colspan="2">Reading the list from the service…</td></tr></tbody>
+      </table>
+      <p class="more" id="catalog-note"></p>
+    </section>
+    <section>
+      <h2>Limits</h2>
+      <ul class="plain">
+        <li>A synchronous query must start answering within 60 seconds.  Send longer ones as async jobs.</li>
+        <li>300 seconds and 2,000,000 rows per query.</li>
+        <li>3 async jobs running per client;  results are kept 7 days.</li>
+        <li>20 GB sent to one address in a day.</li>
+      </ul>
+      <p class="more"><a href="/about/examples.html#refused">What a refusal means, and what to do about it</a></p>
+    </section>
+  </div>
+
+  <div class="stack">
+    <section id="tap">
+      <h2>The TAP service</h2>
+      <div class="addr"><code class="tapurl">https://aiab.ipac.caltech.edu/TAP</code><button class="copy" type="button">Copy</button></div>
+<pre><span class="c"># a cone search, with pyvo</span>
+import pyvo
+tap = pyvo.dal.TAPService(
+    'https://aiab.ipac.caltech.edu/TAP')
+cone = tap.search("""
+    SELECT designation, ra, dec, w1mpro
+    FROM allwise
+    WHERE CONTAINS(POINT('ICRS', ra, dec),
+          CIRCLE('ICRS', 43.457, -73.135, 0.5)) = 1""")</pre>
+      <div class="links">
+        <a href="/about/examples.html">Examples:  pyvo, astroquery, curl, TOPCAT</a>
+        <a href="/about/examples.html#upload">Cross-match with your own table</a>
+        <a href="/about/examples.html#async">Sync and async</a>
+      </div>
+    </section>
+    <section>
+      <h2>About</h2>
+      <p style="margin:0">Catalogs are Parquet files in cloud storage, queried in place.  The TAP server is NExScI's nexsciTAP with an added engine, and the browser front end is IRSA's Firefly, unmodified.  Answers were compared query by query with IRSA's own service.</p>
+    </section>
+  </div>
+</div></main>
+
+<footer><div class="wrap">
+  <div class="marks">
+    <img src="/about/ipac.png" alt="IPAC">
+    <img class="caltech" src="/about/caltech.png" alt="Caltech">
+  </div>
+  <p class="credit">Archive in a Box is a pilot of IPAC at Caltech.  It is built on nexsciTAP, from the NASA Exoplanet Science Institute (NExScI), and on Firefly, from the NASA/IPAC Infrared Science Archive (IRSA).</p>
+</div></footer>
+<script src="/about/site.js"></script>
+</body>
+</html>

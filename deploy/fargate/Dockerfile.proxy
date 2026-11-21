@@ -2,6 +2,7 @@
 # Build context: this directory.
 FROM public.ecr.aws/nginx/nginx:1.27-alpine
 COPY nginx.conf.template /etc/nginx/templates/default.conf.template
+COPY site /usr/share/nginx/aiab
 
 # Defaults for a deployment with no TLS in front of it.  One that is served
 # over HTTPS sets PUBLIC_SCHEME=https and turns the cookie line into a comment.
