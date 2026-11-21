@@ -76,3 +76,62 @@ def test_a_move_whose_ending_was_lost_is_not_in_progress(panel, monkeypatch):
     got = {m['folder']: m['status'] for m in panel.moves()}
     assert got == {'lost': 'UNKNOWN', 'busy': 'RUNNING', 'done': 'DONE'}
     assert held[1]['status'] == 'RUNNING'           # what is stored is not changed by reading it
+
+
+class _FakeS3:
+    """Enough of S3 to store objects and to refuse a write whose condition no longer holds."""
+
+    def __init__(self, error):
+        import threading
+        self.objects, self.version, self.lock, self.error, self.refused = {}, 0, threading.Lock(), error, 0
+
+    def _fail(self, code):
+        e = self.error(code)
+        e.response = {'Error': {'Code': code}}
+        return e
+
+    def get_object(self, Bucket, Key):
+        import io
+        import threading
+        with self.lock:
+            if Key not in self.objects:
+                raise self._fail('NoSuchKey')
+            body, tag = self.objects[Key]
+        threading.Event().wait(0.002)   # let another thread in between the read and the write
+        return {'Body': io.BytesIO(body), 'ETag': tag}
+
+    def put_object(self, Bucket, Key, Body, ContentType=None, IfMatch=None, IfNoneMatch=None):
+        with self.lock:
+            have = self.objects.get(Key)
+            if (IfNoneMatch == '*' and have) or (IfMatch and (not have or have[1] != IfMatch)):
+                self.refused += 1
+                raise self._fail('PreconditionFailed')
+            self.version += 1
+            self.objects[Key] = (Body, f'"{self.version}"')
+
+
+def test_changes_made_at_the_same_moment_are_all_kept(panel, monkeypatch):
+    """Forty appends from eight threads to one stored list: every one is there afterward."""
+    import threading
+    s3 = _FakeS3(panel.ClientError)
+    monkeypatch.setattr(panel, 'aws', lambda name, region=None: s3)
+    monkeypatch.setattr(panel.time, 'sleep', lambda s: None)
+
+    def work(k):
+        for i in range(5):
+            panel.change_state('moves', lambda d: {'list': d.get('list', []) + [f'{k}-{i}']}, {}, tries=200)
+    threads = [threading.Thread(target=work, args=(k,)) for k in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    kept = panel.load_state('moves')['list']
+    assert sorted(kept) == sorted(f'{k}-{i}' for k in range(8) for i in range(5))
+    assert s3.refused > 0                # the test did make writes collide
+
+    # A change that decides to write nothing writes nothing, and a refusal inside it comes out.
+    before = s3.version
+    assert panel.change_state('moves', lambda d: None, {})['list'] == kept
+    with pytest.raises(panel.Refused):
+        panel.change_state('moves', lambda d: (_ for _ in ()).throw(panel.Refused('no')), {})
+    assert s3.version == before

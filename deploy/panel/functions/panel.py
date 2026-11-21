@@ -69,6 +69,7 @@ signed out everywhere, stops working at once.  "/api/config", which tells
 the page where to sign in, is the one request answered without a token.
 """
 
+import copy
 import csv
 import io
 import json
@@ -134,6 +135,50 @@ def load_state(name, default=None):
 def save_state(name, value):
     aws('s3').put_object(Bucket=STATE_BUCKET, Key=f'state/{name}.json',
                          Body=json.dumps(value).encode(), ContentType='application/json')
+
+
+def change_state(name, change, default=None, tries=12):
+    """
+    Read a stored value, change it and store it, so that no other change made
+    meanwhile is lost.  change(value) returns the new value, or None to leave
+    it as it is.  The write goes through only if the stored object is still
+    the one that was read; if another run of this function wrote first, read
+    again and repeat.  (Every list here is one object that several runs append
+    to.  Before this, six publishes started in 40 s lost the note of one's
+    ending, on 20 November 2026.)  Returns the value as stored.
+    """
+    import random
+    s3, key = aws('s3'), f'state/{name}.json'
+    for attempt in range(tries):
+        try:
+            got = s3.get_object(Bucket=STATE_BUCKET, Key=key)
+            value, guard = json.loads(got['Body'].read()), {'IfMatch': got['ETag']}
+        except ValueError:
+            value, guard = copy.deepcopy(default), {'IfMatch': got['ETag']}
+        except ClientError as e:
+            if (getattr(e, 'response', None) or {}).get('Error', {}).get('Code') not in ('NoSuchKey', '404'):
+                raise
+            value, guard = copy.deepcopy(default), {'IfNoneMatch': '*'}
+        new = change(value)
+        if new is None:
+            return value
+        try:
+            s3.put_object(Bucket=STATE_BUCKET, Key=key, Body=json.dumps(new).encode(),
+                          ContentType='application/json', **guard)
+            return new
+        except ClientError as e:
+            code = (getattr(e, 'response', None) or {}).get('Error', {}).get('Code')
+            if code not in ('PreconditionFailed', 'ConditionalRequestConflict', '412', '409'):
+                raise
+            time.sleep(random.uniform(0.02, 0.1) * (attempt + 1))
+        except Exception as e:
+            # An AWS library too old to know the condition: write as before, and say so in the log.
+            if type(e).__name__ != 'ParamValidationError':
+                raise
+            print(f'change_state: conditional writes are not available here ({e!r}); {name} was written without one')
+            save_state(name, new)
+            return new
+    raise RuntimeError(f'The stored {name} kept changing;  it could not be updated in {tries} tries.')
 
 
 def cached(name, max_age, make):
@@ -745,9 +790,8 @@ DEFAULT_SCHEDULE = {'enabled': False, 'days': [0, 1, 2, 3, 4], 'start': '07:00',
 
 def record(who, action, detail):
     """Append to the record of controls used."""
-    entries = load_state('record', {}).get('entries', [])
-    entries.append({'at': time.time(), 'who': who, 'action': action, 'detail': detail})
-    save_state('record', {'entries': entries[-2000:]})
+    entry = {'at': time.time(), 'who': who, 'action': action, 'detail': detail}
+    change_state('record', lambda d: {'entries': (d.get('entries', []) + [entry])[-2000:]}, {})
 
 
 def view_record(params):
@@ -1118,7 +1162,9 @@ def ingests():
                         i['reason'] = t.get('stoppedReason') or (t.get('containers') or [{}])[0].get('reason') or ''
                 else:
                     i['status'] = 'STARTING' if t['lastStatus'] in ('PROVISIONING', 'PENDING', 'ACTIVATING') else 'RUNNING'
-            save_state('ingests', {'list': held[-50:]})
+            learned = {i['task']: i for i in live}
+            held = change_state('ingests', lambda d: {'list': [learned.get(i['task'], i) for i in d.get('list', [])][-50:]},
+                                {})['list']
         except ClientError as e:
             print(f'ingests: {e!r}')
     return list(reversed(held))[:15]
@@ -1181,8 +1227,8 @@ def run_ingest(folder, env, who, what):
     if not r.get('tasks'):
         raise Refused('The conversion task could not be started: ' + json.dumps(r.get('failures', []))[:300])
     task = r['tasks'][0]['taskArn']
-    held.append({'folder': folder, 'task': task, 'started': time.time(), 'status': 'STARTING', 'what': what})
-    save_state('ingests', {'list': held[-50:]})
+    started = {'folder': folder, 'task': task, 'started': time.time(), 'status': 'STARTING', 'what': what}
+    change_state('ingests', lambda d: {'list': (d.get('list', []) + [started])[-50:]}, {})
     record(who, what, {'table': folder, 'task': task.split('/')[-1], 'source': env.get('SRC_KEY') or env.get('SRC_PREFIX'),
                        **{k: env[k] for k in ('RENAME', 'ROW_GROUP') if env.get(k)}})
     return {'folder': folder, 'task': task.split('/')[-1]}
@@ -1367,6 +1413,14 @@ def start_move(action, folder, who, **more):
         move['expect'] = {'rows': report.get('rows'), 'cone': report.get('checkCone')}
         move['compare'] = report.get('compare')
 
+    def add(d):
+        held = d.get('list', [])
+        # Looked at again here, in the same step as the write: two starts at once cannot both pass.
+        if any(m['folder'] == folder and m['status'] == 'RUNNING' and time.time() - m['started'] < MOVE_LIMIT for m in held):
+            raise Refused(f'{folder} is already being moved.  Wait for that to finish.')
+        return {'list': (held + [move])[-40:]}
+    change_state('moves', add, {})
+
     # The canary must not ask a table for an answer that is about to change.
     table = table_of(folder)
     if action in ('publish', 'hide', 'remove'):
@@ -1376,10 +1430,6 @@ def start_move(action, folder, who, **more):
         canary_table(table, on=True, notBefore=time.time() + 420, why='')        # the files it had; give the service time to list it
     elif action == 'restore':
         canary_table(table, on=False, check=None, why='an earlier version was restored; no answer is known for it until it is published again')
-    # Read the list again: the checks above took seconds, and another move may have ended meanwhile.
-    held = load_state('moves', {}).get('list', [])
-    held.append(move)
-    save_state('moves', {'list': held[-40:]})
     aws('lambda').invoke(FunctionName=os.environ['AWS_LAMBDA_FUNCTION_NAME'], InvocationType='Event',
                          Payload=json.dumps({'move': move}).encode())
     return {'started': action, 'folder': folder}
@@ -1462,19 +1512,19 @@ def do_move(move):
             detail['restored'] = move['version']
         status, error = 'DONE', None
         if action == 'publish' and move.get('expect'):
-            checks = load_state('verify', {}).get('list', [])
-            checks.append({'folder': folder, 'since': time.time(), 'status': 'WAITING', 'expect': move['expect']})
-            save_state('verify', {'list': checks[-30:]})
+            waiting = {'folder': folder, 'since': time.time(), 'status': 'WAITING', 'expect': move['expect']}
+            change_state('verify', lambda d: {'list': (d.get('list', []) + [waiting])[-30:]}, {})
     except Exception as e:
         print(f'move failed: {e!r}')
         status, error = 'FAILED', str(e)[:300]
         detail['error'] = error
 
-    held = load_state('moves', {}).get('list', [])
-    for m in held:
-        if m.get('id') == move['id']:
-            m.update(status=status, ended=time.time(), error=error)
-    save_state('moves', {'list': held[-40:]})
+    def end(d):
+        for m in d.get('list', []):
+            if m.get('id') == move['id']:
+                m.update(status=status, ended=time.time(), error=error)
+        return {'list': d.get('list', [])[-40:]}
+    change_state('moves', end, {})
     record(move.get('who', '?'), action, detail)
     return {'status': status}
 
@@ -1730,7 +1780,7 @@ def ask_again(folder, who):
     elif seen.get('problem'):
         ok = False
     rec['asked'] = {'at': time.time(), 'who': who, 'expect': expect, 'seen': seen, 'ok': ok}
-    save_state(f'checks/{folder}', rec)
+    change_state(f'checks/{folder}', lambda d: dict(d or {}, asked=rec['asked']), {})
 
     # A right answer is one the canary can go on asking for, if it has none for this table.
     entry = load_state('canary_tables', {}).get(table)
@@ -1751,10 +1801,10 @@ def ask_again(folder, who):
 
 def canary_table(table, **change):
     """Note what the canary should ask of one table, or that it should leave it alone for now."""
-    held = load_state('canary_tables', {})
-    entry = held.setdefault(table, {'check': None, 'on': True})
-    entry.update(change, at=time.time())
-    save_state('canary_tables', held)
+    def note(held):
+        held.setdefault(table, {'check': None, 'on': True}).update(change, at=time.time())
+        return held
+    change_state('canary_tables', note, {})
 
 
 def canary_checks():
@@ -2174,9 +2224,7 @@ def take_report(body):
     report = {'date': str(body.get('date') or time.strftime('%Y-%m-%d', time.gmtime()))[:10], 'at': time.time(),
               'verdict': verdict, 'headline': str(body.get('headline', ''))[:300], 'findings': findings,
               'by': str(body.get('by', 'Claude'))[:60]}
-    held = [r for r in load_state('reports', {}).get('list', []) if r.get('date') != report['date']]
-    held.append(report)
-    save_state('reports', {'list': held[-90:]})
+    change_state('reports', lambda d: {'list': ([r for r in d.get('list', []) if r.get('date') != report['date']] + [report])[-90:]}, {})
     if verdict == 'act':
         try:
             announce('the daily review asks for action', report['headline'] + '\n\n'
@@ -2250,7 +2298,9 @@ def verify_published():
             except Exception as e:
                 print(f'verify: could not announce: {e!r}')
         out[c['folder']] = c['status']
-    save_state('verify', {'list': checks[-30:]})
+    # Asking the service took seconds; put what was learned into the list as it stands now.
+    learned = {(c['folder'], c['since']): c for c in waiting}
+    change_state('verify', lambda d: {'list': [learned.get((c['folder'], c['since']), c) for c in d.get('list', [])][-30:]}, {})
     return out
 
 
