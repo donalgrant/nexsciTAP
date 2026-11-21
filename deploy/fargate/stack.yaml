@@ -161,6 +161,22 @@ Parameters:
       where an entry starting with a dot allows every host under it.
       Uploads sent with the request, which is what Firefly and pyvo do, are
       not affected.
+  DownloadLimit:
+    Type: String
+    Default: '0'
+    AllowedPattern: '^(0|[0-9]+(\.[0-9]+)?(MB|GB|TB))$'
+    Description: >
+      What one client address may be sent in a day, results of queries and
+      of async jobs together, written like 20GB (0 = no limit).  A client
+      that has had it is answered 429 until the day has passed.  The count
+      is kept in the work area, so it holds across tasks and restarts.
+  FireflyDownloadLimit:
+    Type: String
+    Default: '0'
+    AllowedPattern: '^(0|[0-9]+(\.[0-9]+)?(MB|GB|TB))$'
+    Description: >
+      The same for all of Firefly's users together (0 = no limit).  This is
+      what Firefly's server fetches from the service on their behalf.
   WorkRetentionDays:
     Type: Number
     Default: 7
@@ -557,6 +573,8 @@ Resources:
             - {Name: SHARED_CLIENT_LIMIT, Value: !Ref FireflyLimit}
             - {Name: SHARED_ASYNC_LIMIT, Value: !Ref FireflyAsyncLimit}
             - {Name: UPLOAD_URLS, Value: !Ref UploadUrls}
+            - {Name: VOLUME_LIMIT, Value: !Ref DownloadLimit}
+            - {Name: SHARED_VOLUME_LIMIT, Value: !Ref FireflyDownloadLimit}
             - {Name: CLIENT_LIMIT, Value: !Ref ClientLimit}
             - {Name: ASYNC_LIMIT, Value: !Ref AsyncLimit}
             - {Name: ASYNC_CLIENT_LIMIT, Value: !Ref AsyncClientLimit}

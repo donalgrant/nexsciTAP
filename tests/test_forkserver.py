@@ -315,6 +315,64 @@ def test_client_limit(fair_server):
     assert r.status_code == 200
 
 
+# ---- one client cannot download without end ------------------------------
+
+@pytest.fixture(scope="module")
+def capped_server(fixture_root: Path):
+    proc, base, workdir = _serve(fixture_root, "capped", "CLIENT_HEADER=X-Client\nUNLIMITED_CLIENTS=portal\n"
+                                 "SHARED_CLIENTS=firefly\nVOLUME_LIMIT=12000\nSHARED_VOLUME_LIMIT=30KB")
+    try:
+        yield base, workdir
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
+
+
+def test_volume_limit(capped_server):
+    """A client that has been sent its day's volume is refused until the day has passed."""
+    base, workdir = capped_server
+    (workdir / "TAP" / "big.txt").write_text("x" * 5000)
+    get = lambda who: requests.get(base + "/workspace/TAP/big.txt", headers={"X-Client": who})
+
+    # 5,000 bytes a time against 12,000: the third takes carol over, the fourth is refused.
+    assert [get("carol").status_code for _ in range(4)] == [200, 200, 200, 429]
+    r = get("carol")
+    assert r.status_code == 429 and int(r.headers["Retry-After"]) > 3600
+    assert "carol" in r.text and "12 KB in a day" in r.text and "15 KB" in r.text
+
+    # Refused for queries too, not only for files; a HEAD sends nothing and is let by.
+    ask = {"query": "select l0filename from data_l0", "format": "ipac"}
+    assert requests.post(base + "/TAP/sync", data=ask, headers={"X-Client": "carol"}).status_code == 429
+    assert requests.head(base + "/workspace/TAP/big.txt", headers={"X-Client": "carol"}).status_code == 200
+
+    # Someone else is not affected; a portal has its own, larger share; an exempt client has none.
+    assert requests.post(base + "/TAP/sync", data=ask, headers={"X-Client": "bob"}).status_code == 200
+    assert [get("firefly").status_code for _ in range(7)] == [200] * 6 + [429]
+    assert "this portal" in get("firefly").text
+    assert [get("portal").status_code for _ in range(8)] == [200] * 8
+    assert not (workdir / "TAP" / ".volume" / "portal").exists()
+
+    # The count is not served.
+    hour = next((workdir / "TAP" / ".volume" / "carol").iterdir()).name
+    assert requests.get(base + f"/workspace/TAP/.volume/carol/{hour}").status_code == 404
+
+
+def test_what_a_query_sent_is_counted(capped_server):
+    """An answer from the service itself counts, as a file does."""
+    base, workdir = capped_server
+    sizes = {}
+    for fmt in ("votable", "ipac", "csv"):
+        r = requests.post(base + "/TAP/sync", data={"query": "select * from data_l1", "format": fmt}, headers={"X-Client": "erin"})
+        assert r.status_code == 200
+        sizes[fmt] = len(r.content)
+        if len(r.content) >= 4096:
+            break
+    print(sizes)
+    assert len(r.content) >= 4096, sizes
+    counted = sum(int(line) for f in (workdir / "TAP" / ".volume" / "erin").iterdir() for line in f.read_text().split())
+    assert abs(counted - len(r.content)) < 1000        # the headers are counted with it
+
+
 def test_register_of_running_jobs_is_not_served(fork_server):
     base, workdir = fork_server
     hidden = workdir / "TAP" / ".running"

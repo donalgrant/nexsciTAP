@@ -28,6 +28,8 @@
 #   SHARED_CLIENTS  comma-separated clients that stand for many users (a portal in the
 #                   same task);  SHARED_CLIENT_LIMIT and SHARED_ASYNC_LIMIT are their limits
 #   UPLOAD_URLS     hosts an upload by URL may name:  none (default), any, or a list
+#   VOLUME_LIMIT    what one client may be sent in a day, written like 20GB (default 0 = no
+#                   limit);  SHARED_VOLUME_LIMIT is the same for the shared clients together
 #   WORK_RETENTION_DAYS  days results and uploads are kept in /work (default 7; 0 = for ever)
 set -euo pipefail
 
@@ -53,6 +55,7 @@ sed -e "s|__PUBLIC_URL__|${PUBLIC_URL}|" -e "s|__CATALOG_PREFIX__|${CATALOG_PREF
     -e "s|__UNLIMITED_CLIENTS__|${UNLIMITED_CLIENTS:-}|" \
     -e "s|__SHARED_CLIENTS__|${SHARED_CLIENTS:-}|" -e "s|__SHARED_CLIENT_LIMIT__|${SHARED_CLIENT_LIMIT:-0}|" \
     -e "s|__SHARED_ASYNC_LIMIT__|${SHARED_ASYNC_LIMIT:-0}|" -e "s|__UPLOAD_URLS__|${UPLOAD_URLS:-none}|" \
+    -e "s|__VOLUME_LIMIT__|${VOLUME_LIMIT:-0}|" -e "s|__SHARED_VOLUME_LIMIT__|${SHARED_VOLUME_LIMIT:-0}|" \
     /opt/tap/TAP.conf.template > /opt/tap/TAP.conf
 
 args=()

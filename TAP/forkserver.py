@@ -64,12 +64,13 @@ PRELOAD = ('duckdb', 'numpy', 'pyarrow', 'astropy.units', 'astropy.io.votable',
 
 _tap = None
 _cgi = None
+_volume = None
 
 
 def preload():
     """Import the service and its lazy dependencies in the parent."""
 
-    global _tap, _cgi
+    global _tap, _cgi, _volume
 
     # TAP.tap parses a CGI form when it is imported.  Give it an empty one
     # so the import neither reads standard input nor the command line.
@@ -78,9 +79,9 @@ def preload():
 
     import cgi
 
-    from TAP import tap
+    from TAP import tap, volume
 
-    _tap, _cgi = tap, cgi
+    _tap, _cgi, _volume = tap, cgi, volume
 
     for name in PRELOAD:
         try:
@@ -115,6 +116,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
     unlimited_clients = ()
     shared_clients = ()
     shared_client_limit = 0
+    volume_limit = 0
+    shared_volume_limit = 0
     rundir = ''
     _place = None
 
@@ -164,6 +167,46 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         Handler._place = mine
         return True
+
+    def _volume_limit(self, client):
+        """Bytes this client may be sent in a day (0: no limit)."""
+        if client in self.unlimited_clients:
+            return 0
+        if client in self.shared_clients:
+            return self.shared_volume_limit
+        return self.volume_limit
+
+    def _over_volume(self, client):
+        """True, with the refusal sent, if the client has had its day's volume."""
+        limit = self._volume_limit(client)
+        if limit <= 0:
+            return False
+        try:
+            had, wait = _volume.used(self.workdir, client)
+        except Exception as e:                      # a count that cannot be read refuses nobody
+            sys.stderr.write(f'volume not read: {e!r}\n')
+            return False
+        if had < limit:
+            return False
+        who = 'this portal, for all its users,' if client in self.shared_clients else client
+        soon = f'{wait // 3600 + 1} hours' if wait >= 5400 else f'{max(1, wait // 60)} minutes'
+        body = (f'This service sends one client at most {_volume.show_size(limit)} in a day, and {who} '
+                f'has been sent {_volume.show_size(had)} in the last day.  Try again in about {soon}.\n').encode()
+        self.send_response(429)
+        self.send_header('Retry-After', str(wait))
+        self.send_header('Content-Type', 'text/plain')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+        return True
+
+    def _sent(self, client, sent):
+        """Write down what the client was sent, where a cap on it is in force."""
+        if sent and self._volume_limit(client) > 0:
+            try:
+                _volume.add(self.workdir, client, sent)
+            except Exception as e:                  # a count, never a reason to fail
+                sys.stderr.write(f'volume not written: {e!r}\n')
 
     def _release(self):
         if self._place:
@@ -219,13 +262,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if full.endswith('.xml'):
             ctype = 'text/xml'
 
+        # A result fetched from the work area counts toward the client's
+        # volume for the day, as one returned by a sync query does.
+        client = self._client()
+        if body and self._over_volume(client):
+            return
+
         with open(full, 'rb') as f:
+            size = os.fstat(f.fileno()).st_size
             self.send_response(200)
             self.send_header('Content-Type', ctype)
-            self.send_header('Content-Length', str(os.fstat(f.fileno()).st_size))
+            self.send_header('Content-Length', str(size))
             self.end_headers()
             if body:
                 shutil.copyfileobj(f, self.wfile, 1 << 20)
+                self._sent(client, size)
 
     def _tap(self, path_info, query):
         """Run the CGI entry point in this (already forked) process."""
@@ -252,6 +303,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header('Content-Length', str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+            return
+
+        if self._over_volume(client):
+            self._release()
             return
 
         # The request body becomes standard input.  It is spooled to an
@@ -306,6 +361,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         os.dup2(self.connection.fileno(), 1)
         body.close()
 
+        # Everything the service answers with goes through sys.stdout;
+        # count it, for the record of the request and the client's volume.
+        counted = sys.stdout = _volume.Counted(sys.stdout)
+
         self.close_connection = True
         self.rfile = self.wfile = _Closed()
         os.close(self.connection.detach())
@@ -359,7 +418,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         try:
             log_query(self.command, path_info, client, started, status,
-                      seen[0] if seen else None, os.getpid() != request_pid, asked)
+                      seen[0] if seen else None, os.getpid() != request_pid, asked,
+                      counted.sent if os.getpid() == request_pid else None)
         except Exception as e:                      # a record, never a reason to fail
             sys.stderr.write(f'query record failed: {e!r}\n')
 
@@ -370,6 +430,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             sys.stderr.flush()
         except (OSError, ValueError):
             pass
+
+        if os.getpid() == request_pid:
+            self._sent(client, counted.sent)
 
         self._release()
         _tap.jobworker.finished()
@@ -382,7 +445,7 @@ VERSION_RECORD = 'TAPV'
 QUERY_TEXT_LIMIT = 4000
 
 
-def log_query(method, path_info, client, started, status, tap, is_job, asked=''):
+def log_query(method, path_info, client, started, status, tap, is_job, asked='', sent=None):
     """
     One line on standard error for each request the service handled, as JSON
     after the word TAPQ, for whoever counts queries from the log:
@@ -401,10 +464,15 @@ def log_query(method, path_info, client, started, status, tap, is_job, asked='')
                 For a job started by a later request, which carries no
                 query, q is the service's translation of it
         err     the service's message, for a query that failed
+        bytes   what the request was answered with, headers included; absent
+                for the line an async job's own process writes
     """
 
     rec = {'t': round(started, 3), 'ms': int((time.time() - started) * 1000),
            'client': client, 'm': method, 'path': path_info or '/', 'job': bool(is_job)}
+
+    if sent is not None:
+        rec['bytes'] = int(sent)
 
     if status:
         rec['phase'] = 'ERROR'
@@ -524,7 +592,7 @@ def main():
     web = ConfigObj(args.conf)['WEB']
 
     Handler.conf = os.path.abspath(args.conf)
-    Handler.workdir = web['TAP_WORKDIR']
+    Handler.workdir = os.path.abspath(web['TAP_WORKDIR'])
     Handler.workurl = web.get('TAP_WORKURL', '/workspace')
 
     Handler.client_header = str(web.get('CLIENT_HEADER', '')).strip()
@@ -538,6 +606,11 @@ def main():
         shared = shared.split(',')
     Handler.shared_clients = tuple(u.strip() for u in shared if u.strip())
     Handler.shared_client_limit = int(str(web.get('SHARED_CLIENT_LIMIT', '') or 0).strip() or 0)
+
+    # Bytes one client may be sent in a day, written like 20GB (TAP/volume.py).
+    from TAP.volume import parse_size
+    Handler.volume_limit = parse_size(web.get('VOLUME_LIMIT', ''))
+    Handler.shared_volume_limit = parse_size(web.get('SHARED_VOLUME_LIMIT', ''))
 
     Server.max_children = args.max_children
 
