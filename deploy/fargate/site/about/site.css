@@ -13,7 +13,7 @@ header .name { flex:1; text-align:center; font-weight:700; color:var(--navy); fo
 .hero { background:var(--bg); border-bottom:1px solid var(--line); padding:34px 0 30px; }
 h1 { margin:0 0 8px; font-size:34px; line-height:1.15; color:var(--navy); }
 .lede { margin:0 0 22px; max-width:46em; font-size:18px; color:#33414f; }
-.doors { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+.doors { display:grid; grid-template-columns:1fr 1fr 1fr; gap:16px; }
 .door { display:block; text-decoration:none; border-radius:10px; padding:18px 20px; border:2px solid; }
 .door b { display:block; font-size:21px; margin-bottom:2px; }
 .door span { font-size:14.5px; }
@@ -33,6 +33,7 @@ table { width:100%; border-collapse:collapse; font-size:14.5px; }
 th, td { text-align:left; padding:6px 8px 6px 0; border-bottom:1px solid #e8ecf1; vertical-align:top; }
 th { font-size:12.5px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); font-weight:600; }
 td code { color:var(--navy); font-weight:600; }
+#catalogs td:first-child { white-space:nowrap; padding-right:16px; }
 .more { margin:10px 0 0; font-size:14px; }
 .addr { display:flex; gap:8px; align-items:center; background:var(--lblue); border-radius:8px; padding:9px 12px; margin-bottom:12px; overflow-x:auto; }
 .addr code { flex:1; font-size:14.5px; color:var(--navy); white-space:nowrap; }

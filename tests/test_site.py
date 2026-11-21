@@ -8,6 +8,8 @@ SITE = os.path.join(FARGATE, 'site')
 PAGES = ['index.html', 'about/examples.html']
 # Paths the proxy hands to Firefly or to TAP, not files of the site.
 ELSEWHERE = ('/firefly/', '/TAP/')
+# Firefly opens its TAP panel when asked this way (seen with Firefly 2026.4.1).
+TAP_PANEL = '/firefly/?__action=layout.showDropDown&amp;view=TAPSearch'
 
 
 def read(*path):
@@ -52,3 +54,9 @@ def test_the_proxy_serves_the_pages():
     assert 'location /about/ { try_files $uri =404; }' in conf
     assert 'return 302 /firefly/' not in conf
     assert 'COPY site /usr/share/nginx/aiab' in read(FARGATE, 'Dockerfile.proxy')
+
+
+def test_the_front_page_has_its_three_doors():
+    html = read(SITE, 'index.html')
+    for door in ('href="/firefly/"', f'href="{TAP_PANEL}"', 'href="#tap"'):
+        assert door in html

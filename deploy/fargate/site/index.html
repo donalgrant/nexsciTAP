@@ -17,8 +17,9 @@
   <h1>Archive in a Box</h1>
   <p class="lede">A small astronomical archive, run as a pilot at IPAC.  It serves catalogs of up to about 100 million rows, with positional search and cross-match against a table of your own, through Firefly in the browser or any TAP client.</p>
   <div class="doors">
-    <a class="door ff" href="/firefly/"><b>Search with Firefly</b><span>Cone, polygon and multi-object searches in the browser, with tables, charts and sky images.</span></a>
-    <a class="door tap" href="#tap"><b>Query with TAP</b><span>ADQL from pyvo, astroquery, TOPCAT or curl.  The address and an example are below.</span></a>
+    <a class="door ff" href="/firefly/"><b>Search with Firefly</b><span>Firefly's front page:  searches, sky images, charts, and tables of your own.</span></a>
+    <a class="door tap" href="/firefly/?__action=layout.showDropDown&amp;view=TAPSearch"><b>Browse the catalogs</b><span>Firefly's TAP panel:  pick a table, set a position and constraints, or type ADQL.</span></a>
+    <a class="door tap" href="#tap"><b>Query with TAP</b><span>From pyvo, astroquery, TOPCAT or curl.  The address and an example are below.</span></a>
   </div>
   <p class="status">A pilot:  open to IPAC and Caltech addresses only, and normally running on weekdays, 07:30 to 19:30 Pacific.</p>
 </div></div>
@@ -32,16 +33,6 @@
         <tbody><tr><td colspan="2">Reading the list from the service…</td></tr></tbody>
       </table>
       <p class="more" id="catalog-note"></p>
-    </section>
-    <section>
-      <h2>Limits</h2>
-      <ul class="plain">
-        <li>A synchronous query must start answering within 60 seconds.  Send longer ones as async jobs.</li>
-        <li>300 seconds and 2,000,000 rows per query.</li>
-        <li>3 async jobs running per client;  results are kept 7 days.</li>
-        <li>20 GB sent to one address in a day.</li>
-      </ul>
-      <p class="more"><a href="/about/examples.html#refused">What a refusal means, and what to do about it</a></p>
     </section>
   </div>
 
@@ -63,6 +54,16 @@ cone = tap.search("""
         <a href="/about/examples.html#upload">Cross-match with your own table</a>
         <a href="/about/examples.html#async">Sync and async</a>
       </div>
+    </section>
+    <section>
+      <h2>Limits</h2>
+      <ul class="plain">
+        <li>A synchronous query must start answering within 60 seconds.  Send longer ones as async jobs.</li>
+        <li>300 seconds and 2,000,000 rows per query.</li>
+        <li>3 async jobs running per client;  results are kept 7 days.</li>
+        <li>20 GB sent to one address in a day.</li>
+      </ul>
+      <p class="more"><a href="/about/examples.html#refused">What a refusal means, and what to do about it</a></p>
     </section>
     <section>
       <h2>About</h2>
