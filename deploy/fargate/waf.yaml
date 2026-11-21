@@ -30,9 +30,21 @@ Parameters:
       count: an address over RateLimit is only counted (the PerAddress
       metric).  block: its requests are refused with status 429 until its
       rate falls.
+  ManagedRules:
+    Type: String
+    Default: count
+    AllowedValues: [count, block]
+    Description: >-
+      AWS's own rule sets (addresses with a bad reputation, inputs known to
+      be attacks, and the common web exploits).  count: a match is only
+      counted.  block: it is refused with status 403, except for the rules
+      of the common set listed in the template, which ordinary use of this
+      service matches and which stay counted.  The set against SQL injection
+      is left out on purpose: every query to this service is SQL.
 
 Conditions:
   Blocking: !Equals [!Ref Mode, block]
+  ManagedBlocking: !Equals [!Ref ManagedRules, block]
 
 Resources:
   WebAcl:
@@ -90,6 +102,46 @@ Resources:
             SampledRequestsEnabled: true
             CloudWatchMetricsEnabled: true
             MetricName: !Sub ${AWS::StackName}-Overall
+        # AWS's managed rule sets, after the rate rules so that a flood is
+        # answered 429 before anything else is looked at.
+        - Name: BadReputation
+          Priority: 10
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesAmazonIpReputationList
+          OverrideAction: !If [ManagedBlocking, {None: {}}, {Count: {}}]
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: !Sub ${AWS::StackName}-BadReputation
+        - Name: KnownBadInputs
+          Priority: 11
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesKnownBadInputsRuleSet
+          OverrideAction: !If [ManagedBlocking, {None: {}}, {Count: {}}]
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: !Sub ${AWS::StackName}-KnownBadInputs
+        - Name: Common
+          Priority: 12
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesCommonRuleSet
+              # Rules that ordinary use of the service matches; they count
+              # and never refuse.  An uploaded table is far over the body
+              # size this set allows.
+              RuleActionOverrides:
+                - {Name: SizeRestrictions_BODY, ActionToUse: {Count: {}}}
+          OverrideAction: !If [ManagedBlocking, {None: {}}, {Count: {}}]
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: !Sub ${AWS::StackName}-Common
 
 Outputs:
   WebAclArn:
