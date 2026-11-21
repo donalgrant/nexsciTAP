@@ -359,6 +359,10 @@ Resources:
               - Effect: Allow
                 Action: [cloudformation:DescribeStacks, cloudformation:ListStackResources]
                 Resource: !Sub arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${ServiceStack}/*
+              - Sid: FirewallSettings        # the rate limit's stack; CloudFront's web ACLs are in us-east-1
+                Effect: Allow
+                Action: cloudformation:DescribeStacks
+                Resource: !Sub arn:aws:cloudformation:us-east-1:${AWS::AccountId}:stack/aiab-waf*/*
               - Effect: Allow
                 Action: logs:FilterLogEvents
                 Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/ecs/${ServiceStack}:*

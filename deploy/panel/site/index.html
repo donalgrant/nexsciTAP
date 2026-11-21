@@ -342,11 +342,21 @@ const VIEW = {
          `<div class="card"><h2>Memory, percent of the task</h2>${lines(s.memory, s.memoryMax, '%', 100)}<p class="note">Blue average, amber peak.</p></div></div>`;
     h += `<div class="grid g11 gap"><div class="card"><h2>Requests per ${l.period / 60} minutes</h2>${lines(s.requests, null, '')}</div>` +
          `<div class="card"><h2>Response time, seconds</h2>${lines(s.responseP50, s.responseP95, ' s')}<p class="note">Blue median, amber 95th percentile.</p></div></div>`;
-    const L = l.limits || {};
+    const L = l.limits || {}, F = l.firewall;
+    if (F && F.error) h += `<div class="notice err gap">The firewall's numbers could not be read:  ${esc(F.error)}</div>`;
+    if (F && F.series) {
+      const fs = F.series, blocking = F.mode === 'block';
+      h += `<div class="card gap"><h2>Firewall:  the rate limit in front of the service</h2><div class="grid g4">` +
+        tile('Let through', num(total(fs.allowed)), 'requests passed to the door') +
+        tile(blocking ? 'Refused' : 'Would be refused', num(total(blocking ? fs.refused : fs.overAddress)), blocking ? 'answered 429, over the limit for one address' : 'over the limit for one address;  counting only') +
+        tile('Limit, one address', num(F.limit), 'requests in five minutes') +
+        tile('Over the overall mark', num(total(fs.overAll)), `requests after all addresses passed ${num(F.overallLimit)} in five minutes;  counted, not refused`) + '</div>' +
+        `<div class="gap">${lines(fs.allowed, blocking ? fs.refused : fs.overAddress, '')}</div><p class="note">Requests per ${l.period / 60} minutes.  Blue let through, amber ${blocking ? 'refused' : 'over the limit (counted only)'}.  The firewall acts before the address check and before the paused page, so it counts requests the door then refuses.  Its numbers reach here a few minutes late.</p></div>`;
+    }
     h += '<div class="card gap"><h2>Limits in force</h2><table>' +
-      [['Requests in progress, one client, per task', L.ClientLimit], ['Async jobs running, one client', L.AsyncClientLimit], ['Async jobs running, in all', L.AsyncLimit],
+      [...(F && F.limit ? [['Requests in five minutes, one address (firewall' + (F.mode === 'block' ? '' : ', counting only') + ')', num(F.limit)]] : []), ['Requests in progress, one client, per task', L.ClientLimit], ['Async jobs running, one client', L.AsyncClientLimit], ['Async jobs running, in all', L.AsyncLimit],
        ['Memory, one query', L.QueryMemory], ['Time, one query', (L.QueryTimeout || '?') + ' s'], ['Rows, one result', num(L.MaxRecLimit)]]
-        .map((r) => `<tr><td>${r[0]}</td><td class="num">${esc(r[1] ?? '?')}</td></tr>`).join('') + '</table><p class="note">Settings of the service\'s stack.  They are not changed from here yet.</p></div>';
+        .map((r) => `<tr><td>${r[0]}</td><td class="num">${esc(r[1] ?? '?')}</td></tr>`).join('') + '</table><p class="note">Settings of the service\'s stack, and of the firewall\'s.  They are not changed from here yet.</p></div>';
     return h;
   },
 

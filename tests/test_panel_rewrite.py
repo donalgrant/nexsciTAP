@@ -135,3 +135,20 @@ def test_changes_made_at_the_same_moment_are_all_kept(panel, monkeypatch):
     with pytest.raises(panel.Refused):
         panel.change_state('moves', lambda d: (_ for _ in ()).throw(panel.Refused('no')), {})
     assert s3.version == before
+
+
+def test_the_firewall_is_found_from_the_service_stack(panel, monkeypatch):
+    """Its name comes from the WebAclArn setting; a service without one has no firewall to show."""
+    arn = 'arn:aws:wafv2:us-east-1:024489621410:global/webacl/aiab-waf/06cd6333-737e-4f93-b64c-3129b1789224'
+    monkeypatch.setattr(panel, 'stack_parameters', lambda: {'WebAclArn': arn})
+    assert panel.firewall_name() == 'aiab-waf'
+    for none in ({}, {'WebAclArn': ''}, {'WebAclArn': 'not-an-arn'}):
+        monkeypatch.setattr(panel, 'stack_parameters', lambda none=none: none)
+        assert panel.firewall_name() == ''
+        assert panel.firewall(24, 300, panel.now()) is None
+
+    # One that cannot be read says so, and does not stop the rest of the view.
+    monkeypatch.setattr(panel, 'stack_parameters', lambda: {'WebAclArn': arn})
+    monkeypatch.setattr(panel, 'cached', lambda *a: (_ for _ in ()).throw(RuntimeError('no access')))
+    got = panel.firewall(24, 300, panel.now())
+    assert got['name'] == 'aiab-waf' and 'no access' in got['error'] and 'series' not in got

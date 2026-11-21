@@ -363,8 +363,52 @@ def view_load(params):
 
     params_now = stack_parameters()
     return {'hours': hours, 'period': period, 'series': series, 'workArea': work,
+            'firewall': firewall(hours, period, end),
             'limits': {k: params_now.get(k) for k in
                        ('ClientLimit', 'AsyncLimit', 'AsyncClientLimit', 'QueryMemory', 'QueryTimeout', 'MaxRecLimit')}}
+
+
+FIREWALL_REGION = 'us-east-1'       # the only region CloudFront reads web ACLs from
+
+
+def firewall_name():
+    """The web ACL in front of the service, from the service stack's WebAclArn; '' if it has none."""
+    arn = stack_parameters().get('WebAclArn') or ''
+    parts = arn.split('/')
+    return parts[-2] if len(parts) >= 3 and ':wafv2:' in arn else ''
+
+
+def firewall(hours, period, end):
+    """
+    The rate limit in front of the service (deploy/fargate/waf.yaml): its
+    settings and what it let through, refused and counted.  None when the
+    service has no web ACL; an 'error' when it has one that cannot be read,
+    which must not take the rest of the Load view with it.
+    """
+    name = firewall_name()
+    if not name:
+        return None
+    out = {'name': name}
+    try:
+        def make():
+            # The web ACL and its stack have the same name (the template names it so).
+            st = aws('cloudformation', FIREWALL_REGION).describe_stacks(StackName=name)['Stacks'][0]
+            return {'params': {p['ParameterKey']: p.get('ParameterValue', '') for p in st.get('Parameters', [])}}
+        settings = cached('firewall', 300, make)['params']
+        out.update(limit=int(settings.get('RateLimit') or 0), overallLimit=int(settings.get('OverallLimit') or 0),
+                   mode=settings.get('Mode') or '')
+        want = [('allowed', 'AllowedRequests', 'ALL'), ('refused', 'BlockedRequests', f'{name}-PerAddress'),
+                ('overAddress', 'CountedRequests', f'{name}-PerAddress'), ('overAll', 'CountedRequests', f'{name}-Overall')]
+        r = aws('cloudwatch', FIREWALL_REGION).get_metric_data(
+            MetricDataQueries=[metric(i, 'AWS/WAFV2', m, {'WebACL': name, 'Rule': rule}, 'Sum', period)
+                               for i, (_, m, rule) in enumerate(want)],
+            StartTime=end - timedelta(hours=hours), EndTime=end, ScanBy='TimestampAscending')
+        out['series'] = {want[int(res['Id'][1:])][0]: [[t.timestamp(), round(v, 4)] for t, v in zip(res['Timestamps'], res['Values'])]
+                         for res in r['MetricDataResults']}
+    except Exception as e:
+        print(f'firewall: {e!r}')
+        out['error'] = str(e)[:200]
+    return out
 
 
 def stack_parameters():
