@@ -230,12 +230,22 @@ def admit(tapdir, jobid, client, total=0, per_client=0, exempt=(), shared=(), sh
         return None
 
     register = os.path.join(tapdir, RUNNING)
+    entry = os.path.join(register, jobid)
 
+    # The job takes its place first and counts afterward, and counts only
+    # the jobs that took theirs before it.  Counting first let jobs that
+    # arrived at the same moment each see room and all go in: seven sent at
+    # once through a portal limited to five, six ran (21 November 2026).
+    # Of jobs arriving together, the earlier places now win, and exactly
+    # as many as the limit allows.
     try:
         os.makedirs(register, exist_ok=True)
+        with open(entry, 'w') as f:
+            f.write(client + '\n')
+        place = (os.stat(entry).st_mtime_ns, jobid)
         names = os.listdir(register)
     except OSError as e:
-        logging.error(f'Could not read {register}: {e}')
+        logging.error(f'Could not use {register}: {e}')
         return None                 # a limit that cannot be checked does not stop the service
 
     everyone = mine = 0
@@ -243,41 +253,45 @@ def admit(tapdir, jobid, client, total=0, per_client=0, exempt=(), shared=(), sh
     for name in names:
         if name == jobid:
             continue
-        entry = os.path.join(register, name)
+        other = os.path.join(register, name)
         own = owner(os.path.join(tapdir, name))
         if own is None or own[2] >= STALE:
             # Finished without saying so (killed), or its server is gone.
             try:
-                os.remove(entry)
+                os.remove(other)
             except OSError:
                 pass
             continue
-        everyone += 1
         try:
-            with open(entry) as f:
-                mine += f.read().strip() == client
+            if (os.stat(other).st_mtime_ns, name) > place:
+                continue            # it came after this job: it is the one to give way
+            with open(other) as f:
+                whose = f.read().strip()
         except OSError:
-            pass
+            continue
+        everyone += 1
+        mine += whose == client
+
+    said = None
 
     if per_client > 0 and is_shared and mine >= per_client:
-        return (f'This portal has {mine} jobs running for its users, the most this service runs for it at once.  '
+        said = (f'This portal has {mine} jobs running for its users, the most this service runs for it at once.  '
                 'Submit this one again when one of them has finished.')
 
-    if per_client > 0 and client not in exempt and mine >= per_client:
-        return (f'You have {mine} jobs running, the most this service runs for one client at once.  '
+    elif per_client > 0 and client not in exempt and mine >= per_client:
+        said = (f'You have {mine} jobs running, the most this service runs for one client at once.  '
                 'Submit this one again when one of them has finished.')
 
-    if total > 0 and everyone >= total:
-        return (f'The service is running {everyone} jobs, the most it runs at once.  '
+    elif total > 0 and everyone >= total:
+        said = (f'The service is running {everyone} jobs, the most it runs at once.  '
                 'Submit this one again shortly.')
 
-    entry = os.path.join(register, jobid)
-    try:
-        with open(entry, 'w') as f:
-            f.write(client + '\n')
-    except OSError as e:
-        logging.error(f'Could not write {entry}: {e}')
-        return None
+    if said:
+        try:
+            os.remove(entry)
+        except OSError:
+            pass
+        return said
 
     _registered = entry
     atexit.register(finished)

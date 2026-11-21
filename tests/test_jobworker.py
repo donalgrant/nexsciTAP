@@ -192,6 +192,28 @@ def test_stopped_job_gives_up_its_place_at_once(tmp_path):
     assert not (tmp_path / ".running" / "tap_j").exists()
 
 
+def test_jobs_arriving_together_do_not_all_go_in(tmp_path, monkeypatch):
+    """Twelve at the same moment against a limit of five: five run, never six."""
+    import threading
+    monkeypatch.setattr(jobworker, "owner", lambda path: ("host", 1, 0))
+    monkeypatch.setattr(jobworker.atexit, "register", lambda f: None)
+    for round_ in range(20):
+        tapdir = tmp_path / f"r{round_}"
+        tapdir.mkdir()
+        go, said = threading.Barrier(12), {}
+
+        def one(n):
+            go.wait()
+            said[n] = jobworker.admit(str(tapdir), f"tap_{n:02d}", "127.0.0.1", total=8, per_client=1,
+                                      shared=("127.0.0.1",), shared_limit=5)
+
+        threads = [threading.Thread(target=one, args=(n,)) for n in range(12)]
+        [t.start() for t in threads]
+        [t.join() for t in threads]
+        assert sum(v is None for v in said.values()) == 5
+        assert len(list((tapdir / ".running").iterdir())) == 5
+
+
 def test_shared_client_has_its_own_limit(tmp_path, monkeypatch):
     """A portal's address stands for many users: its own limit, not one client's and not none."""
     monkeypatch.setattr(jobworker, "owner", lambda path: ("host", 1, 0))
