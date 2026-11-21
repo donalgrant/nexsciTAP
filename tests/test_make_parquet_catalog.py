@@ -295,3 +295,40 @@ def test_describe_can_give_a_column_its_name_back(tmp_path):
         run = subprocess.run([sys.executable, str(REPO / 'tools' / 'describe_parquet_catalog.py'), str(old),
                               str(tmp_path / 'never'), '--rename', bad], capture_output=True, text=True)
         assert run.returncode != 0, bad
+
+
+def test_row_groups_are_sized_by_values_not_rows(tmp_path):
+    """A wide table gets fewer rows to a group; a narrow one keeps the old 100,000; and an old catalog can be regrouped."""
+    duckdb = pytest.importorskip('duckdb')
+    pytest.importorskip('astropy_healpix')
+    sys.path.insert(0, str(REPO / 'tools'))
+    from make_parquet_catalog import row_group_size
+
+    assert row_group_size(30) == 100_000                 # AllWISE's 30 columns: as before
+    assert row_group_size(520) == 18_432                 # the Chandra catalog: the size that was tested
+    assert row_group_size(394) == 24_576 and row_group_size(218) == 45_056
+    assert row_group_size(100_000) == 2_048              # never less than one vector
+
+    # 2,500 columns and 5,000 rows: one group under the old rule, groups of 2,048 rows under the new.
+    n, wide = 5000, 2497
+    src = tmp_path / 'wide.csv'
+    src.write_text('ra,dec,' + ','.join(f'c{i}' for i in range(wide)) + '\n'
+                   + ''.join(f'{10 + i * 0.001},{-5 + i * 0.0005},' + ','.join(['1'] * wide) + '\n' for i in range(n)))
+    con = duckdb.connect()
+    sizes = lambda d: [r[0] for r in con.execute(f"SELECT row_group_num_rows FROM (SELECT DISTINCT row_group_id, row_group_num_rows FROM parquet_metadata('{d}/part-00.parquet')) ORDER BY row_group_id").fetchall()]
+    new = tmp_path / 'new'
+    _tool('make_parquet_catalog.py', src, new)
+    assert sizes(new) == [2048, 2048, n - 4096]
+    old = tmp_path / 'old'
+    _tool('make_parquet_catalog.py', src, old, '--row-group', '100000')
+    assert sizes(old) == [n]
+
+    # The same catalog regrouped in place of a new conversion: same rows, same order, smaller groups.
+    again = tmp_path / 'again'
+    said = _tool('describe_parquet_catalog.py', old, again, '--row-group', '4096')
+    assert 'to a row group' in said and sizes(again) == [4096, n - 4096]
+    order = lambda d: con.execute(f"SELECT hpx29, ra, c0 FROM read_parquet('{d}/*.parquet', file_row_number=true) ORDER BY file_row_number").fetchall()
+    assert order(again) == order(old)
+    auto = tmp_path / 'auto'
+    _tool('describe_parquet_catalog.py', old, auto, '--row-group', 'auto')
+    assert order(auto) == order(old) and sizes(auto) == sizes(new)

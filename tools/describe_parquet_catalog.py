@@ -25,6 +25,10 @@ column of names, and any of unit, ucd, utype, description.  A type column is
 ignored here, since the data is not touched.  Columns FILE does not list keep
 whatever the files already say about them.
 
+--row-group writes the same rows in the same order in row groups of another
+size: "auto" is the size make_parquet_catalog.py now chooses from the table's
+width, which is how a wide catalog converted before that rule is put right.
+
 --rename gives a column another name, taking what the files say about it
 along; FILE, if given, speaks of the new names.  It is how a column that an
 earlier conversion renamed out of the way (z_in, say) gets its own name back.
@@ -37,7 +41,7 @@ import sys
 
 import duckdb
 import votable_metadata
-from make_parquet_catalog import read_schema
+from make_parquet_catalog import read_schema, row_group_size
 
 
 def main():
@@ -45,6 +49,9 @@ def main():
     p.add_argument('input', help='folder of Parquet files')
     p.add_argument('output_dir')
     p.add_argument('--schema', metavar='FILE')
+    p.add_argument('--row-group', metavar='N|auto', default=None,
+                   help='rows in a row group: a number, or "auto" for the size the converter would choose '
+                        'for a table this wide (default: keep each file\'s own)')
     p.add_argument('--rename', metavar='OLD=NEW', action='append', default=[],
                    help='give a column another name; may be repeated')
     p.add_argument('--description', default=None, help='what the table is (default: keep what the files say)')
@@ -53,8 +60,10 @@ def main():
     con = duckdb.connect()
     con.execute('SET preserve_insertion_order = true')
 
-    if not args.schema and not args.rename and args.description is None:
-        sys.exit('Nothing to do: give --schema, --rename or --description.')
+    if not args.schema and not args.rename and args.description is None and not args.row_group:
+        sys.exit('Nothing to do: give --schema, --rename, --row-group or --description.')
+    if args.row_group and args.row_group != 'auto' and not args.row_group.isdigit():
+        sys.exit('--row-group takes a number or "auto"')
     _, declared = read_schema(args.schema) if args.schema else ({}, {})
     declared = {name.lower(): meta for name, meta in declared.items()}
     renames = dict(pair.split('=', 1) for pair in args.rename if '=' in pair)
@@ -108,13 +117,18 @@ def main():
           f"'{votable_metadata.CONTENT_KEY}': '{votable.replace(chr(39), chr(39) * 2)}'}}")
 
     for path in files:
-        # The row groups are what make positional searches fast; keep their size.
-        group = con.execute('SELECT max(row_group_num_rows) FROM parquet_metadata(?)', [path]).fetchone()[0]
+        # The row groups are what make positional searches fast; keep their size unless asked.
+        if args.row_group == 'auto':
+            group = row_group_size(len(cols))
+        elif args.row_group:
+            group = int(args.row_group)
+        else:
+            group = con.execute('SELECT max(row_group_num_rows) FROM parquet_metadata(?)', [path]).fetchone()[0]
         out = os.path.join(args.output_dir, os.path.basename(path))
         con.execute(f"""COPY (SELECT {select} FROM read_parquet('{path}'))
                         TO '{out}' (FORMAT parquet, COMPRESSION zstd, ROW_GROUP_SIZE {group}, {kv})""")
         rows = con.execute('SELECT count(*) FROM read_parquet(?)', [out]).fetchone()[0]
-        print(f'{os.path.basename(path)}: {rows:,} rows', flush=True)
+        print(f'{os.path.basename(path)}: {rows:,} rows' + (f', {group:,} to a row group' if args.row_group else ''), flush=True)
 
     named = [c for c, _ in cols]
     unknown = sorted(set(declared) - {c.lower() for c in named})

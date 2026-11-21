@@ -22,6 +22,7 @@ Everything is given in the environment:
                     of CSV files or of Parquet files that make up one table
     SRC_PREFIX      describe, check: folder of the catalog, ending in "/"
     RENAME          describe: columns to rename, as old=new,old=new
+    ROW_GROUP       describe: rows in a row group, a number or "auto"
     SCHEMA_KEY      optional (required to describe unless RENAME is given): key, in SRC_BUCKET or
                     SCHEMA_BUCKET, of the CSV of column types and metadata
     SCHEMA_BUCKET   bucket of SCHEMA_KEY, if not SRC_BUCKET
@@ -387,8 +388,8 @@ def main():
             run_tool(args, report)
 
         elif mode in ('describe', 'check'):
-            if mode == 'describe' and not schema and not env('RENAME'):
-                raise RuntimeError('Describing a catalog needs the list of column units and descriptions, or columns to rename.')
+            if mode == 'describe' and not schema and not env('RENAME') and not env('ROW_GROUP'):
+                raise RuntimeError('Describing a catalog needs the list of column units and descriptions, columns to rename, or a row-group size.')
             prefix = env('SRC_PREFIX')
             src = os.path.join(indir, 'catalog')
             os.makedirs(src, exist_ok=True)
@@ -405,6 +406,8 @@ def main():
                 args = ['describe_parquet_catalog.py', src, outdir] + (['--schema', schema] if schema else [])
                 for pair in filter(None, (env('RENAME') or '').split(',')):
                     args += ['--rename', pair.strip()]
+                if env('ROW_GROUP'):
+                    args += ['--row-group', env('ROW_GROUP')]
                 if env('DESCRIPTION'):
                     args += ['--description', env('DESCRIPTION')]
                 run_tool(args, report)

@@ -46,7 +46,9 @@ read Parquet can use it too.
 
 Rows are sorted by hpx29 and written in small row groups.  Parquet keeps the
 smallest and largest value of every column in each row group, so a positional
-search reads only the few groups whose hpx29 range it touches.
+search reads only the few groups whose hpx29 range it touches.  A group holds
+about ten million values, so a wide table gets fewer rows in each (see
+row_group_size); --row-group N sets the rows outright.
 """
 
 import argparse
@@ -63,6 +65,22 @@ from astropy_healpix import lonlat_to_healpix
 from astropy import units as u
 
 ORDER = 29
+
+# A scan holds several row groups in memory at once, a block for every column
+# it reads, so what matters is the number of values in a group, not of rows.
+# At 100,000 rows a group, SELECT * with a filter that is not positional ran
+# out of memory at 1 GB on a 520-column catalog (52 million values a group);
+# at about 10 million values it ran in a second, with files no larger.  Fewer
+# values still buys nothing more and slows scans of a few columns.
+GROUP_VALUES = 10_000_000
+GROUP_ROWS_MAX = 100_000
+GROUP_ROWS_MIN = 2_048
+
+
+def row_group_size(columns):
+    """Rows in a row group for a table of this many columns: about GROUP_VALUES values, in whole DuckDB vectors."""
+    rows = GROUP_VALUES // max(1, columns) // 2048 * 2048
+    return max(GROUP_ROWS_MIN, min(GROUP_ROWS_MAX, rows))
 
 
 TYPES = {'int': 'INTEGER', 'integer': 'INTEGER', 'short': 'SMALLINT', 'smallint': 'SMALLINT',
@@ -197,7 +215,8 @@ def main():
                         'may also give unit, ucd, utype and description')
     p.add_argument('--description', default='', help='what the table is, shown in the table listing')
     p.add_argument('--rows-per-file', type=int, default=5_000_000)
-    p.add_argument('--row-group', type=int, default=100_000)
+    p.add_argument('--row-group', type=int, default=None,
+                   help='rows in a row group (default: by the table\'s width; see row_group_size)')
     p.add_argument('--work', metavar='DIR',
                    help='keep the working tables on disk in DIR, for a table too large for memory')
     p.add_argument('--memory', metavar='SIZE', help="most memory DuckDB may use, e.g. 8GB (default: DuckDB's own)")
@@ -299,12 +318,14 @@ def main():
     kv = (f"KV_METADATA {{'{votable_metadata.VERSION_KEY}': '1.0', "
           f"'{votable_metadata.CONTENT_KEY}': '{votable.replace(chr(39), chr(39) * 2)}'}}")
 
+    group = args.row_group or row_group_size(len(out_cols))
+
     for part in range(parts):
         out = os.path.join(args.output_dir, f'part-{part:02d}.parquet')
         a, b = part * args.rows_per_file, (part + 1) * args.rows_per_file
         con.execute(f"""COPY (SELECT src.*, place.hpx29 FROM src JOIN place ON src.rowid = place.rid
                               WHERE place._n >= {a} AND place._n < {b} ORDER BY place._n)
-                        TO '{out}' (FORMAT parquet, COMPRESSION zstd, ROW_GROUP_SIZE {args.row_group}, {kv})""")
+                        TO '{out}' (FORMAT parquet, COMPRESSION zstd, ROW_GROUP_SIZE {group}, {kv})""")
 
     if scratch:
         con.close()
