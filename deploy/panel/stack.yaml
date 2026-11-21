@@ -539,7 +539,7 @@ Resources:
       Code: functions/
       Role: !GetAtt FunctionRole.Arn
       Timeout: 900                # views answer in seconds; moving a large table takes minutes
-      MemorySize: 512
+      MemorySize: 1024             # also its processor share:  views answer faster
       Environment:
         Variables:
           SERVICE_STACK: !Ref ServiceStack
