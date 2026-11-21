@@ -128,6 +128,7 @@ Resources:
         Rules:
           - {Id: uploads-are-temporary, Status: Enabled, Prefix: upload/, ExpirationInDays: 7,
              AbortIncompleteMultipartUpload: {DaysAfterInitiation: 2}}
+          - {Id: request-log-by-the-hour, Status: Enabled, Prefix: state/tapq/, ExpirationInDays: 30}
 
   BucketPolicy:
     Type: AWS::S3::BucketPolicy

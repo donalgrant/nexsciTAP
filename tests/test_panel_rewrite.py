@@ -204,3 +204,56 @@ def test_limits_without_a_firewall(panel):
     with pytest.raises(panel.Refused):
         panel.limit_changes({'RateLimit': 500}, {'service': NOW['service']})
     assert panel.limit_changes({'AsyncLimit': 0, 'AsyncClientLimit': 50}, NOW)       # 0 is no limit in all
+
+
+def test_the_download_caps_are_limits(panel):
+    now = {'service': dict(NOW['service'], DownloadLimit='20GB', FireflyDownloadLimit='50GB'), 'firewall': NOW['firewall']}
+    assert panel.limit_changes({'DownloadLimit': '30 gb', 'FireflyDownloadLimit': '50GB'}, now) == \
+        {'service': {'DownloadLimit': ('20GB', '30GB')}}
+    assert panel.limit_changes({'DownloadLimit': 0, 'FireflyDownloadLimit': '1.5tb'}, now) == \
+        {'service': {'DownloadLimit': ('20GB', '0'), 'FireflyDownloadLimit': ('50GB', '1.5TB')}}
+    for bad in ('20', 'lots', '20GB; x', '-1GB', '0.0001MB', '20PB'):
+        with pytest.raises(panel.Refused):
+            panel.limit_changes({'DownloadLimit': bad}, now)
+
+
+def test_the_request_log_is_read_once_an_hour(panel, monkeypatch):
+    """An hour that is over is read from CloudWatch once, kept, and not read again."""
+    import json
+    import time
+    at = time.time()
+    this_hour = int(at // 3600)
+    lines = [(h * 3600 + 30, {'t': h * 3600 + 30, 'path': '/sync', 'n': h}) for h in range(this_hour - 30, this_hour + 1)
+             if h * 3600 + 30 < at]
+    asked, kept = [], {}
+
+    class Logs:
+        def get_paginator(self, name):
+            return self
+
+        def paginate(self, **kw):
+            asked.append((kw['startTime'] // 3600000, (kw['endTime'] + 1) // 3600000))
+            got = [{'timestamp': int(t * 1000), 'message': 'x TAPQ ' + json.dumps(r)}
+                   for t, r in lines if kw['startTime'] <= t * 1000 <= kw['endTime']]
+            return [{'events': got[:3]}, {'events': got[3:]}]
+
+    monkeypatch.setattr(panel, 'aws', lambda *a, **k: Logs())
+    monkeypatch.setattr(panel, 'load_state', lambda name, default=None: kept.get(name, default))
+    monkeypatch.setattr(panel, 'save_state', lambda name, value: kept.__setitem__(name, json.loads(json.dumps(value))))
+    monkeypatch.setattr(panel, '_hours', {})
+
+    first = panel.query_records(24)
+    assert [r['n'] for r in first] == sorted(r['n'] for r in first)             # oldest first
+    assert {r['n'] for r in first} == {r['n'] for t, r in lines if t >= at - 24 * 3600}
+    assert len(asked) > 1 and len(kept) >= 22                                   # the closed hours are kept
+    assert f'tapq/{this_hour}' not in kept                                      # the hour in progress is not
+
+    asked.clear()
+    assert panel.query_records(24) == first
+    assert len(asked) == 1 and asked[0][0] >= this_hour - 1                     # only the open end is read again
+
+    asked.clear()
+    monkeypatch.setattr(panel, '_hours', {})                                    # a new copy of the function
+    assert panel.query_records(24) == first
+    assert len(asked) == 1                                                      # the kept hours came from the bucket
+    assert len(panel.query_records(3)) < len(first)

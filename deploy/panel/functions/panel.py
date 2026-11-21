@@ -368,7 +368,7 @@ def view_load(params):
             'limitsUndone': (load_state('stack') or {}).get('undone'),
             'limits': {k: params_now.get(k) for k in
                        ('ClientLimit', 'AsyncLimit', 'AsyncClientLimit', 'FireflyLimit', 'FireflyAsyncLimit',
-                        'QueryMemory', 'QueryTimeout', 'MaxRecLimit')}}
+                        'QueryMemory', 'QueryTimeout', 'MaxRecLimit', 'DownloadLimit', 'FireflyDownloadLimit')}}
 
 
 FIREWALL_REGION = 'us-east-1'       # the only region CloudFront reads web ACLs from
@@ -505,18 +505,82 @@ def log_events(pattern, since, limit=20000, stream_prefix=None):
     return out
 
 
-def query_records(hours):
+def _record(message):
+    i = message.find(QUERY_WORD + ' {')
+    if i < 0:
+        return None
+    try:
+        return json.loads(message[i + len(QUERY_WORD) + 1:])
+    except ValueError:
+        return None
+
+
+def _read_requests(start, end, deadline):
+    """
+    The request records logged from start up to end (seconds), each with the
+    hour it was logged in, and whether the whole span was read before the
+    deadline.
+    """
+    kw = {'logGroupName': LOG_GROUP, 'startTime': int(start * 1000), 'endTime': int(end * 1000) - 1,
+          'filterPattern': f'"{QUERY_WORD}"'}
+    out = []
+    for page in aws('logs').get_paginator('filter_log_events').paginate(**kw):
+        for e in page['events']:
+            r = _record(e['message'])
+            if r is not None:
+                out.append((e['timestamp'] // 3600000, r))
+        if time.time() > deadline:
+            return out, False
+    return out, True
+
+
+# The request log by the hour.  Reading a day of it from CloudWatch took 10 to
+# 12 s on every look at Activity or Datasets (21 November 2026).  An hour that
+# is over does not change, so it is read once, kept in the panel's bucket
+# (state/tapq/<hour>.json) and held in memory while this copy of the function
+# lives.  Only the hour in progress is read from CloudWatch each time.
+_hours = {}
+HOUR_SETTLED = 600      # an hour is kept once it has been over this long: log lines arrive a little late
+HOUR_BLOCK = 24         # hours read from CloudWatch in one go when several are missing
+HOURS_HELD = 24 * 8
+
+
+def query_records(hours, budget=20):
+    """The service's request records of the last hours, oldest first."""
+    from concurrent.futures import ThreadPoolExecutor
+    at = time.time()
+    since, deadline = at - hours * 3600, at + budget
+    first, closed = int(since // 3600), int((at - HOUR_SETTLED) // 3600) - 1     # closed: the last hour that is kept
+
+    need = [h for h in range(first, closed + 1) if h not in _hours]
+    if need:
+        with ThreadPoolExecutor(max_workers=16) as pool:
+            for h, held in zip(need, pool.map(lambda h: load_state(f'tapq/{h}'), need)):
+                if isinstance(held, list):
+                    _hours[h] = held
+    missing = [h for h in need if h not in _hours]
+    while missing and time.time() < deadline:               # the newest first: they are the ones looked at
+        block = [missing.pop()]
+        while missing and len(block) < HOUR_BLOCK and missing[-1] == block[-1] - 1:
+            block.append(missing.pop())
+        got, whole = _read_requests(block[-1] * 3600, (block[0] + 1) * 3600, deadline)
+        if not whole:
+            break                                           # not kept: the next look reads it again
+        for h in block:
+            _hours[h] = [r for hour, r in got if hour == h]
+            try:
+                save_state(f'tapq/{h}', _hours[h])
+            except ClientError as e:
+                print(f'query_records: hour {h} could not be kept: {e!r}')
+    for h in [h for h in _hours if h < at // 3600 - HOURS_HELD]:
+        del _hours[h]
+
     recs = []
-    for e in log_events(f'"{QUERY_WORD}"', time.time() - hours * 3600):
-        m = e['message']
-        i = m.find(QUERY_WORD + ' {')
-        if i < 0:
-            continue
-        try:
-            recs.append(json.loads(m[i + len(QUERY_WORD) + 1:]))
-        except ValueError:
-            pass
-    return recs
+    for h in range(first, closed + 1):
+        recs.extend(_hours.get(h, ()))
+    live, _ = _read_requests((closed + 1) * 3600, at + 60, max(deadline, time.time() + 8))
+    recs.extend(r for _, r in live)
+    return [r for r in recs if r.get('t', since) >= since]
 
 
 def is_query(r):
@@ -662,10 +726,18 @@ def view_datasets(params):
             problem = str(e)
             served = (held or {}).get('tables', {})
 
+    # The rest are separate reads from the bucket and the log: made together, not one after another.
+    from concurrent.futures import ThreadPoolExecutor
+    pool = ThreadPoolExecutor(max_workers=12)
+    later = {name: pool.submit(make) for name, make in (
+        ('records', lambda: query_records(24)), ('found', discovery), ('canary', canary_state),
+        ('verified', lambda: load_state('verify', {}).get('list', [])), ('staged', staged), ('ingests', ingests),
+        ('hidden', lambda: area_folders('hidden/')), ('incoming', incoming), ('versions', versions), ('moves', moves))}
+
     use = {}
     try:
         names = sorted(set(by_table) | set(served), key=len, reverse=True)
-        for r in query_records(24):
+        for r in later['records'].result():
             if not is_query(r):
                 continue
             q = r['q'].lower()
@@ -676,10 +748,10 @@ def view_datasets(params):
     except ClientError:
         pass
 
-    found = discovery()
-    canary = canary_state()
-    verified = load_state('verify', {}).get('list', [])
-    out = []
+    found = later['found'].result()
+    canary = later['canary'].result()
+    verified = later['verified'].result()
+    out, checks = [], []
     for name in sorted(set(by_table) | set(served)):
         folder = by_table.get(name)
         f = folders.get(folder, {})
@@ -692,12 +764,15 @@ def view_datasets(params):
                     'notServedWhy': said.get('why') if fresh and said.get('served') is False else None,
                     'warnings': said.get('warnings') if fresh and said.get('served') else None, **s})
         if folder:
-            out[-1].update(table_checks(name, folder, f, said if fresh else None, canary, verified))
+            checks.append((out[-1], (name, folder, f, said if fresh else None, canary, verified)))
+    for (row, _), found_checks in zip(checks, pool.map(lambda c: table_checks(*c[1]), checks)):
+        row.update(found_checks)               # each table's checks are a few reads from the bucket
     return {'tables': out, 'problem': problem, 'bucket': CATALOG_BUCKET, 'prefix': CATALOG_PREFIX,
             'totalBytes': sum(f['bytes'] for f in folders.values()),
-            'staged': staged(), 'ingests': ingests(), 'hidden': area_folders('hidden/'),
-            'incoming': incoming(), 'uploadArea': f's3://{STATE_BUCKET}/{INCOMING}',
-            'versions': versions(), 'moves': moves()}
+            'staged': later['staged'].result(), 'ingests': later['ingests'].result(),
+            'hidden': later['hidden'].result(),
+            'incoming': later['incoming'].result(), 'uploadArea': f's3://{STATE_BUCKET}/{INCOMING}',
+            'versions': later['versions'].result(), 'moves': later['moves'].result()}
 
 
 def view_cost(params):
@@ -1104,6 +1179,17 @@ def _memory(v):
     return f'{m.group(1)}{m.group(2)}'
 
 
+def _volume(v):
+    """A daily volume: 0 (no cap) or a size from 1MB up, written like 500MB, 20GB or 1.5TB."""
+    t = str(v).strip().upper().replace(' ', '')
+    if t in ('0', ''):
+        return '0'
+    m = re.fullmatch(r'(\d{1,6}(?:\.\d{1,3})?)(MB|GB|TB)', t)
+    if not m or float(m.group(1)) * {'MB': 1, 'GB': 1000, 'TB': 1000000}[m.group(2)] < 1:
+        raise ValueError('0 for no cap, or a size written like 500MB, 20GB or 1.5TB')
+    return f'{m.group(1)}{m.group(2)}'
+
+
 def _mode(v):
     if str(v).strip().lower() not in ('count', 'block'):
         raise ValueError('"block" or "count"')
@@ -1120,6 +1206,8 @@ LIMITS = {
     'QueryMemory': ('service', _memory, 'memory, one query'),
     'QueryTimeout': ('service', _whole(10, 3600), 'seconds, one query'),
     'MaxRecLimit': ('service', _whole(1000, 50000000), 'rows, one result'),
+    'DownloadLimit': ('service', _volume, 'volume sent to one client in a day'),
+    'FireflyDownloadLimit': ('service', _volume, "volume sent to all of Firefly's users in a day"),
     'RateLimit': ('firewall', _whole(10, 1000000), 'requests in five minutes, one address'),
     'OverallLimit': ('firewall', _whole(10, 10000000), 'requests in five minutes, all addresses (counted only)'),
     'Mode': ('firewall', _mode, 'whether the firewall refuses or only counts'),
@@ -2575,6 +2663,10 @@ def tick():
             print(f'tick: {name} failed: {e!r}')
             out[name] = f'failed: {e}'[:200]
     out['canary'] = run_canary()
+    try:
+        query_records(168, budget=60)      # keeps the hours of the request log, so the views need not read them
+    except Exception as e:
+        print(f'tick: request log not kept: {e!r}')
     return out
 
 
