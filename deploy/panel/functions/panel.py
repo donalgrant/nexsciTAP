@@ -365,6 +365,7 @@ def view_load(params):
     return {'hours': hours, 'period': period, 'series': series, 'workArea': work,
             'firewall': firewall(hours, period, end),
             'limitsStatus': (load_state('stack') or {}).get('status'),
+            'limitsUndone': (load_state('stack') or {}).get('undone'),
             'limits': {k: params_now.get(k) for k in
                        ('ClientLimit', 'AsyncLimit', 'AsyncClientLimit', 'QueryMemory', 'QueryTimeout', 'MaxRecLimit')}}
 
@@ -395,10 +396,11 @@ def firewall(hours, period, end):
             # The web ACL and its stack have the same name (the template names it so).
             st = aws('cloudformation', FIREWALL_REGION).describe_stacks(StackName=name)['Stacks'][0]
             return {'params': {p['ParameterKey']: p.get('ParameterValue', '') for p in st.get('Parameters', [])},
-                    'status': st['StackStatus']}
+                    'status': st['StackStatus'],
+                    'undone': undone(aws('cloudformation', FIREWALL_REGION), name, st['StackStatus'])}
         held = stack_state(make, 'firewall')
         settings = held['params']
-        out.update(status=held.get('status'), limit=int(settings.get('RateLimit') or 0), overallLimit=int(settings.get('OverallLimit') or 0),
+        out.update(status=held.get('status'), undone=held.get('undone'), limit=int(settings.get('RateLimit') or 0), overallLimit=int(settings.get('OverallLimit') or 0),
                    mode=settings.get('Mode') or '')
         want = [('allowed', 'AllowedRequests', 'ALL'), ('refused', 'BlockedRequests', f'{name}-PerAddress'),
                 ('overAddress', 'CountedRequests', f'{name}-PerAddress'), ('overAll', 'CountedRequests', f'{name}-Overall')]
@@ -418,9 +420,25 @@ def stack_parameters():
     def make():
         st = aws('cloudformation').describe_stacks(StackName=STACK)['Stacks'][0]
         return {'params': {p['ParameterKey']: p.get('ParameterValue', '') for p in st.get('Parameters', [])},
-                'status': st['StackStatus'],
+                'status': st['StackStatus'], 'undone': undone(aws('cloudformation'), STACK, st['StackStatus']),
                 'updated': (st.get('LastUpdatedTime') or st['CreationTime']).timestamp()}
     return stack_state(make)['params']
+
+
+def undone(cf, stack, status):
+    """Why a stack's last change was undone, if it was: CloudFormation's first complaint."""
+    if 'ROLLBACK' not in status:
+        return None
+    try:
+        events = cf.describe_stack_events(StackName=stack)['StackEvents'][:40]
+        last = next((i for i, e in enumerate(events) if e['ResourceStatus'] == 'UPDATE_IN_PROGRESS'
+                     and e.get('ResourceType') == 'AWS::CloudFormation::Stack'), len(events))
+        why = [e.get('ResourceStatusReason') for e in events[:last] if e.get('ResourceStatusReason')
+               and ('FAILED' in e['ResourceStatus'] or e['ResourceStatus'] == 'UPDATE_ROLLBACK_IN_PROGRESS')]
+        return {'at': events[0]['Timestamp'].timestamp(), 'why': (why[-1] if why else '')[:400]}
+    except Exception as e:
+        print(f'undone: {e!r}')
+        return {'at': time.time(), 'why': ''}
 
 
 def stack_state(make=None, name='stack'):
