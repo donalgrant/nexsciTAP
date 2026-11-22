@@ -20,7 +20,10 @@ The output has every input column, with these changes:
   * the position columns are named "ra" and "dec" (degrees), whatever they
     were called, because the service uses one pair of names for all tables;
   * column names are lower-cased and anything but letters, digits and "_"
-    becomes "_", so that they are plain SQL identifiers;
+    becomes "_", so that they are plain ADQL identifiers;  a name is made to
+    start with a letter ("2MASS" becomes "c_2mass", "_row" becomes "row"),
+    a word ADQL keeps for itself gets a "_" after it ("size" becomes
+    "size_"), and two columns that come to the same name are numbered;
   * a column "hpx29" is added: the nested HEALPix order-29 index of the
     position (the quantity HATS calls _healpix_29);
   * rows with no position are dropped, since they could never be found by one.
@@ -309,9 +312,45 @@ def parquet_metadata(con, path):
     return votable_metadata.parse(bytes(row[0]).decode('utf-8', 'replace'))[1] if row else {}
 
 
+# Words ADQL keeps for itself (SQL-92's, ADQL's functions and geometries, and
+# the additions of ADQL 2.1), as TOPCAT's validator lists them.  A column
+# with one of these names can be asked for only in double quotes.  "dec" is
+# not among them:  ADQL leaves it out so that it can be a column.
+ADQL_RESERVED = frozenset("""
+absolute action add all allocate alter and any are as asc assertion at authorization avg begin between bit
+bit_length both by cascade cascaded case cast catalog char character character_length char_length check close
+coalesce collate collation column commit connect connection constraint constraints continue convert
+corresponding count create cross current current_date current_time current_timestamp current_user cursor date
+day deallocate decimal declare default deferrable deferred delete desc describe descriptor diagnostics
+disconnect distinct domain double drop else end escape except exception exec execute exists external extract
+false fetch first float for foreign found from full get global go goto grant group having hour identity
+immediate in indicator initially inner input insensitive insert int integer intersect interval into is
+isolation join key language last leading left level like local lower match max min minute module month names
+national natural nchar next no not null nullif numeric octet_length of on only open option or order outer
+output overlaps pad partial position precision prepare preserve primary prior privileges procedure public read
+real references relative restrict revoke right rollback rows schema scroll second section select session
+session_user set size smallint some space sql sqlcode sqlerror sqlstate substring sum system_user table
+temporary then time timestamp timezone_hour timezone_minute to trailing transaction translate translation trim
+true union unique unknown update upper usage user using value values varchar varying view when whenever where
+with work write year zone abs acos asin atan atan2 ceiling cos degrees exp floor log log10 mod pi power radians
+rand round sin sqrt tan top truncate area box centroid circle contains coord1 coord2 coordsys distance
+intersects point polygon region cot bigint ilike in_unit offset
+""".split())
+
+
 def clean(name):
-    name = re.sub(r'[^0-9a-z_]', '_', name.strip().lower())
-    return name if re.match(r'[a-z_]', name) else '_' + name
+    """
+    A column name anyone can type in ADQL without quotes:  lower case,
+    letters, digits and "_", starting with a letter, and not a word ADQL
+    keeps for itself.  "2MASS" becomes "c_2mass", "_planets" "planets",
+    "**" "col" and "size" "size_".
+    """
+    name = re.sub(r'[^0-9a-z_]', '_', name.strip().lower()).lstrip('_')
+    if not name:
+        name = 'col'
+    elif name[0].isdigit():
+        name = 'c_' + name
+    return name + '_' if name in ADQL_RESERVED else name
 
 
 def main():
@@ -375,8 +414,11 @@ def main():
               f"{len(hats['files'])} data files" + (f", {int(said):,} rows by its properties" if said.isdigit() else '')
               + f";  positions in {args.ra}, {args.dec}.  Its own partitions and index are not kept.")
 
-    # Output names: cleaned, positions renamed, no collisions.
+    # Output names: cleaned, positions renamed, no collisions.  Two columns
+    # that clean to one name ("Planets" and "#Planets") are told apart by a
+    # number, the later one getting it.
     names = {}
+    taken = {'ra', 'dec'}
     for col in rel.columns:
         if col == args.ra:
             new = 'ra'
@@ -387,8 +429,11 @@ def main():
             if new in ('ra', 'dec', 'hpx29', 'aiab_x', 'aiab_y', 'aiab_z'):
                 # The aiab_ three are added by the service's view; the rest are ours.
                 new = new + '_in'
-        if new in names.values():
-            sys.exit(f'Columns collide after cleaning their names: "{col}" -> "{new}"')
+            base, n = new, 1
+            while new in taken:
+                n += 1
+                new = f'{base}_{n}'
+            taken.add(new)
         names[col] = new
 
     for need, given in (('ra', args.ra), ('dec', args.dec)):

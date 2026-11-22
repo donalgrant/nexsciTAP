@@ -451,3 +451,36 @@ def test_a_description_given_wins_over_the_catalogs_own(tmp_path):
     run = _convert(tmp_path / 'cat', tmp_path / 'out', '--description', 'Mine')
     assert run.returncode == 0, run.stderr
     assert _carried(tmp_path / 'out')[0] == 'Mine'
+
+
+def test_names_are_plain_adql_identifiers(tmp_path):
+    """Headings that begin with a digit or a sign, or are ADQL's own words, come out typeable.
+
+    TOPCAT's validator reported "_2mass", "__" and "size" in served tables
+    (22 November 2026):  each can be asked for only in double quotes.
+    """
+    duckdb = pytest.importorskip('duckdb')
+    pytest.importorskip('astropy_healpix')
+
+    src = tmp_path / 'in.csv'
+    src.write_text('RA,Dec,2MASS,**,#Planets,Planets,Size,Date,_row\n'
+                   '10.0,5.0,a,b,1,2,3.5,2020,7\n'
+                   '20.0,-5.0,c,d,3,4,4.5,2021,8\n')
+    out = tmp_path / 'out'
+    run = subprocess.run([sys.executable, str(REPO / 'tools' / 'make_parquet_catalog.py'), str(src), str(out),
+                          '--ra', 'RA', '--dec', 'Dec'], capture_output=True, text=True)
+    assert run.returncode == 0, run.stderr
+
+    names = [d[0] for d in duckdb.connect().execute(f"SELECT * FROM read_parquet('{out}/*.parquet') LIMIT 0").description]
+    assert names[:9] == ['ra', 'dec', 'c_2mass', 'col', 'planets', 'planets_2', 'size_', 'date_', 'row']
+    assert '2MASS -> c_2mass' in run.stdout and 'Size -> size_' in run.stdout
+
+    sys.path.insert(0, str(REPO / 'tools'))
+    try:
+        import make_parquet_catalog as m
+    finally:
+        sys.path.pop(0)
+    import re
+    for name in names:
+        assert re.fullmatch(r'[a-z][a-z0-9_]*', name) and name not in m.ADQL_RESERVED, name
+    assert 'dec' not in m.ADQL_RESERVED and m.clean('Mass (Msun)') == 'mass__msun_'
