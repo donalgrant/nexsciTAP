@@ -5,12 +5,23 @@ document.querySelectorAll('.tapurl').forEach(function (e) { e.textContent = TAP;
 document.querySelectorAll('pre').forEach(function (e) {
     e.innerHTML = e.innerHTML.split('https://aiab.ipac.caltech.edu/TAP').join(TAP);
 });
+// Copy the address.  Where the browser refuses the clipboard (an old browser,
+// or a page that is not allowed it), the address is selected instead, so that
+// the usual keys copy it; the button says which happened.
 document.querySelectorAll('.copy').forEach(function (b) {
     b.addEventListener('click', function () {
-        if (!navigator.clipboard) return;
-        navigator.clipboard.writeText(TAP).then(function () {
-            b.textContent = 'Copied'; setTimeout(function () { b.textContent = 'Copy'; }, 1500);
-        });
+        var said = function (t) { b.textContent = t; setTimeout(function () { b.textContent = 'Copy'; }, 2000); };
+        var select = function () {
+            var code = b.parentNode.querySelector('code'), r = document.createRange();
+            r.selectNodeContents(code);
+            var sel = getSelection(); sel.removeAllRanges(); sel.addRange(r);
+            var ok = false;
+            try { ok = document.execCommand('copy'); } catch (e) { /* not allowed */ }
+            said(ok ? 'Copied' : 'Selected');
+        };
+        if (navigator.clipboard && navigator.clipboard.writeText)
+            navigator.clipboard.writeText(TAP).then(function () { said('Copied'); }, select);
+        else select();
     });
 });
 
