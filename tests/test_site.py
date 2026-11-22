@@ -60,3 +60,14 @@ def test_the_front_page_has_its_three_doors():
     html = read(SITE, 'index.html')
     for door in ('href="/firefly/"', f'href="{TAP_PANEL}"', 'href="#tap"'):
         assert door in html
+
+
+def test_the_sources_are_well_formed():
+    import json
+    sources = json.loads(read(SITE, 'about', 'sources.json'))
+    assert sources
+    for table, src in sources.items():
+        assert re.fullmatch(r'[a-z][a-z0-9_]*', table), table
+        assert src['url'].startswith('https://') and ' ' not in src['url'], table
+        assert src['from'].strip(), table
+    assert "fetch('/about/sources.json')" in read(SITE, 'about', 'site.js')

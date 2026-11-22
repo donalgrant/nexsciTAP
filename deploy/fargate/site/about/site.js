@@ -47,9 +47,26 @@ function csvRows(text) {
 var list = document.getElementById('catalogs');
 if (list) {
     var q = "SELECT table_name, description FROM TAP_SCHEMA.tables WHERE schema_name = 'main' ORDER BY table_name";
-    fetch('/TAP/sync?LANG=ADQL&FORMAT=csv&QUERY=' + encodeURIComponent(q))
-        .then(function (r) { if (!r.ok) throw new Error(r.status); return r.text(); })
-        .then(function (text) {
+    // Where each catalog comes from:  a list beside this script, by table name.
+    // A table that is not in it can still carry a link, since an address
+    // written in its own description (which the panel's editor changes, with
+    // no rebuild) is made a link too.
+    var sources = fetch('/about/sources.json').then(function (r) { return r.ok ? r.json() : {}; })
+        .catch(function () { return {}; });
+    var described = function (cell, text) {
+        text.split(/(https?:\/\/[^\s<>"')]+[^\s<>"').,;:])/).forEach(function (part, i) {
+            if (i % 2) {
+                var a = document.createElement('a');
+                a.href = part; a.textContent = part.replace(/^https?:\/\//, ''); a.rel = 'noopener';
+                cell.appendChild(a);
+            } else if (part) cell.appendChild(document.createTextNode(part));
+        });
+    };
+    var tables = fetch('/TAP/sync?LANG=ADQL&FORMAT=csv&QUERY=' + encodeURIComponent(q))
+        .then(function (r) { if (!r.ok) throw new Error(r.status); return r.text(); });
+    Promise.all([tables, sources])
+        .then(function (both) {
+            var text = both[0], from = both[1] || {};
             var rows = csvRows(text).slice(1).filter(function (r) { return r[0]; });
             if (!rows.length) throw new Error('empty');
             var body = list.querySelector('tbody');
@@ -57,7 +74,13 @@ if (list) {
             rows.forEach(function (r) {
                 var tr = document.createElement('tr'), a = document.createElement('td'), b = document.createElement('td'),
                     code = document.createElement('code');
-                code.textContent = r[0]; a.appendChild(code); b.textContent = r[1] || '';
+                code.textContent = r[0]; a.appendChild(code); described(b, r[1] || '');
+                var src = from[r[0]];
+                if (src && /^https:\/\//.test(src.url || '')) {
+                    var s = document.createElement('a');
+                    s.href = src.url; s.textContent = src.from || 'source'; s.rel = 'noopener'; s.className = 'src';
+                    b.appendChild(document.createElement('br')); b.appendChild(document.createTextNode('Source:  ')); b.appendChild(s);
+                }
                 tr.appendChild(a); tr.appendChild(b); body.appendChild(tr);
             });
             document.getElementById('catalog-note').textContent =

@@ -1,0 +1,13 @@
+{
+  "allwise":            {"from": "IRSA:  the AllWISE data release", "url": "https://irsa.ipac.caltech.edu/data/WISE/docs/release/AllWISE/"},
+  "euclid_q1":          {"from": "IRSA:  Euclid Quick Release 1", "url": "https://irsa.ipac.caltech.edu/data/Euclid/docs/overview_q1.html"},
+  "fp_xsc":             {"from": "IRSA:  2MASS", "url": "https://irsa.ipac.caltech.edu/Missions/2mass.html"},
+  "servs_cdfs":         {"from": "IRSA:  SERVS", "url": "https://irsa.ipac.caltech.edu/data/SPITZER/SERVS/"},
+  "gaia_bright":        {"from": "ESA:  Gaia Data Release 3", "url": "https://www.cosmos.esa.int/web/gaia/dr3"},
+  "heasarc_csc":        {"from": "HEASARC:  Chandra Source Catalog", "url": "https://heasarc.gsfc.nasa.gov/W3Browse/chandra/csc.html"},
+  "heasarc_erass1main": {"from": "HEASARC:  eROSITA eRASS1 main catalog", "url": "https://heasarc.gsfc.nasa.gov/W3Browse/erosita/erass1main.html"},
+  "nea_ukirt":          {"from": "NASA Exoplanet Archive:  UKIRT microlensing survey", "url": "https://exoplanetarchive.ipac.caltech.edu/docs/UKIRTMission.html"},
+  "sdss_dr16q":         {"from": "SDSS:  the quasar catalog", "url": "https://www.sdss4.org/dr17/algorithms/qso_catalog/"},
+  "census_20pc":        {"from": "Kirkpatrick et al. 2024, ApJS 271, 55", "url": "https://doi.org/10.3847/1538-4365/ad24e2"},
+  "hops_images":        {"from": "IRSA:  Herschel Orion Protostar Survey", "url": "https://irsa.ipac.caltech.edu/data/Herschel/HOPS/overview.html"}
+}
