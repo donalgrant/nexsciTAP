@@ -503,6 +503,34 @@ Resources:
           OriginRequestPolicyId: 216adef6-5c7f-47e4-b989-5492eafa07d3  # managed: AllViewer
           FunctionAssociations:
             - {EventType: viewer-request, FunctionARN: !GetAtt AccessFunction.FunctionMetadata.FunctionARN}
+        # Firefly's own script (4.7 MB) and its fonts.  Through the default
+        # behavior they went out uncompressed and in full on every visit, since
+        # that behavior keeps nothing and passes no Accept-Encoding to nginx:
+        # 9 of the 12 s Firefly's page took to load (21 November 2026).  Here
+        # CloudFront compresses them and keeps them.  The script's name carries
+        # a hash that changes with every Firefly release, so a kept copy cannot
+        # go stale.  The access check still runs:  a viewer-request function
+        # runs before a kept copy is served.  AllViewer stays, because nginx
+        # answers by the Host name;  it is not part of what a copy is kept by.
+        CacheBehaviors:
+          - PathPattern: /firefly/firefly-*.js
+            TargetOriginId: alb
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [GET, HEAD]
+            Compress: true
+            CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6          # managed: CachingOptimized
+            OriginRequestPolicyId: 216adef6-5c7f-47e4-b989-5492eafa07d3  # managed: AllViewer
+            FunctionAssociations:
+              - {EventType: viewer-request, FunctionARN: !GetAtt AccessFunction.FunctionMetadata.FunctionARN}
+          - PathPattern: /firefly/*.woff2
+            TargetOriginId: alb
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [GET, HEAD]
+            Compress: true
+            CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6          # managed: CachingOptimized
+            OriginRequestPolicyId: 216adef6-5c7f-47e4-b989-5492eafa07d3  # managed: AllViewer
+            FunctionAssociations:
+              - {EventType: viewer-request, FunctionARN: !GetAtt AccessFunction.FunctionMetadata.FunctionARN}
 
   TaskDefinition:
     Type: AWS::ECS::TaskDefinition
