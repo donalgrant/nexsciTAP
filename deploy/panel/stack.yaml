@@ -451,6 +451,13 @@ Resources:
                   - wafv2:TagResource
                   - wafv2:UntagResource
                 Resource: !Sub arn:aws:wafv2:us-east-1:${AWS::AccountId}:global/webacl/aiab-waf*/*
+              # A web ACL that holds AWS's managed rule sets is updated "on" those
+              # sets as well:  without this a change of the firewall's settings
+              # from the panel is refused and undone (seen 21 November 2026).
+              - Sid: LimitsFirewallManagedRuleSets
+                Effect: Allow
+                Action: wafv2:UpdateWebACL
+                Resource: !Sub arn:aws:wafv2:us-east-1:${AWS::AccountId}:global/managedruleset/*/*
               - Sid: LimitsFirewallAccountCheck
                 Effect: Allow
                 Action: payments:GetConnectedAccount
