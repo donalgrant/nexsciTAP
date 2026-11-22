@@ -190,3 +190,42 @@ def test_a_served_table_can_be_checked_again_without_storing_anything(converted:
     report = json.loads(put[("panel", "state/fulltest/t/_report.json")])
     assert report["ok"] and report["mode"] == "check" and report["rows"] == 40000
     assert report["searchTest"]["cones"] == 25 and "sample" not in report and "dropped" not in report
+
+
+# ---- a HATS catalog in the incoming area ------------------------------------------
+
+def _ingest():
+    import importlib.util
+    import os
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'tools', 'ingest_task.py')
+    spec = importlib.util.spec_from_file_location('ingest_task_for_hats', path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_a_hats_tree_is_recognized_and_fetched_whole():
+    names = ['properties', 'hats.properties', 'partition_info.csv', 'skymap.fits', 'dataset/_metadata',
+             'dataset/_common_metadata', 'dataset/Norder=0/Dir=0/Npix=1.parquet', 'dataset/Norder=1/Dir=0/Npix=16.parquet']
+    root, wanted = _ingest().hats_tree(names, lambda n: '')
+    assert root == ''
+    assert wanted == ['properties', 'hats.properties', 'dataset/Norder=0/Dir=0/Npix=1.parquet', 'dataset/Norder=1/Dir=0/Npix=16.parquet']
+
+
+def test_irsas_layout_and_a_collection():
+    names = ['collection.properties', 'README.txt', 'cat-hats/hats.properties', 'cat-hats/partition_info.csv',
+             'cat-hats/dataset/Norder=0/Dir=0/Npix=2/part0.snappy.parquet', 'cat-hats_margin/hats.properties',
+             'cat-hats_margin/dataset/Norder=0/Dir=0/Npix=2/part0.snappy.parquet']
+    text = '# a collection\nhats_primary_table_url=cat-hats\nall_margins=cat-hats_margin\n'
+    root, wanted = _ingest().hats_tree(names, lambda n: text)
+    assert root == 'cat-hats/'
+    assert wanted == ['cat-hats/hats.properties', 'cat-hats/dataset/Norder=0/Dir=0/Npix=2/part0.snappy.parquet']
+
+
+def test_an_ordinary_folder_is_not_hats():
+    ingest = _ingest()
+    assert ingest.hats_tree(['a.csv', 'b.csv'], lambda n: '') is None
+    assert ingest.hats_tree(['part-00.parquet', 'part-01.parquet'], lambda n: '') is None
+    assert ingest.hats_tree(['properties', 'notes.txt'], lambda n: '') is None
+    assert ingest.hats_tree(['collection.properties', 'x/properties', 'x/dataset/Norder=0/Dir=0/Npix=1.parquet'],
+                            lambda n: 'hats_primary_table_url=../elsewhere\n') is None

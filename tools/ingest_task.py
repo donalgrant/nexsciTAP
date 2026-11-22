@@ -320,6 +320,31 @@ def search_test(con, src, outdir, files, report):
     report['checkCone'] = middling[len(middling) // 2] if middling else None
 
 
+def hats_tree(names, text_of):
+    """
+    If the names in a folder are a HATS catalog, where it is and what to fetch:
+    (root, [names]), root being '' or a sub-folder ending in '/'.  A HATS
+    catalog has a properties file and Parquet files under dataset/Norder=.../;
+    a HATS collection has collection.properties, which names its primary
+    catalog among the tables beside it (margins, indexes), and only that
+    catalog is wanted.  text_of(name) reads a small file.  None if not HATS.
+    """
+    names, root = set(names), ''
+    if 'collection.properties' in names:
+        primary = ''
+        for line in text_of('collection.properties').splitlines():
+            key, _, value = line.partition('=')
+            if key.strip() == 'hats_primary_table_url':
+                primary = value.strip().strip('/')
+        if not primary or '..' in primary or '://' in primary:
+            return None
+        root = primary + '/'
+    props = [root + n for n in ('properties', 'hats.properties') if root + n in names]
+    data = sorted(n for n in names if n.startswith(root + 'dataset/') and '/Norder=' in '/' + n[len(root):]
+                  and n.endswith('.parquet'))
+    return (root, props + data) if props and data else None
+
+
 def main():
     import boto3
 
@@ -348,26 +373,44 @@ def main():
         if mode == 'convert':
             key = env('SRC_KEY')
             if key.endswith('/'):
-                # A folder of files that are one table: all CSV, or all Parquet.
+                # A folder of files that are one table: all CSV, or all Parquet;
+                # or a HATS catalog, a tree, which is fetched as it stands.
                 src = os.path.join(indir, 'table')
                 os.makedirs(src, exist_ok=True)
                 kinds, size = set(), 0
-                for page in s3.get_paginator('list_objects_v2').paginate(Bucket=env('SRC_BUCKET'), Prefix=key):
-                    for o in page.get('Contents', []):
-                        name = o['Key'][len(key):]
-                        low = name.lower()
-                        kind = ('parquet' if low.endswith(('.parquet', '.pq')) else
-                                'csv' if low.endswith(('.csv', '.csv.gz')) else None)
-                        if '/' in name or not kind:
-                            continue
-                        kinds.add(kind)
-                        size += o['Size']
-                        print(f'fetching {o["Key"]} ({o["Size"]:,} bytes)', flush=True)
-                        s3.download_file(env('SRC_BUCKET'), o['Key'], os.path.join(src, name))
+                listing = [o for page in s3.get_paginator('list_objects_v2').paginate(Bucket=env('SRC_BUCKET'), Prefix=key)
+                           for o in page.get('Contents', [])]
+
+                def text_of(name):
+                    return s3.get_object(Bucket=env('SRC_BUCKET'), Key=key + name)['Body'].read(200_000).decode('utf-8', 'replace')
+
+                tree = hats_tree([o['Key'][len(key):] for o in listing], text_of)
+                if tree:
+                    root, wanted = tree
+                    sizes = {o['Key'][len(key):]: o['Size'] for o in listing}
+                    print(f'a HATS catalog at {key}{root}:  {sum(n.endswith(".parquet") for n in wanted)} data files', flush=True)
+                    for name in wanted:
+                        local_name = os.path.join(src, name[len(root):])
+                        os.makedirs(os.path.dirname(local_name), exist_ok=True)
+                        print(f'fetching {key}{name} ({sizes[name]:,} bytes)', flush=True)
+                        s3.download_file(env('SRC_BUCKET'), key + name, local_name)
+                        size += sizes[name]
+                    listing, kinds = [], {'hats'}
+                for o in listing:
+                    name = o['Key'][len(key):]
+                    low = name.lower()
+                    kind = ('parquet' if low.endswith(('.parquet', '.pq')) else
+                            'csv' if low.endswith(('.csv', '.csv.gz')) else None)
+                    if '/' in name or not kind:
+                        continue
+                    kinds.add(kind)
+                    size += o['Size']
+                    print(f'fetching {o["Key"]} ({o["Size"]:,} bytes)', flush=True)
+                    s3.download_file(env('SRC_BUCKET'), o['Key'], os.path.join(src, name))
                 if len(kinds) != 1:
-                    raise RuntimeError('The folder must hold CSV files only or Parquet files only; it holds '
+                    raise RuntimeError('The folder must hold CSV files only, Parquet files only, or a HATS catalog; it holds '
                                        + (' and '.join(sorted(kinds)) if kinds else 'neither') + '.')
-                local = os.path.join(src, '*.parquet' if kinds == {'parquet'} else '*.csv*')
+                local = src if kinds == {'hats'} else os.path.join(src, '*.parquet' if kinds == {'parquet'} else '*.csv*')
             else:
                 local = os.path.join(indir, os.path.basename(key))
                 size = s3.head_object(Bucket=env('SRC_BUCKET'), Key=key)['ContentLength']

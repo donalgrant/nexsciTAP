@@ -332,3 +332,73 @@ def test_row_groups_are_sized_by_values_not_rows(tmp_path):
     auto = tmp_path / 'auto'
     _tool('describe_parquet_catalog.py', old, auto, '--row-group', 'auto')
     assert order(auto) == order(old) and sizes(auto) == sizes(new)
+
+
+# ---- HATS catalogs, as they are published ---------------------------------------
+
+def _hats_rows(n, seed):
+    import numpy as np
+    rng = np.random.default_rng(seed)
+    return {'ra': rng.uniform(0, 360, n), 'dec': np.degrees(np.arcsin(rng.uniform(-1, 1, n))),
+            'name': [f's{seed}_{i}' for i in range(n)]}
+
+
+def _write_hats(root, layout, ra='RA', dec='DEC', extra=False):
+    """A small HATS tree:  'file' is data.lsdb.io's layout (Npix=P.parquet), 'dir' is IRSA's (Npix=P/part0.snappy.parquet)."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    total = 0
+    for order, pix, n in ((0, 1, 40), (0, 7, 25), (1, 16, 35)):
+        r = _hats_rows(n, pix)
+        cols = {'_healpix_29': list(range(n)), ra: r['ra'], dec: r['dec'], 'Name': r['name']}
+        if extra:
+            cols.update({'_healpix_19': [1] * n, '_healpix_9': [1] * n, 'Norder': [order] * n, 'Dir': [0] * n, 'Npix': [pix] * n})
+        d = root / 'dataset' / f'Norder={order}' / 'Dir=0'
+        path = d / f'Npix={pix}.parquet' if layout == 'file' else d / f'Npix={pix}' / 'part0.snappy.parquet'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pq.write_table(pa.table(cols), path)
+        total += n
+    (root / 'dataset' / '_metadata').write_bytes(b'not a table')          # present in real catalogs; must not be read as data
+    (root / 'partition_info.csv').write_text('Norder,Npix\n0,1\n0,7\n1,16\n')
+    props = (f'#HATS catalog\nobs_collection=little\nhats_nrows={total}\nhats_col_ra={ra}\nhats_col_dec={dec}\n'
+             "hats_cols_sort=['_healpix_29', '_healpix_19']\nhats_creation_date=2026-02-09T16\\:19UTC\n")
+    (root / ('properties' if layout == 'file' else 'hats.properties')).write_text(props)
+    return total
+
+
+def _convert(src, out, *extra):
+    return subprocess.run([sys.executable, str(REPO / 'tools' / 'make_parquet_catalog.py'), str(src), str(out), *extra],
+                          capture_output=True, text=True)
+
+
+@pytest.mark.parametrize('layout', ['file', 'dir'])
+def test_a_hats_catalog_is_read_as_published(tmp_path, layout):
+    import duckdb
+    ra, dec = ('RA', 'DEC') if layout == 'file' else ('ra_from_object_id', 'dec_from_object_id')
+    total = _write_hats(tmp_path / 'cat', layout, ra, dec, extra=(layout == 'dir'))
+    run = _convert(tmp_path / 'cat', tmp_path / 'out')                    # no --ra, --dec:  the catalog says
+    assert run.returncode == 0, run.stderr
+    assert 'HATS catalog little' in run.stdout and f'{total:,} rows by its properties' in run.stdout
+    got = duckdb.sql(f"SELECT * FROM read_parquet('{tmp_path}/out/*.parquet')")
+    assert got.columns == ['ra', 'dec', 'name', 'hpx29'] or set(got.columns) == {'ra', 'dec', 'name', 'hpx29'}
+    rows = got.fetchall()
+    assert len(rows) == total
+    hpx = [r[got.columns.index('hpx29')] for r in rows]
+    assert hpx == sorted(hpx)                                             # sorted on the service's index, not HATS's partitions
+
+
+def test_a_hats_collection_leads_to_its_primary_catalog(tmp_path):
+    import duckdb
+    total = _write_hats(tmp_path / 'coll' / 'main', 'file')
+    _write_hats(tmp_path / 'coll' / 'main_margin', 'file')                # beside it, and not the catalog
+    (tmp_path / 'coll' / 'collection.properties').write_text('obs_collection=little\nhats_primary_table_url=main\nall_margins=main_margin\n')
+    run = _convert(tmp_path / 'coll', tmp_path / 'out')
+    assert run.returncode == 0, run.stderr
+    assert duckdb.sql(f"SELECT count(*) FROM read_parquet('{tmp_path}/out/*.parquet')").fetchall()[0][0] == total
+
+
+def test_a_directory_that_is_not_hats_is_refused_with_the_reason(tmp_path):
+    (tmp_path / 'd').mkdir()
+    (tmp_path / 'd' / 'partition_info.csv').write_text('Norder,Npix\n0,1\n')
+    run = _convert(tmp_path / 'd', tmp_path / 'out')
+    assert run.returncode != 0 and 'not a HATS catalog' in run.stderr

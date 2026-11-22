@@ -9,7 +9,8 @@ Convert a table of sky positions to the Parquet layout the DuckDB backend serves
     make_parquet_catalog.py INPUT OUTPUT_DIR [--ra COL] [--dec COL] [--schema FILE]
                             [--description TEXT] [--rows-per-file N] [--row-group N]
 
-INPUT is a CSV, Parquet, FITS or VOTable file (CSV and Parquet may be a glob,
+INPUT is a CSV, Parquet, FITS or VOTable file, or the directory of a HATS
+catalog as it is published (CSV and Parquet may be a glob,
 and may be s3:// or https:// locations DuckDB can read).  OUTPUT_DIR receives
 part-00.parquet, part-01.parquet, ...; copy that directory to the catalog's
 folder in S3 and list it with make_duckdb_catalog.py.
@@ -135,8 +136,68 @@ def read_schema(path):
     return types, meta
 
 
-def read_input(con, path, types=None):
+# ---- HATS ---------------------------------------------------------------------
+# A HATS catalog (the LSDB project's layout, once "HiPSCat") is a directory:
+# a properties file, and under dataset/ one Parquet file for each HEALPix cell
+# it is divided into, Norder=N/Dir=D/Npix=P.parquet or, as IRSA writes them,
+# Npix=P/part0.snappy.parquet.  It is read as it is published.  Its own
+# division of the sky and its own index column are not kept:  this converter
+# sorts the rows and writes the index the service uses.
+
+HATS_PROPERTIES = ('properties', 'hats.properties')
+# Columns HATS adds to a catalog:  its index (under its present name and its
+# old one), IRSA's two coarser indexes, and the partition a row's file is in.
+HATS_COLUMNS = ('_healpix_29', '_hipscat_index', '_healpix_19', '_healpix_9', 'Norder', 'Dir', 'Npix')
+
+
+def read_properties(path):
+    """The key=value lines of a HATS properties file.  Lines starting with # are comments; \\: is a colon."""
+    out = {}
+    with open(path, encoding='utf-8', errors='replace') as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#') or '=' not in line:
+                continue
+            key, value = line.split('=', 1)
+            out[key.strip()] = value.strip().replace('\\:', ':')
+    return out
+
+
+def hats_catalog(path):
+    """
+    What a directory holds, if it is a HATS catalog:  its root, its properties
+    and its data files.  A HATS "collection" (a catalog with its margin and
+    index tables beside it) is followed to its primary catalog.  None for a
+    directory that is not HATS.
+    """
+    for _ in range(3):                                  # a collection names a catalog; no deeper
+        coll = os.path.join(path, 'collection.properties')
+        if not os.path.isfile(coll):
+            break
+        primary = read_properties(coll).get('hats_primary_table_url', '').strip('/')
+        if not primary or '..' in primary or '://' in primary or not os.path.isdir(os.path.join(path, primary)):
+            return None
+        path = os.path.join(path, primary)
+    props = next((os.path.join(path, n) for n in HATS_PROPERTIES if os.path.isfile(os.path.join(path, n))), None)
+    data = os.path.join(path, 'dataset')
+    if not props or not os.path.isdir(data):
+        return None
+    files = sorted(os.path.join(d, f) for d, _, names in os.walk(data) for f in names
+                   if f.endswith('.parquet') and 'Norder=' in d)
+    return {'root': path, 'properties': read_properties(props), 'files': files} if files else None
+
+
+def read_input(con, path, types=None, hats=None):
     """(DuckDB relation, {column: metadata the input itself carries}) for the input table."""
+
+    if hats:
+        # The files by name, not by a pattern:  dataset/ also holds _metadata.
+        # Their paths say Norder=N/Dir=D, which DuckDB would otherwise add as columns.
+        listed = ', '.join("'" + f.replace("'", "''") + "'" for f in hats['files'])
+        rel = con.sql(f'SELECT * FROM read_parquet([{listed}], hive_partitioning=false, union_by_name=true)')
+        index = hats['properties'].get('hats_col_healpix', '')
+        keep = [c for c in rel.columns if c not in HATS_COLUMNS and c != index]
+        return rel.project(', '.join('"' + c.replace('"', '""') + '"' for c in keep)), parquet_metadata(con, hats['files'][0])
 
     # A folder of files arrives as a pattern, "dir/*.csv*"; judge it by the name before the star.
     low = path.lower().rstrip('*')
@@ -242,7 +303,26 @@ def main():
     temp = '' if scratch else 'TEMP'       # a table in the database file, or in memory
 
     types, declared = read_schema(args.schema) if args.schema else ({}, {})
-    rel, carried = read_input(con, args.input, types)  # noqa: F841  (rel is used by name in SQL)
+    hats = None
+    if os.path.isdir(args.input):
+        hats = hats_catalog(args.input)
+        if not hats:
+            sys.exit('The input is a directory, and not a HATS catalog:  it has no properties file with a '
+                     'dataset/ folder of Parquet files beside it.  For a folder of CSV or Parquet files that '
+                     'are one table, give a pattern such as "dir/*.parquet".')
+    rel, carried = read_input(con, args.input, types, hats)  # noqa: F841  (rel is used by name in SQL)
+
+    if hats:
+        # The catalog says which columns hold its positions.  A name given
+        # on the command line wins if the catalog has such a column.
+        props = hats['properties']
+        for arg, key in (('ra', 'hats_col_ra'), ('dec', 'hats_col_dec')):
+            if getattr(args, arg) not in rel.columns and props.get(key) in rel.columns:
+                setattr(args, arg, props[key])
+        said = props.get('hats_nrows', '')
+        print(f"HATS catalog {props.get('obs_collection') or os.path.basename(hats['root'])}:  "
+              f"{len(hats['files'])} data files" + (f", {int(said):,} rows by its properties" if said.isdigit() else '')
+              + f";  positions in {args.ra}, {args.dec}.  Its own partitions and index are not kept.")
 
     # Output names: cleaned, positions renamed, no collisions.
     names = {}
@@ -271,6 +351,8 @@ def main():
                 'WHERE "{0}" IS NOT NULL AND "{1}" IS NOT NULL'.format(args.ra, args.dec))
 
     total_in = con.execute('SELECT count(*) FROM rel').fetchone()[0]
+    if hats and hats['properties'].get('hats_nrows', '').isdigit() and int(hats['properties']['hats_nrows']) != total_in:
+        print(f"NOTE:  the catalog's properties say {int(hats['properties']['hats_nrows']):,} rows;  its files hold {total_in:,}.")
     kept, lo, hi = con.execute('SELECT count(*), min(dec), max(dec) FROM src').fetchone()
 
     if kept == 0:
