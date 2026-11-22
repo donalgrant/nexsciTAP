@@ -209,7 +209,8 @@ def test_a_hats_tree_is_recognized_and_fetched_whole():
              'dataset/_common_metadata', 'dataset/Norder=0/Dir=0/Npix=1.parquet', 'dataset/Norder=1/Dir=0/Npix=16.parquet']
     root, wanted = _ingest().hats_tree(names, lambda n: '')
     assert root == ''
-    assert wanted == ['properties', 'hats.properties', 'dataset/Norder=0/Dir=0/Npix=1.parquet', 'dataset/Norder=1/Dir=0/Npix=16.parquet']
+    assert wanted == ['properties', 'hats.properties', 'dataset/_common_metadata',
+                      'dataset/Norder=0/Dir=0/Npix=1.parquet', 'dataset/Norder=1/Dir=0/Npix=16.parquet']
 
 
 def test_irsas_layout_and_a_collection():

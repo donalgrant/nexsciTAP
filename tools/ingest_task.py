@@ -339,7 +339,9 @@ def hats_tree(names, text_of):
         if not primary or '..' in primary or '://' in primary:
             return None
         root = primary + '/'
-    props = [root + n for n in ('properties', 'hats.properties') if root + n in names]
+    # _common_metadata is the catalog's schema, and the one place IRSA writes
+    # each column's unit and description; the data files do not repeat them.
+    props = [root + n for n in ('properties', 'hats.properties', 'dataset/_common_metadata') if root + n in names]
     data = sorted(n for n in names if n.startswith(root + 'dataset/') and '/Norder=' in '/' + n[len(root):]
                   and n.endswith('.parquet'))
     return (root, props + data) if props and data else None
