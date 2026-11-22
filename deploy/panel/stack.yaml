@@ -10,6 +10,14 @@ Description: >-
 # stack costs close to nothing and is still there when the service has no task.
 
 Parameters:
+  ReviewModel:
+    Type: String
+    Default: us.anthropic.claude-sonnet-5-5
+    Description: The Bedrock inference profile the daily review asks.
+  ReviewSchedule:
+    Type: String
+    Default: cron(20 16 * * ? *)
+    Description: When the daily review runs (UTC).  The default is 08:20 Pacific standard time.
   ServiceStack:
     Type: String
     Default: aiab-fargate
@@ -710,6 +718,63 @@ Resources:
       Principal: events.amazonaws.com
       SourceArn: !GetAtt CanaryRule.Arn
 
+  # ---- the daily review ----------------------------------------------------
+  # Once a day Claude, on Amazon Bedrock, reads the digest of the last 24 hours
+  # and files a report (functions/review.py).  Until 21 November 2026 this was
+  # a scheduled task on the administrator's desk machine, which ran only while
+  # that machine was awake.  The function's role lets it invoke the watch
+  # function (a digest out, a report in) and one model, and nothing else.
+  ReviewRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - {Effect: Allow, Principal: {Service: lambda.amazonaws.com}, Action: sts:AssumeRole}
+      Policies:
+        - PolicyName: digest-model-report
+          PolicyDocument:
+            Statement:
+              - {Effect: Allow, Action: lambda:InvokeFunction, Resource: !GetAtt WatchFunction.Arn}
+              - Effect: Allow
+                Action: bedrock:InvokeModel
+                Resource:
+                  - !Sub arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/${ReviewModel}
+                  - arn:aws:bedrock:*::foundation-model/anthropic.claude-*
+              - Effect: Allow
+                Action: [logs:CreateLogGroup, logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AWS::StackName}-Review*
+
+  ReviewFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Archive in a Box control panel - the daily review of the service's records, by Claude on Bedrock
+      Runtime: python3.12
+      Handler: review.handler
+      Code: functions/
+      Role: !GetAtt ReviewRole.Arn
+      Timeout: 300
+      MemorySize: 256
+      Environment:
+        Variables:
+          WATCH_FUNCTION: !Ref WatchFunction
+          REVIEW_MODEL: !Ref ReviewModel
+
+  ReviewRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Archive in a Box control panel - the daily review
+      ScheduleExpression: !Ref ReviewSchedule
+      Targets:
+        - {Id: review, Arn: !GetAtt ReviewFunction.Arn}
+
+  ReviewPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt ReviewFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ReviewRule.Arn
+
   # ---- the door -----------------------------------------------------------
 
   AccessFunction:
@@ -812,6 +877,8 @@ Outputs:
     Value: !Ref LogBucket
   WatchFunction:
     Value: !Ref WatchFunction
+  ReviewFunction:
+    Value: !Ref ReviewFunction
   WatchRole:
     Value: !GetAtt WatchRole.Arn
   UserPool:
