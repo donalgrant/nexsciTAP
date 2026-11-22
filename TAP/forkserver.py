@@ -54,6 +54,7 @@ import sys
 import tempfile
 import time
 from urllib.parse import unquote, urlsplit
+from xml.sax.saxutils import escape as _xml_escape
 
 PRIVATE_FILES = ('upload_*.vot', 'worker', 'abort')
 
@@ -197,13 +198,30 @@ class Handler(http.server.BaseHTTPRequestHandler):
         soon = f'{wait // 3600 + 1} hours' if wait >= 5400 else f'{max(1, wait // 60)} minutes'
         body = (f'This service sends one client at most {_volume.show_size(limit)} in a day, and {who} '
                 f'has been sent {_volume.show_size(had)} in the last day.  Try again in about {soon}.\n').encode()
+        self._refuse(body, wait)
+        return True
+
+    def _refuse(self, message, wait):
+        """Answer 429 with the message as a DALI error document.
+
+        TAP clients read an error from a VOTable whose QUERY_STATUS is ERROR
+        and show its text;  given plain text they show only the status, or
+        fail on the parse.  The message stays readable to a person with curl.
+        """
+        if isinstance(message, bytes):
+            message = message.decode()
+        body = ('<?xml version="1.0" encoding="UTF-8"?>\n'
+                '<VOTABLE version="1.3" xmlns="http://www.ivoa.net/xml/VOTable/v1.3">\n'
+                '<RESOURCE type="results">\n'
+                '<INFO name="QUERY_STATUS" value="ERROR">\n'
+                + _xml_escape(message.strip()) +
+                '\n</INFO>\n</RESOURCE>\n</VOTABLE>\n').encode()
         self.send_response(429)
         self.send_header('Retry-After', str(wait))
-        self.send_header('Content-Type', 'text/plain')
+        self.send_header('Content-Type', 'application/x-votable+xml')
         self.send_header('Content-Length', str(len(body)))
         self.end_headers()
         self.wfile.write(body)
-        return True
 
     def _sent(self, client, sent):
         """Write down what the client was sent, where a cap on it is in force."""
@@ -306,12 +324,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             else:
                 body = (f'Too many requests in progress from {client} '
                         f'(this service handles {self._limit(client)} at once for one client).  Try again shortly.\n').encode()
-            self.send_response(429)
-            self.send_header('Retry-After', '5')
-            self.send_header('Content-Type', 'text/plain')
-            self.send_header('Content-Length', str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self._refuse(body, 5)
             return
 
         if self._over_volume(client):

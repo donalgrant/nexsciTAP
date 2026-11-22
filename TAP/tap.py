@@ -2444,10 +2444,13 @@ class Tap:
 
             if (self.format == 'votable'):
 
+                # The message alone:  it goes into a VOTable error
+                # document, which escapes it.  Wrapped in a uws:message
+                # element it reached the client as escaped markup.
                 if (len(errmsg) > 0):
-                    outstr = f'        <uws:message>{errmsg:s}</uws:message>'
+                    outstr = errmsg
                 else:
-                    outstr = '        <uws:message></uws:message>'
+                    outstr = 'No error message'
 
                 self.__printStatus__('errorSummary', outstr, 'xml')
 

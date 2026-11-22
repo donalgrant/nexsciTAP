@@ -2234,10 +2234,12 @@ RULES = {
     'traffic':  ('Traffic', 'an hour with over 500 requests and five times the usual for that hour'),
     'volume':   ('Download volume', 'one client takes more than 5 GB in 24 hours'),
     'restart':  ('Task restarts', 'a task starts that nobody asked for'),
-    'knocking': ('Requests refused at the door', '50 or more in an hour from outside'),
+    'knocking': ('Requests refused at the door', '500 or more in an hour from outside'),
 }
 ERRORS_MAX, REFUSED_MAX, TRAFFIC_MIN, TRAFFIC_TIMES = 5, 20, 500, 5
-VOLUME_MAX, KNOCK_MAX = 5 * 10**9, 50
+# 500:  in two days of true counts (20 to 22 November 2026) the panel's own check
+# made 12 an hour and three scanners 170 to 290 in an hour each, all refused.
+VOLUME_MAX, KNOCK_MAX = 5 * 10**9, 500
 
 PROXY_LINE = re.compile(r'^\S+ \S+ \S+ \[[^\]]+\] "(\S+) (\S+)[^"]*" (\d{3}) (\d+|-) "[^"]*" "([^"]*)" "([^"]*)"')
 

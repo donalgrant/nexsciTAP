@@ -284,6 +284,9 @@ def test_client_limit(fair_server):
 
         r = requests.post(base + "/TAP/sync", data=ask, headers={"X-Client": "alice"})
         assert r.status_code == 429 and r.headers["Retry-After"]
+        # The refusal is a DALI error document, which TAP clients can show.
+        assert r.headers["Content-Type"] == "application/x-votable+xml"
+        assert 'name="QUERY_STATUS" value="ERROR"' in r.text and "Too many requests" in r.text
         assert "alice" in r.text
 
         # Asking after a job takes no place, so it is never refused for want of one.

@@ -7,6 +7,7 @@ import argparse
 import logging
 import os
 import sys
+from xml.sax.saxutils import escape, quoteattr
 
 from TAP import duckdbsupport
 
@@ -461,9 +462,11 @@ class vosiTables:
         #
             fp.write("    <schema>\n")
             fp.write("        <name>" + \
-                self.schema_namearr[ischema] + "</name>\n")
-            fp.write("        <description>" + \
-                self.schema_descarr[ischema] + "</description>\n")
+                escape(str(self.schema_namearr[ischema])) + "</name>\n")
+            if self.schema_descarr[ischema] not in (None, '', 'None'):
+                fp.write("        <description>" + \
+                    escape(str(self.schema_descarr[ischema])) + \
+                    "</description>\n")
             fp.flush()
 
 
@@ -556,9 +559,11 @@ class vosiTables:
                 fp.write("        <table type=\"" + \
                     table_typearr[itable] + "\">\n")
                 fp.write("            <name>" + \
-                    table_namearr[itable] + "</name>\n")
-                fp.write("             <description>" + \
-                    table_descarr[itable] + "</description>\n")
+                    escape(str(table_namearr[itable])) + "</name>\n")
+                if table_descarr[itable] not in (None, '', 'None'):
+                    fp.write("            <description>" + \
+                        escape(str(table_descarr[itable])) + \
+                        "</description>\n")
 
 
             #
@@ -1247,88 +1252,54 @@ class vosiTables:
                 row = rows[ll]
                 data = ''
 
-                fp.write("            <column>\n")
-
-                col_name = ''
+                #
+                # VODataService wants a column's elements in one order:
+                # name, description, unit, ucd, utype, dataType, flag.
+                # The array size and the extended type are attributes
+                # of dataType, and "indexed" and "principal" are flags.
+                # The values are gathered first and written in that
+                # order, whatever the order of the query's columns.
+                #
+                val = {}
                 for i in range(0, len(row)):
-
                     if (row[i] is None):
-                        data = 'None'
-                    elif (dbtype[i] == 'STRING'):
-                        data = row[i]
-                    else:
-                        data = str(row[i])
+                        continue
+                    val[colnamearr[i]] = str(row[i])
 
-                    if (i == 0):
-                        col_name = data
+                def on(name):
+                    return val.get(name, '0').strip().lower() \
+                        not in ('', '0', 'false', 'none')
 
-                    if (ll == 0):
-                        if self.debug:
-                            logging.debug('')
-                            logging.debug(f'i= {i:d}, data= {data:s}')
+                fp.write("            <column" + \
+                    (" std=\"true\"" if on('std') else "") + ">\n")
 
-                    if ((data == 'timestamp') or (data == 'date')):
-                        if self.debug:
-                            logging.debug('')
-                            logging.debug(f'll= {ll:d} col_name= {col_name:s} data= {data:s}')
+                fp.write("                <name>" + \
+                    escape(val.get('column_name', '')) + "</name>\n")
 
+                if val.get('description'):
+                    fp.write("                <description>" + \
+                        escape(val['description']) + "</description>\n")
 
-                    if (colnamearr[i] == 'column_name'):
-                        fp.write("                <name>" + data + "</name>\n")
+                for name in ('unit', 'ucd', 'utype'):
+                    if val.get(name):
+                        fp.write("                <" + name + ">" + \
+                            escape(val[name]) + "</" + name + ">\n")
 
-                    elif (colnamearr[i] == 'description'):
-                        fp.write("                <description>" + \
-                            "<![CDATA[" + data + "]]></description>\n")
+                attrs = ''
+                if val.get('arraysize'):
+                    attrs += " arraysize=" + quoteattr(val['arraysize'])
+                if val.get('xtype'):
+                    attrs += " extendedType=" + quoteattr(val['xtype'])
 
-                    elif (colnamearr[i] == 'datatype'):
-                        fp.write ("                " + \
-                            "<dataType xsi:type=\"vod:VOTableType\">" + \
-                            data + "</dataType>\n")
+                fp.write("                " + \
+                    "<dataType xsi:type=\"vod:VOTableType\"" + attrs + \
+                    ">" + escape(val.get('datatype', 'char')) + \
+                    "</dataType>\n")
 
-                    elif (colnamearr[i] == 'arraysize'):
-                        if (data != 'None'):
-                            fp.write ("                <arraysize>" + data + \
-                                "</arraysize>\n")
-
-                    elif (colnamearr[i] == 'xtype'):
-                        if (data != 'None'):
-                            fp.write ("                <xtype>" + data + \
-                                "</xtype>\n")
-
-                    elif (colnamearr[i] == 'utype'):
-                        if (data != 'None'):
-                            fp.write("                <utype>" + data + \
-                            "</utype>\n")
-
-                    elif (colnamearr[i] == 'unit'):
-                        if (data != 'None'):
-                            fp.write("                <unit>" + data + \
-                            "</unit>\n")
-
-                    elif (colnamearr[i] == 'ucd'):
-                        if (data != 'None'):
-                            fp.write ("                <ucd>" + data + \
-                            "</ucd>\n")
-
-                    elif (colnamearr[i] == 'indexed'):
-                        if (data != 'None'):
-                            fp.write ("                <indexed>" + data + \
-                            "</indexed>\n")
-
-                    elif (colnamearr[i] == 'principal'):
-                        if (data != 'None' and data != 0 and data != '0'):
-                            fp.write("                " + \
-                                "<principal>" + data + "</principal>\n")
-
-                    elif (colnamearr[i] == 'std'):
-                        if (data != 'None'):
-                            fp.write ("                <std>" + data + \
-                                "</std>\n")
-
-                    elif (colnamearr[i] == 'column_index'):
-                        if (data != 'None' and data != 0 and data != '0'):
-                            fp.write("                " + "<column_index>" + data + \
-                                "</column_index>\n")
+                for name in ('indexed', 'principal'):
+                    if on(name):
+                        fp.write("                <flag>" + name + \
+                            "</flag>\n")
 
                 irow = irow + 1
 
@@ -1523,8 +1494,9 @@ class vosiTables:
                     "</targetColumn>\n")
                 fp.write("                </fkColumn>\n")
 
-                fp.write("                <description>" + \
-                    desc + "</description>\n")
+                if desc not in ('', 'None'):
+                    fp.write("                <description>" + \
+                        escape(desc) + "</description>\n")
                 fp.write("            </foreignKey>\n")
 
                 #
