@@ -102,6 +102,11 @@ def preload():
         pass
 
 
+# A job's own record:  /async/<job>, and its phase, error, results list and the like.
+# Not the list of jobs, and not a result file (those are served from the work area).
+JOB_STATUS = re.compile(r'/async/[A-Za-z0-9_.-]+(/(phase|error|quote|executionduration|destruction|owner|parameters|results))?/?$')
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
 
     conf = ''
@@ -290,7 +295,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.send_error(400)
 
         client = self._client()
-        if not self._admit(client):
+        # Asking how a job is doing takes no place.  It does no work, and a
+        # client that is refused the answer takes its job for failed:  Firefly
+        # showed "Error getting phase" for a search that was in fact running
+        # (21 November 2026).  The firewall in front still bounds how often.
+        if not (self.command in ('GET', 'HEAD') and JOB_STATUS.match(path_info or '')) and not self._admit(client):
             if client in self.shared_clients:
                 body = (f'Too many requests in progress through this portal '
                         f'(this service handles {self._limit(client)} at once for all its users).  Try again shortly.\n').encode()

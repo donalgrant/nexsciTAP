@@ -286,6 +286,11 @@ def test_client_limit(fair_server):
         assert r.status_code == 429 and r.headers["Retry-After"]
         assert "alice" in r.text
 
+        # Asking after a job takes no place, so it is never refused for want of one.
+        r = requests.get(base + "/TAP/async/tap_nosuchjob/phase", headers={"X-Client": "alice"})
+        assert r.status_code != 429
+        assert requests.get(base + "/TAP/async/tap_nosuchjob", headers={"X-Client": "alice"}).status_code != 429
+
         # Someone else is not affected, and neither is an exempt client.
         assert requests.post(base + "/TAP/sync", data=ask, headers={"X-Client": "bob"}).status_code == 200
         more = [_stalled_request(base, "portal") for _ in range(3)]
