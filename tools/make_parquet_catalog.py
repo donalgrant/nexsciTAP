@@ -54,6 +54,7 @@ row_group_size); --row-group N sets the rows outright.
 
 import argparse
 import csv
+import glob
 import os
 import re
 import sys
@@ -62,6 +63,7 @@ import duckdb
 import numpy as np
 import votable_metadata
 import pyarrow as pa
+import pyarrow.parquet as pq
 from astropy_healpix import lonlat_to_healpix
 from astropy import units as u
 
@@ -156,6 +158,8 @@ def read_properties(path):
     with open(path, encoding='utf-8', errors='replace') as f:
         for line in f:
             line = line.strip()
+            if line.startswith('#') and '#' not in out:
+                out['#'] = line.lstrip('# ').strip()     # the first comment, often the catalog's title
             if not line or line.startswith('#') or '=' not in line:
                 continue
             key, value = line.split('=', 1)
@@ -187,6 +191,45 @@ def hats_catalog(path):
     return {'root': path, 'properties': read_properties(props), 'files': files} if files else None
 
 
+def field_metadata(path):
+    """
+    Units and descriptions written on the columns of a Parquet file itself
+    (Arrow's field metadata), as IRSA writes them in its HATS catalogs:
+    {column: {'unit': ..., 'description': ..., 'ucd': ...}}.  Empty where
+    a file has none, which is most files.
+    """
+    try:
+        schema = pq.read_schema(path)
+    except Exception:                       # not readable as Parquet from here (a pattern, a remote address)
+        return {}
+    names = {'unit': 'unit', 'units': 'unit', 'description': 'description', 'desc': 'description',
+             'comment': 'description', 'ucd': 'ucd'}
+    out = {}
+    for field in schema:
+        found = {}
+        for key, value in (field.metadata or {}).items():
+            what = names.get(key.decode('utf-8', 'replace').lower())
+            text = value.decode('utf-8', 'replace').strip()
+            if what and text and text.lower() not in ('none', 'null', 'n/a'):
+                found.setdefault(what, text)
+        if found:
+            out[field.name] = found
+    return out
+
+
+def hats_description(props):
+    """What a HATS catalog says it is, for a table given no description:  its title, its reference, and where it is from."""
+    title = props.get('obs_title') or props.get('#', '')
+    if re.fullmatch(r'hats (catalog|collection)', title.strip(), re.I):
+        title = ''
+    title = re.sub(r'\s*-\s*HATS Catalog$', '', title).strip()
+    parts = [title or props.get('obs_collection', ''), props.get('bib_reference', '')]
+    where = props.get('bib_reference_url') or props.get('obs_copyright_url') or ''
+    if where.startswith('http'):
+        parts.append('Source:  ' + where)
+    return '.  '.join(p.strip().rstrip('.') for p in parts if p.strip())[:500]
+
+
 def read_input(con, path, types=None, hats=None):
     """(DuckDB relation, {column: metadata the input itself carries}) for the input table."""
 
@@ -197,13 +240,19 @@ def read_input(con, path, types=None, hats=None):
         rel = con.sql(f'SELECT * FROM read_parquet([{listed}], hive_partitioning=false, union_by_name=true)')
         index = hats['properties'].get('hats_col_healpix', '')
         keep = [c for c in rel.columns if c not in HATS_COLUMNS and c != index]
-        return rel.project(', '.join('"' + c.replace('"', '""') + '"' for c in keep)), parquet_metadata(con, hats['files'][0])
+        common = os.path.join(hats['root'], 'dataset', '_common_metadata')
+        carried = field_metadata(common if os.path.isfile(common) else hats['files'][0]) or field_metadata(hats['files'][0])
+        carried.update(parquet_metadata(con, hats['files'][0]))          # the IVOA note's metadata wins, if there is any
+        return rel.project(', '.join('"' + c.replace('"', '""') + '"' for c in keep)), carried
 
     # A folder of files arrives as a pattern, "dir/*.csv*"; judge it by the name before the star.
     low = path.lower().rstrip('*')
 
     if low.endswith(('.parquet', '.pq')) or '.parquet' in low:
-        return con.sql(f"SELECT * FROM read_parquet('{path}')"), parquet_metadata(con, path)
+        first = sorted(glob.glob(path))[:1] if '*' in path else [path]
+        carried = field_metadata(first[0]) if first and os.path.isfile(first[0]) else {}
+        carried.update(parquet_metadata(con, path))
+        return con.sql(f"SELECT * FROM read_parquet('{path}')"), carried
 
     if low.endswith(('.csv', '.csv.gz', '.tsv', '.txt')):
         if types:
@@ -319,6 +368,8 @@ def main():
         for arg, key in (('ra', 'hats_col_ra'), ('dec', 'hats_col_dec')):
             if getattr(args, arg) not in rel.columns and props.get(key) in rel.columns:
                 setattr(args, arg, props[key])
+        if not args.description:
+            args.description = hats_description(props)
         said = props.get('hats_nrows', '')
         print(f"HATS catalog {props.get('obs_collection') or os.path.basename(hats['root'])}:  "
               f"{len(hats['files'])} data files" + (f", {int(said):,} rows by its properties" if said.isdigit() else '')

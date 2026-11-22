@@ -402,3 +402,52 @@ def test_a_directory_that_is_not_hats_is_refused_with_the_reason(tmp_path):
     (tmp_path / 'd' / 'partition_info.csv').write_text('Norder,Npix\n0,1\n')
     run = _convert(tmp_path / 'd', tmp_path / 'out')
     assert run.returncode != 0 and 'not a HATS catalog' in run.stderr
+
+
+def _carried(out_dir):
+    """What the converted table says of itself and of its columns."""
+    import duckdb
+    sys.path.insert(0, str(REPO / 'tools'))
+    try:
+        import votable_metadata
+    finally:
+        sys.path.remove(str(REPO / 'tools'))
+    first = sorted(Path(out_dir).glob('*.parquet'))[0]
+    row = duckdb.connect().execute('SELECT value FROM parquet_kv_metadata(?) WHERE key = ? LIMIT 1',
+                                   [str(first), votable_metadata.CONTENT_KEY.encode()]).fetchone()
+    return votable_metadata.parse(bytes(row[0]).decode())
+
+
+def test_a_hats_catalogs_own_units_and_descriptions_are_kept(tmp_path):
+    """IRSA writes a unit and a description on every column of its HATS files; they travel into the table."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    root = tmp_path / 'cat'
+    r = _hats_rows(30, 3)
+    fields = [pa.field('_healpix_29', pa.int64(), metadata={'unit': '', 'description': 'HEALPix order 29 pixel index.'}),
+              pa.field('ra_obj', pa.float64(), metadata={'unit': 'deg', 'description': 'Right ascension of the object'}),
+              pa.field('dec_obj', pa.float64(), metadata={'unit': 'deg', 'description': 'Declination of the object'}),
+              pa.field('Flux', pa.float64(), metadata={'unit': 'mJy', 'description': 'Flux in the band'}),
+              pa.field('label', pa.string(), metadata={'unit': 'none', 'description': 'A name'})]
+    table = pa.table([list(range(30)), r['ra'], r['dec'], r['ra'], r['name']], schema=pa.schema(fields))
+    path = root / 'dataset' / 'Norder=0' / 'Dir=0' / 'Npix=2' / 'part0.snappy.parquet'
+    path.parent.mkdir(parents=True)
+    pq.write_table(table, path)
+    pq.write_metadata(table.schema, root / 'dataset' / '_common_metadata')
+    (root / 'hats.properties').write_text('# Little Survey Sources - HATS Catalog\nobs_collection=little\nhats_nrows=30\n'
+                                          'hats_col_ra=ra_obj\nhats_col_dec=dec_obj\nbib_reference_url=https://example.org/little\n')
+    run = _convert(root, tmp_path / 'out')
+    assert run.returncode == 0, run.stderr
+    description, columns = _carried(tmp_path / 'out')
+    assert columns['flux'] == {'unit': 'mJy', 'description': 'Flux in the band'} or (
+        columns['flux'].get('unit') == 'mJy' and columns['flux'].get('description') == 'Flux in the band')
+    assert columns['ra'].get('description') == 'Right ascension of the object' and columns['ra'].get('unit') == 'deg'
+    assert columns['label'].get('description') == 'A name' and not columns['label'].get('unit')      # "none" is no unit
+    assert description == 'Little Survey Sources.  Source:  https://example.org/little'
+
+
+def test_a_description_given_wins_over_the_catalogs_own(tmp_path):
+    _write_hats(tmp_path / 'cat', 'file')
+    run = _convert(tmp_path / 'cat', tmp_path / 'out', '--description', 'Mine')
+    assert run.returncode == 0, run.stderr
+    assert _carried(tmp_path / 'out')[0] == 'Mine'
