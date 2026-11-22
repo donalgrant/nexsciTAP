@@ -262,3 +262,12 @@ def test_the_request_log_is_read_once_an_hour(panel, monkeypatch):
     assert panel.query_records(24) == first
     assert len(asked) == 1                                                      # the kept hours came from the bucket
     assert len(panel.query_records(3)) < len(first)
+
+
+def test_a_door_log_file_is_dated_by_its_name(panel):
+    """CloudFront's files arrive in no order, so they are told apart by the hour in their names, not by name order."""
+    from datetime import datetime, timezone
+    now = datetime(2026, 11, 22, 3, 0, tzinfo=timezone.utc).timestamp()
+    assert panel.door_log_age('service/E2LMXJ9HJKEQ7L.2026-11-22-01.c40486de.gz', now) == 2 * 3600
+    assert panel.door_log_age('service/E2LMXJ9HJKEQ7L.2026-11-19-03.ffd77748.gz', now) == 3 * 86400
+    assert panel.door_log_age('service/something-else', now) == float('inf')

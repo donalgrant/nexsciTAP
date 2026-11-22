@@ -2246,6 +2246,18 @@ def hour_of(t):
     return str(int(t // 3600) * 3600)
 
 
+DOOR_FILES_AT_ONCE = 60
+
+
+def door_log_age(key, now=None):
+    """Seconds since the hour a CloudFront log file is named for (<distribution>.YYYY-MM-DD-HH.<tag>.gz); a name that says no hour is old."""
+    m = re.search(r'\.(\d{4})-(\d\d)-(\d\d)-(\d\d)\.', key)
+    if not m:
+        return float('inf')
+    y, mo, d, h = map(int, m.groups())
+    return (now or time.time()) - datetime(y, mo, d, h, tzinfo=timezone.utc).timestamp()
+
+
 def gather(watch):
     """
     Add what has arrived since the last look to hourly counts: from the
@@ -2286,9 +2298,20 @@ def gather(watch):
     # CloudFront writes its log as small compressed files, some minutes to an hour late.
     if LOG_BUCKET:
         import gzip
-        done = cursor.get('door', '')
-        keys = sorted(o['Key'] for o in keys_under('service/', LOG_BUCKET) if o['Key'] > done)
-        for key in keys[:40]:
+        # A file is named for its hour and a random tag, and files of one hour
+        # arrive up to an hour apart in no order.  Reading "everything after
+        # the last name read" therefore skipped most of them:  on 21 November
+        # 2026 the panel's own check from outside, 288 refusals a day, was
+        # counted as 46.  So the names read are remembered, for three days.
+        recent = [o['Key'] for o in keys_under('service/', LOG_BUCKET) if door_log_age(o['Key']) < 3 * 86400]
+        if 'doorSeen' not in cursor:            # the first look under this rule:  count the kept hours again
+            for b in buckets.values():
+                b['knocks'], b['paths'] = {}, {}
+            cursor['doorSeen'] = [k for k in recent if door_log_age(k) > 49 * 3600]
+            cursor.pop('door', None)
+        seen = set(cursor['doorSeen'])
+        keys = sorted(k for k in recent if k not in seen)
+        for key in keys[:DOOR_FILES_AT_ONCE if len(keys) < 200 else 2000]:
             text = gzip.decompress(aws('s3').get_object(Bucket=LOG_BUCKET, Key=key)['Body'].read()).decode('utf-8', 'replace')
             fields = []
             for line in text.splitlines():
@@ -2310,7 +2333,8 @@ def gather(watch):
                 path = urllib.parse.unquote(row.get('cs-uri-stem', ''))[:80]
                 if len(b['paths']) < 40 or path in b['paths']:
                     b['paths'][path] = b['paths'].get(path, 0) + 1
-            cursor['door'] = key
+            seen.add(key)
+        cursor['doorSeen'] = sorted(seen & set(recent))
 
     for h in [h for h in buckets if int(h) < time.time() - 48 * 3600]:
         del buckets[h]

@@ -3193,8 +3193,12 @@ class Tap:
 
         fp = None
         try:
-            fp = open(statuspath, 'w+')
-            os.chmod(statuspath, 0o664)
+            # Written beside the file and moved into place:  written in place, a client
+            # that asked at that moment was given an empty or half-written document
+            # (Firefly logged "Premature end of file", 21 November 2026).
+            tmppath = statuspath + '.' + str(os.getpid()) + '.tmp'
+            fp = open(tmppath, 'w+')
+            os.chmod(tmppath, 0o664)
 
         except Exception:
             msg = 'Failed to open/create status file.'
@@ -3303,6 +3307,7 @@ class Tap:
 
         fp.flush()
         fp.close()
+        os.replace(tmppath, statuspath)
 
         if self.debug:
             logging.debug('')
