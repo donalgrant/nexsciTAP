@@ -41,7 +41,7 @@ import sys
 
 import duckdb
 import votable_metadata
-from make_parquet_catalog import read_schema, row_group_size
+from make_parquet_catalog import clean, read_schema, row_group_size
 
 
 def main():
@@ -85,8 +85,11 @@ def main():
             sys.exit(f'No column "{old}" to rename.  Columns: ' + ', '.join(have))
         if old in ('ra', 'dec', 'hpx29') or old.startswith('aiab_'):
             sys.exit(f'"{old}" is a column the searches depend on and keeps its name.')
-        if not re.fullmatch(r'[a-z_][a-z0-9_]*', new) or new in ('ra', 'dec', 'hpx29') or new.startswith('aiab_'):
+        if new in ('ra', 'dec', 'hpx29') or new.startswith('aiab_'):
             sys.exit(f'"{new}" cannot be a column name here.')
+        if not re.fullmatch(r'[a-z][a-z0-9_]*', new) or clean(new) != new:
+            sys.exit(f'"{new}" is not a plain ADQL name (a letter first, then letters, digits and underscores, '
+                     f'and not a word ADQL keeps for itself);  "{clean(new)}" would do.')
         if new in have or list(renames.values()).count(new) > 1:
             sys.exit(f'There is already a column "{new}".')
     select = '*' + (' RENAME (' + ', '.join(f'"{o}" AS "{n}"' for o, n in renames.items()) + ')' if renames else '')
@@ -109,7 +112,7 @@ def main():
     text_cols = [c for c, t in cols if t.upper() == 'VARCHAR']
     if text_cols:
         widths = con.execute('SELECT ' + ', '.join(f'max(length("{c}"))' for c in text_cols)
-                             + f" FROM read_parquet('{prefix}/*.parquet')").fetchone()
+                             + f" FROM (SELECT {select} FROM read_parquet('{prefix}/*.parquet'))").fetchone()
         for c, w in zip(text_cols, widths):
             meta[c]['width'] = max(1, w or 1)
 

@@ -291,10 +291,29 @@ def test_describe_can_give_a_column_its_name_back(tmp_path):
     assert cols['z'][2] == 'Redshift' and 'z_in' not in cols and 'unit vector' in cols['aiab_z'][2]
 
     # Names the service or the converter owns are refused, and so is a name already taken.
-    for bad in ('z_in=ra', 'z_in=aiab_z', 'z_in=dec', 'nope=q', 'ra=alpha', 'dec=delta', 'hpx29=cell'):
+    # So is a name that would need double quotes in ADQL.
+    for bad in ('z_in=ra', 'z_in=aiab_z', 'z_in=dec', 'nope=q', 'ra=alpha', 'dec=delta', 'hpx29=cell',
+                'z_in=_z', 'z_in=2z', 'z_in=size'):
         run = subprocess.run([sys.executable, str(REPO / 'tools' / 'describe_parquet_catalog.py'), str(old),
                               str(tmp_path / 'never'), '--rename', bad], capture_output=True, text=True)
         assert run.returncode != 0, bad
+
+
+def test_describe_renames_a_text_column(tmp_path):
+    """A text column is measured under its new name:  the rename used to fail on any table that had one renamed."""
+    duckdb = pytest.importorskip('duckdb')
+    pytest.importorskip('astropy_healpix')
+
+    old = tmp_path / 'old'
+    src = tmp_path / 'in.csv'
+    src.write_text('ra,dec,size\n' + ''.join(f'{10 + i * 0.01},{-5 + i * 0.01},{"x" * (1 + i % 7)}M\n' for i in range(50)))
+    _tool('make_parquet_catalog.py', src, old)
+
+    new = tmp_path / 'new'
+    said = _tool('describe_parquet_catalog.py', old, new, '--rename', 'size_=file_size')
+    assert 'renamed: size_ -> file_size' in said
+    con = duckdb.connect()
+    assert con.execute(f"SELECT count(*), max(length(file_size)) FROM read_parquet('{new}/*.parquet')").fetchone() == (50, 8)
 
 
 def test_row_groups_are_sized_by_values_not_rows(tmp_path):
