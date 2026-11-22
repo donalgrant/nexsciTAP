@@ -271,3 +271,19 @@ def test_a_door_log_file_is_dated_by_its_name(panel):
     assert panel.door_log_age('service/E2LMXJ9HJKEQ7L.2026-11-22-01.c40486de.gz', now) == 2 * 3600
     assert panel.door_log_age('service/E2LMXJ9HJKEQ7L.2026-11-19-03.ffd77748.gz', now) == 3 * 86400
     assert panel.door_log_age('service/something-else', now) == float('inf')
+
+
+def test_a_new_name_needs_no_quotes(panel):
+    """A rename from the panel is held to the converter's rule: a letter first, and not a word ADQL reserves."""
+    pytest.importorskip('duckdb')
+    sys.path.insert(0, str(FUNCTIONS.parent.parent.parent / 'tools'))
+    try:
+        import make_parquet_catalog
+    finally:
+        sys.path.pop(0)
+    assert panel.ADQL_RESERVED == make_parquet_catalog.ADQL_RESERVED
+    for bad in ('_planets', '__row', 'size', 'date'):
+        with pytest.raises(panel.Refused):
+            panel.rewrite_settings({'rename': [{'from': 'a', 'to': bad}]})
+    assert panel.rewrite_settings({'rename': [{'from': '_planets', 'to': 'n_planets'}, {'from': 'size', 'to': 'size_'}]}) \
+        == {'RENAME': '_planets=n_planets,size=size_'}

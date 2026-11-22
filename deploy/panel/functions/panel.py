@@ -1613,6 +1613,35 @@ COLUMN = re.compile(r'[a-z_][a-z0-9_]{0,62}')
 KEPT_NAMES = ('ra', 'dec', 'hpx29')
 
 
+# The words ADQL 2.1 keeps for itself, which a column name must not be.  The same list as ADQL_RESERVED in
+# tools/make_parquet_catalog.py (a test holds the two together);  the function cannot import that file.
+ADQL_RESERVED = frozenset("""
+    abs absolute acos action add all allocate alter and any are area as asc asin assertion at atan atan2
+    authorization avg begin between bigint bit bit_length both box by cascade cascaded case cast catalog ceiling
+    centroid char char_length character character_length check circle close coalesce collate collation column commit
+    connect connection constraint constraints contains continue convert coord1 coord2 coordsys corresponding cos cot
+    count create cross current current_date current_time current_timestamp current_user cursor date day deallocate
+    decimal declare default deferrable deferred degrees delete desc describe descriptor diagnostics disconnect
+    distance distinct domain double drop else end escape except exception exec execute exists exp external extract
+    false fetch first float floor for foreign found from full get global go goto grant group having hour identity
+    ilike immediate in in_unit indicator initially inner input insensitive insert int integer intersect intersects
+    interval into is isolation join key language last leading left level like local log log10 lower match max min
+    minute mod module month names national natural nchar next no not null nullif numeric octet_length of offset on
+    only open option or order outer output overlaps pad partial pi point polygon position power precision prepare
+    preserve primary prior privileges procedure public radians rand read real references region relative restrict
+    revoke right rollback round rows schema scroll second section select session session_user set sin size smallint
+    some space sql sqlcode sqlerror sqlstate sqrt substring sum system_user table tan temporary then time timestamp
+    timezone_hour timezone_minute to top trailing transaction translate translation trim true truncate union unique
+    unknown update upper usage user using value values varchar varying view when whenever where with work write year
+    zone
+""".split())
+
+
+def plain_name(name):
+    """Whether a column name can be written in ADQL without double quotes."""
+    return bool(re.fullmatch(r'[a-z][a-z0-9_]{0,62}', name)) and name not in ADQL_RESERVED
+
+
 def rewrite_settings(body):
     """
     What a rewrite of a served table changes besides its metadata: columns
@@ -1633,6 +1662,9 @@ def rewrite_settings(body):
         if not COLUMN.fullmatch(new) or new in KEPT_NAMES or new.startswith('aiab_'):
             raise Refused(f'{new!r} cannot be a column name:  lower-case letters, digits and "_", '
                           'not starting with a digit, and not a name the service uses.')
+        if not plain_name(new):
+            raise Refused(f'{new!r} would need double quotes in a query:  a column name starts with a letter '
+                          'and is not a word ADQL keeps for itself (size, date, user and the like).')
         if old in seen_old or new in seen_new:
             raise Refused(f'{old} or {new} is named twice in the renames.')
         seen_old.add(old)

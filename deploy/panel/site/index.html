@@ -743,8 +743,8 @@ async function metaEditor(table, folder) {
       slot.querySelectorAll('input[data-i]').forEach((el) => { c.columns[+el.dataset.i][el.dataset.k] = el.value; });
       const named = (x) => (x.name == null ? x.column_name : x.name.trim());
       const rename = c.columns.filter((x) => named(x) !== x.column_name).map((x) => ({from: x.column_name, to: named(x)}));
-      const bad = rename.find((r) => !/^[a-z_][a-z0-9_]{0,62}$/.test(r.to));
-      if (bad) return toast(`"${bad.to}" cannot be a column name:  lower-case letters, digits and "_", not starting with a digit.`);
+      const bad = rename.find((r) => !/^[a-z][a-z0-9_]{0,62}$/.test(r.to));
+      if (bad) return toast(`"${bad.to}" cannot be a column name:  lower-case letters, digits and "_", starting with a letter.`);
       if (rename.length && !confirm('Rename ' + rename.map((r) => r.from + ' to ' + r.to).join(', ') + '?\n\nOnce published, queries that use the old name' + (rename.length > 1 ? 's' : '') + ' will fail.')) return;
       act({action: 'describe', folder, description: $('#mdesc').value, rename, rowGroup: $('#mregroup').checked ? 'auto' : '',
            columns: c.columns.map((x) => ({column_name: named(x), unit: x.unit, ucd: x.ucd, description: x.description}))},
