@@ -503,3 +503,33 @@ def test_names_are_plain_adql_identifiers(tmp_path):
     for name in names:
         assert re.fullmatch(r'[a-z][a-z0-9_]*', name) and name not in m.ADQL_RESERVED, name
     assert 'dec' not in m.ADQL_RESERVED and m.clean('Mass (Msun)') == 'mass__msun_'
+
+
+def test_tap_schema_describes_itself(tmp_path):
+    """TAP_SCHEMA.columns lists the columns of the five TAP_SCHEMA tables, as the standard asks."""
+    duckdb = pytest.importorskip('duckdb')
+    pytest.importorskip('astropy_healpix')
+
+    src = tmp_path / 'in.csv'
+    src.write_text('ra,dec,k\n10.0,-5.0,1\n')
+    out = tmp_path / 'out'
+    _tool('make_parquet_catalog.py', src, out)
+    _tap_schema(duckdb, tmp_path, out)
+    con = duckdb.connect(str(tmp_path / 't.duckdb'), read_only=True)
+    have = {}
+    for table, column, datatype, described, std in con.execute(
+            "SELECT table_name, column_name, datatype, description <> '', std FROM tap_schema.columns "
+            "WHERE lower(table_name) LIKE 'tap_schema.%'").fetchall():
+        have.setdefault(table.lower().split('.')[1], {})[column] = (datatype, described, std)
+    assert set(have) == {'schemas', 'tables', 'columns', 'keys', 'key_columns'}
+    for table, needed in (('schemas', ['schema_name', 'description', 'utype']),
+                          ('tables', ['schema_name', 'table_name', 'table_type', 'description', 'utype']),
+                          ('columns', ['table_name', 'column_name', 'datatype', 'arraysize', 'description', 'utype',
+                                       'unit', 'ucd', 'indexed', 'principal', 'std']),
+                          ('keys', ['key_id', 'from_table', 'target_table', 'description', 'utype']),
+                          ('key_columns', ['key_id', 'from_column', 'target_column'])):
+        for column in needed:
+            assert column in have[table], (table, column)
+            assert have[table][column][1] and have[table][column][2] == 1, (table, column)
+    # And the table's own columns are still there, not marked standard.
+    assert con.execute("SELECT count(*), max(std) FROM tap_schema.columns WHERE table_name = 't'").fetchone()[1] == 0

@@ -519,3 +519,74 @@ def test_every_request_leaves_a_record(fixture_root: Path):
     # Looking at a job is a request too, but not a query.
     looks = [r for r in recs if r["path"].endswith("/phase")]
     assert looks and all("q" not in r and "phase" not in r for r in looks)
+
+
+# ---- all clients together cannot take every place -------------------------
+
+@pytest.fixture(scope="module")
+def bounded_server(fixture_root: Path):
+    proc, base, _ = _serve(fixture_root, "bounded", "CLIENT_HEADER=X-Client\nCLIENT_LIMIT=2\nTOTAL_LIMIT=3")
+    try:
+        yield base
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
+
+
+def test_total_limit(bounded_server):
+    """Three requests in progress from three clients, each within its own limit: a fourth client is refused."""
+    base = bounded_server
+    ask = {"query": "select l0filename from data_l0", "format": "ipac"}
+    held = [_stalled_request(base, who) for who in ("ann", "ben", "cy")]
+    try:
+        time.sleep(0.5)
+
+        r = requests.post(base + "/TAP/sync", data=ask, headers={"X-Client": "dee"})
+        assert r.status_code == 429 and r.headers["Retry-After"]
+        assert "handling 3 requests" in r.text and 'value="ERROR"' in r.text
+
+        # The task's own health check is neither counted nor refused, and
+        # asking after a job takes no place.
+        assert requests.post(base + "/TAP/sync", data=ask, headers={"X-Client": "health"}).status_code == 200
+        assert requests.get(base + "/TAP/async/tap_nosuchjob/phase", headers={"X-Client": "dee"}).status_code != 429
+    finally:
+        for s in held:
+            s.close()
+
+    for _ in range(50):
+        r = requests.post(base + "/TAP/sync", data=ask, headers={"X-Client": "dee"})
+        if r.status_code == 200:
+            break
+        time.sleep(0.1)
+    assert r.status_code == 200
+
+
+# ---- a query nobody is waiting for is stopped ------------------------------
+
+def test_a_closed_connection_stops_the_query():
+    """The watch on the client's connection calls for the query to stop when the other end closes."""
+    import socket
+    import threading
+
+    from TAP import duckdbsupport, forkserver
+
+    called = threading.Event()
+    real = duckdbsupport.abandon
+    duckdbsupport.abandon = called.set
+    ours, theirs = socket.socketpair()
+    try:
+        gone = []
+        stop = forkserver._watch_for_hangup(ours.fileno(), gone)
+        time.sleep(1.5)
+        assert not gone and not called.is_set()      # an open, quiet connection is left alone
+        theirs.close()
+        assert called.wait(5) and gone
+    finally:
+        stop.set()
+        time.sleep(0.7)
+        duckdbsupport.abandon = real
+        ours.close()
+
+    # Not a socket (an async job's /dev/null):  nothing is watched and nothing fails.
+    with open(os.devnull, "w") as null:
+        assert forkserver._watch_for_hangup(null.fileno(), []) is None

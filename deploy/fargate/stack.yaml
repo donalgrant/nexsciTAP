@@ -138,6 +138,17 @@ Parameters:
     Type: Number
     Default: 3
     Description: Async jobs one client address may have running at once (0 = no limit).
+  TotalLimit:
+    Type: Number
+    Default: 12
+    MinValue: 0
+    MaxValue: 14
+    Description: >
+      Requests in progress from all clients together, per task (0 = no
+      limit).  One more is refused with 429, where it used to wait
+      unanswered.  The task handles 16 at once, and the places above this
+      limit are kept for health checks and for questions about a job's
+      progress, which take no place in any limit.
   FireflyLimit:
     Type: Number
     Default: 8
@@ -604,6 +615,9 @@ Resources:
             - {Name: VOLUME_LIMIT, Value: !Ref DownloadLimit}
             - {Name: SHARED_VOLUME_LIMIT, Value: !Ref FireflyDownloadLimit}
             - {Name: CLIENT_LIMIT, Value: !Ref ClientLimit}
+            - {Name: TOTAL_LIMIT, Value: !Ref TotalLimit}
+            - {Name: MAX_REQUESTS, Value: '16'}
+            - {Name: STOP_ABANDONED, Value: 'on'}
             - {Name: ASYNC_LIMIT, Value: !Ref AsyncLimit}
             - {Name: ASYNC_CLIENT_LIMIT, Value: !Ref AsyncClientLimit}
           MountPoints:

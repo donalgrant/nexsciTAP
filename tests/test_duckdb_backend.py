@@ -415,3 +415,24 @@ def test_region_cover_falls_back_to_a_scan_when_unsure():
     cone = "SELECT a FROM t WHERE CONTAINS(POINT('ICRS',ra,dec),CIRCLE('ICRS',1,2,3))=1"
     sql = 'SELECT a FROM t WHERE ((0.5*x)+(0.5*y)+(0.7*z)>=9.99e-01)' + clause
     assert duckdbsupport.replace_region_cover(sql, cone, 'hpx29', 29) == sql
+
+
+def test_an_abandoned_query_is_interrupted():
+    """abandon() stops a statement that is running, and says why."""
+    duckdb = pytest.importorskip('duckdb')
+    import threading
+    import time
+
+    conn = duckdbsupport.Connection(duckdb.connect(), None, None)
+    conn._deadline = duckdbsupport.Deadline(conn._duck, 0)
+    cur = conn.cursor()
+    threading.Timer(0.5, duckdbsupport.abandon).start()
+    started = time.time()
+    with pytest.raises(duckdbsupport.QueryAbandoned, match='went away'):
+        cur.execute('SELECT count(*) FROM range(100000000000) a, range(1000) b WHERE a.range % 7 = b.range')
+        cur.fetchall()
+    assert time.time() - started < 20
+    # Nothing more runs on a connection whose client has gone.
+    with pytest.raises(duckdbsupport.QueryAbandoned):
+        cur.execute('SELECT 1')
+    duckdbsupport._deadlines.clear()

@@ -54,6 +54,44 @@ import duckdb
 import votable_metadata
 
 
+# What each column of the TAP_SCHEMA tables holds, in the words of the TAP standard.
+TAP_SCHEMA_COLUMNS = {
+    ('schemas', 'schema_name'): 'schema name for reference to tap_schema.schemas',
+    ('schemas', 'utype'): 'lists the utypes of schemas in the tableset',
+    ('schemas', 'description'): 'describes schemas in the tableset',
+    ('schemas', 'schema_index'): 'recommended order of schemas in a list',
+    ('tables', 'schema_name'): 'the schema this table belongs to',
+    ('tables', 'table_name'): 'the fully qualified table name',
+    ('tables', 'table_type'): 'one of: table view',
+    ('tables', 'utype'): 'lists the utype of tables in the tableset',
+    ('tables', 'description'): 'describes tables in the tableset',
+    ('tables', 'table_index'): 'recommended order of tables in a list',
+    ('columns', 'table_name'): 'the table this column belongs to',
+    ('columns', 'column_name'): 'the column name',
+    ('columns', 'datatype'): 'an ADQL datatype',
+    ('columns', 'arraysize'): 'length of variable length datatypes',
+    ('columns', 'xtype'): 'extended type of the column, where it has one',
+    ('columns', 'size'): 'length of variable length datatypes (TAP 1.0 name of arraysize)',
+    ('columns', '"size"'): 'length of variable length datatypes (TAP 1.0 name of arraysize)',
+    ('columns', 'description'): 'describes the column',
+    ('columns', 'utype'): 'lists the utypes of columns in the tableset',
+    ('columns', 'unit'): 'the unit of the column, in VO standard format',
+    ('columns', 'ucd'): 'the UCD of the column',
+    ('columns', 'indexed'): 'an indexed column; 1 means true, 0 means false',
+    ('columns', 'principal'): 'a principal column; 1 means true, 0 means false',
+    ('columns', 'std'): 'a standard column; 1 means true, 0 means false',
+    ('columns', 'format'): 'the format the service writes the column in, for fixed-width output',
+    ('columns', 'column_index'): 'recommended order of columns in a list',
+    ('keys', 'key_id'): 'unique key identifier',
+    ('keys', 'from_table'): 'fully qualified table name',
+    ('keys', 'target_table'): 'fully qualified table name',
+    ('keys', 'description'): 'description of this key',
+    ('keys', 'utype'): 'utype of this key',
+    ('key_columns', 'key_id'): 'key identifier from tap_schema.keys',
+    ('key_columns', 'from_column'): 'key column name in the from_table',
+    ('key_columns', 'target_column'): 'key column name in the target_table',
+}
+
 # The columns every view adds.  TAP.conf's XCOL, YCOL and ZCOL name the same three.
 UNIT_VECTOR = ('aiab_x', 'aiab_y', 'aiab_z')
 
@@ -339,6 +377,15 @@ def main():
     for i, t in enumerate(['schemas', 'tables', 'columns', 'keys', 'key_columns']):
         con.execute(f'INSERT INTO {ts}.tables VALUES (?, ?, ?, NULL, ?, ?)',
                     [ts, f'{ts}.{t}', 'table', f'TAP_SCHEMA {t}', tindex + i + 1])
+
+        # TAP_SCHEMA describes itself too (TAP 1.1, section 4):  a client, or a
+        # validator, that asks what columns tap_schema.tables has gets an answer.
+        for j, (cname, ctype) in enumerate((r[0], r[1]) for r in con.execute(f'DESCRIBE {ts}.{t}').fetchall()):
+            dtype, fmt = tap_type(ctype)
+            if dtype == 'char':
+                fmt = '256s' if cname == 'description' else '64s'
+            con.execute(f'INSERT INTO {ts}.columns VALUES (?, ?, ?, NULL, NULL, NULL, ?, NULL, ?, NULL, 0, 1, 1, ?, ?)',
+                        [f'{ts}.{t}', cname, dtype, TAP_SCHEMA_COLUMNS.get((t, cname), ''), '', fmt, j + 1])
 
     con.close()
 

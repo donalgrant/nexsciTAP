@@ -35,6 +35,18 @@ behind a reverse proxy, the value of the header named by CLIENT_HEADER, which
 the proxy must set itself (never pass on what the client sent).  Addresses in
 UNLIMITED_CLIENTS are exempt.
 
+TOTAL_LIMIT is the most requests in progress from all clients together; one
+more is refused the same way.  It should be below --max-children, beyond which
+requests wait unanswered, health checks among them.  The clients named in
+TOTAL_EXEMPT (default "health", the name a container's own health check
+gives itself) are neither counted nor refused.
+
+STOP_ABANDONED=on stops a query whose client has closed the connection
+before the answer was ready (it gave up, or a proxy in front timed out).
+The server must then be behind a proxy that keeps the connection open while
+it waits, as nginx does;  a client that closes its sending side as soon as
+it has sent the request would be taken for gone.
+
 There is no TLS and no authentication:  run it behind a reverse proxy.
 """
 
@@ -124,8 +136,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
     shared_client_limit = 0
     volume_limit = 0
     shared_volume_limit = 0
+    total_limit = 0
+    total_exempt = ('health',)
+    stop_abandoned = False
     rundir = ''
     _place = None
+    _why = ''
 
     def _client(self):
         """Who is asking: the proxy's word for it if configured, else the peer address."""
@@ -146,7 +162,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def _admit(self, client):
         """Take a place for this request, unless the client has its share already."""
         limit = self._limit(client)
-        if limit <= 0:
+        total = 0 if (client in self.total_exempt or client in self.unlimited_clients) else self.total_limit
+        if limit <= 0 and total <= 0:
             return True
 
         # One file per request in progress, named by its process.
@@ -156,20 +173,35 @@ class Handler(http.server.BaseHTTPRequestHandler):
         with open(mine, 'w'):
             pass
 
-        held = 0
-        for name in os.listdir(places):
+        def held_in(folder):
+            n = 0
             try:
-                os.kill(int(name), 0)
-                held += 1
-            except (OSError, ValueError):
-                try:                    # that request is over
-                    os.remove(os.path.join(places, name))
-                except OSError:
-                    pass
+                names = os.listdir(folder)
+            except OSError:
+                return 0
+            for name in names:
+                try:
+                    os.kill(int(name), 0)
+                    n += 1
+                except (OSError, ValueError):
+                    try:                    # that request is over
+                        os.remove(os.path.join(folder, name))
+                    except OSError:
+                        pass
+            return n
 
-        if held > limit:
+        if limit > 0 and held_in(places) > limit:
             os.remove(mine)
+            Handler._why = 'client'
             return False
+
+        if total > 0:
+            everyone = sum(held_in(os.path.join(self.rundir, d)) for d in os.listdir(self.rundir)
+                           if d.replace('_', ':') not in self.total_exempt and d not in self.total_exempt)
+            if everyone > total:
+                os.remove(mine)
+                Handler._why = 'total'
+                return False
 
         Handler._place = mine
         return True
@@ -318,7 +350,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         # showed "Error getting phase" for a search that was in fact running
         # (21 November 2026).  The firewall in front still bounds how often.
         if not (self.command in ('GET', 'HEAD') and JOB_STATUS.match(path_info or '')) and not self._admit(client):
-            if client in self.shared_clients:
+            if self._why == 'total':
+                body = (f'This service is handling {self.total_limit} requests, the most it takes at once.  '
+                        f'Try again shortly.\n').encode()
+            elif client in self.shared_clients:
                 body = (f'Too many requests in progress through this portal '
                         f'(this service handles {self._limit(client)} at once for all its users).  Try again shortly.\n').encode()
             else:
@@ -394,6 +429,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         os.chdir(self.workdir)
 
+        # Whoever asked may give up, or a proxy in front may time out, while
+        # the query runs on.  Watch the connection, and stop the query if
+        # the other end closes it.  The whole request has been read by now,
+        # so anything "readable" on the connection is its end.
+        gone = []
+        # (Sync requests only:  an async request answers at once, and forks,
+        # which a process with a second thread should not do.)
+        if self.stop_abandoned and (path_info or '').startswith('/sync'):
+            _watch_for_hangup(1, gone)
+
         _tap.Tap.pid = os.getpid()
         _tap.Tap.debugfname = '/tmp/tap_' + str(os.getpid()) + '.debug'
         _tap.Tap.form = _cgi.FieldStorage()
@@ -424,9 +469,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         except SystemExit:
             pass
         except BaseException:
-            import traceback
-            traceback.print_exc()
             status = 1
+            if gone:                    # nobody to tell; the failed write is expected
+                sys.stderr.write('request abandoned by its client; stopped\n')
+            else:
+                import traceback
+                traceback.print_exc()
 
         # The query as the client wrote it; the service keeps only its translation.
         asked = ''
@@ -460,6 +508,53 @@ class Handler(http.server.BaseHTTPRequestHandler):
         _tap.jobworker.finished()
 
         os._exit(status)
+
+
+def _watch_for_hangup(fd, gone):
+    """Start a thread that stops this process's queries when the peer of socket `fd` closes.
+
+    Returns an event that ends the watch when set, or None if `fd` is not a socket.
+    """
+    import select
+    import socket
+    import stat
+    import threading
+
+    try:
+        if not stat.S_ISSOCK(os.fstat(fd).st_mode):
+            return
+        sock = socket.socket(fileno=os.dup(fd))
+    except OSError:
+        return
+
+    mine = os.getpid()
+    stop = threading.Event()
+
+    def watch():
+        try:
+            while os.getpid() == mine and not stop.is_set():
+                readable, _, _ = select.select([sock], [], [], 1.0)
+                if not readable:
+                    continue
+                try:
+                    data = sock.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT)
+                except BlockingIOError:
+                    continue
+                except OSError:
+                    data = b''
+                if data:
+                    return              # more arrived:  not what was expected; leave the request alone
+                gone.append(True)
+                from TAP import duckdbsupport
+                # The query may not have started yet;  keep at it until the process ends.
+                while not stop.is_set():
+                    duckdbsupport.abandon()
+                    time.sleep(0.5)
+        except Exception as e:          # a watch, never a reason to fail
+            sys.stderr.write(f'connection watch ended: {e!r}\n')
+
+    threading.Thread(target=watch, daemon=True).start()
+    return stop
 
 
 QUERY_RECORD = 'TAPQ'
@@ -633,6 +728,13 @@ def main():
     from TAP.volume import parse_size
     Handler.volume_limit = parse_size(web.get('VOLUME_LIMIT', ''))
     Handler.shared_volume_limit = parse_size(web.get('SHARED_VOLUME_LIMIT', ''))
+
+    Handler.total_limit = int(str(web.get('TOTAL_LIMIT', '') or 0).strip() or 0)
+    exempt = web.get('TOTAL_EXEMPT', 'health')
+    if isinstance(exempt, str):
+        exempt = exempt.split(',')
+    Handler.total_exempt = tuple(u.strip() for u in exempt if u.strip())
+    Handler.stop_abandoned = str(web.get('STOP_ABANDONED', '')).strip().lower() in ('on', 'yes', 'true', '1')
 
     Server.max_children = args.max_children
 

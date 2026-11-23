@@ -105,6 +105,21 @@ class QueryTimeout(Exception):
     pass
 
 
+class QueryAbandoned(Exception):
+    pass
+
+
+# The deadlines of this process's connections, so that abandon() can reach
+# whatever is running.  A request is one process, so the list is short.
+_deadlines = []
+
+
+def abandon():
+    """Stop this process's queries:  whoever asked is no longer there to read the answer."""
+    for deadline in list(_deadlines):
+        deadline.abandon()
+
+
 class Deadline:
     """
     Cancels the connection's work once a time limit has passed.
@@ -128,6 +143,8 @@ class Deadline:
             self.seconds = 0
 
         self.expired = False
+        self.gone = False
+        _deadlines.append(self)
 
         # DuckDB interrupts one connection object at a time, and each
         # cursor is a connection of its own, so the ones in use are kept.
@@ -154,11 +171,21 @@ class Deadline:
         if cursor in self._targets:
             self._targets.remove(cursor)
 
+    def abandon(self):
+        self.gone = True
+        for target in list(self._targets):
+            try:
+                target.interrupt()
+            except Exception:
+                pass
+
     def error(self):
+        if self.gone:
+            return QueryAbandoned('The client went away before the query finished, so it was stopped.')
         return QueryTimeout('Query exceeded the time limit of %g seconds.' % self.seconds)
 
     def check(self):
-        if self.expired:
+        if self.expired or self.gone:
             raise self.error()
 
     def run(self, call, *args):
@@ -169,7 +196,7 @@ class Deadline:
         try:
             return call(*args)
         except Exception:
-            if self.expired:
+            if self.expired or self.gone:
                 raise self.error() from None
             raise
 
