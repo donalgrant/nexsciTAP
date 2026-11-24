@@ -112,7 +112,7 @@ Parameters:
     Default: 1GB
     Description: >
       Memory one query may use before it works from disk.  The TAP container
-      has 3.5 GB; several heavy queries at once each take this much.  It was
+      has TapMemory (11 GB; 3.5 GB until 24 November 2026); several heavy queries at once each take this much.  It was
       600MB until 20 November 2026.  At 1GB six heavy queries at once left the
       task standing, and whole-column scans run about twice as fast.  A SELECT *
       that scans all of a very wide table (hundreds of columns) needs about
@@ -172,6 +172,25 @@ Parameters:
       where an entry starting with a dot allows every host under it.
       Uploads sent with the request, which is what Firefly and pyvo do, are
       not affected.
+  TaskMemory:
+    Type: String
+    Default: '16384'
+    AllowedValues: ['8192', '12288', '16384']
+    Description: >
+      Memory of the whole task, in MB (2 vCPU allows 4 to 16 GB).  Firefly's
+      container takes 3584 of it and the proxy 256;  TapMemory must fit in
+      the rest.  It was 8192 until 24 November 2026.
+  TapMemory:
+    Type: Number
+    Default: 11264
+    MinValue: 3584
+    MaxValue: 12288
+    Description: >
+      Memory of the TAP container, in MB.  Every request in progress shares
+      it, and one may hold ProcessMemory:  at 3584 two requests at their
+      limit were more than the container had, and the kernel then killed
+      whichever it chose (security review of 23 November 2026, item D).  At
+      11264 five fit.  With TaskMemory 8192 this must be 3584.
   ProcessMemory:
     Type: String
     Default: '2GB'
@@ -615,7 +634,7 @@ Resources:
       RequiresCompatibilities: [FARGATE]
       NetworkMode: awsvpc
       Cpu: '2048'
-      Memory: '8192'
+      Memory: !Ref TaskMemory
       ExecutionRoleArn: !GetAtt ExecutionRole.Arn
       TaskRoleArn: !GetAtt TaskRole.Arn
       Volumes:
@@ -637,7 +656,7 @@ Resources:
         - Name: tap
           Image: !Ref TapImage
           Essential: true
-          Memory: 3584
+          Memory: !Ref TapMemory
           HealthCheck:
             Command:
               - CMD-SHELL

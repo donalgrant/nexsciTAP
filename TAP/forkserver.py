@@ -476,6 +476,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
             except (ImportError, ValueError, OSError) as e:
                 sys.stderr.write(f'no memory limit set for the request: {e!r}\n')
 
+        # If the container runs out of memory all the same, the kernel
+        # chooses a process to kill.  Let it be a request and not the server
+        # itself, whose death is the container's (and with it every other
+        # request, and a minute without the service).  A process may raise
+        # its own score without any privilege;  an async job's worker,
+        # forked from here, keeps it.
+        try:
+            with open('/proc/self/oom_score_adj', 'w') as f:
+                f.write('700')
+        except OSError:
+            pass                        # not Linux, or not allowed:  as before
+
         client = self._client()
         # Asking how a job is doing takes no place.  It does no work, and a
         # client that is refused the answer takes its job for failed:  Firefly
