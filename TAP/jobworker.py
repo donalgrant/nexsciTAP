@@ -89,6 +89,16 @@ def start(jobdir, beat=BEAT):
 
     path = os.path.join(jobdir, WORKER)
 
+    # However it goes, the job's process does not outlive this.  Reading an
+    # upload comes before the query's own time limit, and a hostile one could
+    # be read for ever, with the heartbeat below vouching for it all the while.
+    limit = int(os.environ.get('TAP_HARD_LIMIT', '3600') or 0)
+    if limit > 0:
+        try:
+            signal.alarm(limit)
+        except (ValueError, OSError):
+            pass
+
     try:
         _beat(path)
     except OSError as e:

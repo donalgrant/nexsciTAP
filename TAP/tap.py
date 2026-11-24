@@ -3284,14 +3284,18 @@ class Tap:
 
         format = param['format']
 
-        fp.write(f'        <uws:parameter id="format">{format:s}</uws:parameter>\n')
+        # The client's own words, so escaped:  LANG is checked only after
+        # the first job document is written, and unescaped it let a client
+        # put a script into a document served from this site (found in
+        # review, 23 November 2026).
+        fp.write(f'        <uws:parameter id="format">{html.escape(str(format)):s}</uws:parameter>\n')
 
         lang = param['lang']
 
-        fp.write(f'        <uws:parameter id="lang">{lang:s}</uws:parameter>\n')
+        fp.write(f'        <uws:parameter id="lang">{html.escape(str(lang)):s}</uws:parameter>\n')
 
         #fp.write(f'        <uws:parameter id="maxrec">{maxrec:d}</uws:parameter>\n')
-        fp.write(f'        <uws:parameter id="maxrec">{maxrecstr:s}</uws:parameter>\n')
+        fp.write(f'        <uws:parameter id="maxrec">{html.escape(str(maxrecstr)):s}</uws:parameter>\n')
 
         if self.debug:
             logging.debug('')

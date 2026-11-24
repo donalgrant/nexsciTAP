@@ -165,6 +165,13 @@ class TableValidator:
         re.IGNORECASE
     )
 
+    _NAME_THEN_PAREN = r'(?:lateral\s+)?(?:[A-Za-z_][\w$]*|"[^"]*")(?:\s*\.\s*(?:[A-Za-z_][\w$]*|"[^"]*"))*\s*\('
+    _TABLE_FUNCTION_RE = re.compile(
+        r'\b(?:from|join)\b\s*(?:\(\s*)*' + _NAME_THEN_PAREN
+        + r'|\bfrom\b(?:(?!\b(?:where|group|order|having|limit|offset|on|using|join|union|intersect|except|select)\b)[^()])*?,\s*'
+        + _NAME_THEN_PAREN,
+        re.IGNORECASE)
+
     @staticmethod
     def validate_statement(query, debug=False):
         """Reject queries containing DML, DDL, or dangerous Oracle functions.
@@ -194,6 +201,22 @@ class TableValidator:
             raise Exception(
                 'Query rejected: semicolons are not permitted. '
                 'TAP accepts a single statement per request.')
+
+        # A function where a table belongs (FROM read_text('...'), JOIN
+        # duckdb_settings(), FROM query('select ...')) is not ADQL, and the
+        # table check below does not see one that has no alias.  The engine's
+        # own lock-down is what keeps such a function from files and other
+        # buckets;  this keeps it from being called at all, so that a query
+        # cannot list the catalog folder, read the engine's settings or see
+        # the name of its key (found in review, 23 November 2026).
+        bare = re.sub(r"'(?:[^']|'')*'", "''", query)
+        bare = re.sub(r'/\*.*?\*/|--[^\n]*', ' ', bare, flags=re.DOTALL)
+        if TableValidator._TABLE_FUNCTION_RE.search(bare):
+            if debug:
+                logging.debug('TableValidator: rejected a function in FROM')
+            raise Exception(
+                'Query rejected: a function cannot stand where a table '
+                'belongs (after FROM, JOIN or a comma in the FROM list).')
 
         forbidden = TableValidator._FORBIDDEN_RE.search(query)
         if forbidden:

@@ -172,9 +172,20 @@ Parameters:
       where an entry starting with a dot allows every host under it.
       Uploads sent with the request, which is what Firefly and pyvo do, are
       not affected.
+  ProcessMemory:
+    Type: String
+    Default: '2GB'
+    AllowedPattern: '^(0|[0-9]+(\.[0-9]+)?(MB|GB))$'
+    Description: >
+      Memory one request's process may hold, whatever it is doing (a limit of
+      the operating system's, RLIMIT_DATA).  QueryMemory bounds the engine's
+      own working memory only:  a single huge value, a wide result on its way
+      out, or an upload being read are outside it.  Over this the request
+      fails alone, where it used to have the kernel kill others in the
+      container.  0 is no limit.
   DownloadLimit:
     Type: String
-    Default: '0'
+    Default: '20GB'
     AllowedPattern: '^(0|[0-9]+(\.[0-9]+)?(MB|GB|TB))$'
     Description: >
       What one client address may be sent in a day, results of queries and
@@ -183,7 +194,7 @@ Parameters:
       is kept in the work area, so it holds across tasks and restarts.
   FireflyDownloadLimit:
     Type: String
-    Default: '0'
+    Default: '50GB'
     AllowedPattern: '^(0|[0-9]+(\.[0-9]+)?(MB|GB|TB))$'
     Description: >
       The same for all of Firefly's users together (0 = no limit).  This is
@@ -608,6 +619,7 @@ Resources:
             # them together, set below the overall ones so that Firefly
             # cannot take every place.
             - {Name: CLIENT_HEADER, Value: X-Viewer-IP}
+            - {Name: TAP_PROCESS_MEMORY, Value: !Ref ProcessMemory}
             - {Name: SHARED_CLIENTS, Value: '127.0.0.1'}
             - {Name: SHARED_CLIENT_LIMIT, Value: !Ref FireflyLimit}
             - {Name: SHARED_ASYNC_LIMIT, Value: !Ref FireflyAsyncLimit}
@@ -663,6 +675,8 @@ Resources:
             - {Name: PUBLIC_HOST, Value: !If [HaveDomain, !Ref DomainName, !GetAtt Distribution.DomainName]}
             - {Name: PUBLIC_SCHEME, Value: https}
             - {Name: PROXY_COOKIE_FLAGS, Value: '# not needed over HTTPS'}
+            - Name: HSTS_HEADER
+              Value: 'add_header Strict-Transport-Security "max-age=31536000" always;'
             - {Name: HIPS_URL, Value: !Ref HipsUrl}
           LogConfiguration:
             LogDriver: awslogs

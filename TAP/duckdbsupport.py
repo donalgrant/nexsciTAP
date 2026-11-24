@@ -94,11 +94,36 @@ def connect(connectInfo, debug=0):
             quoted = ', '.join("'" + a.replace("'", "''") + "'" for a in allowed)
             conn.execute('SET ' + setting + ' = [' + quoted + ']')
 
+    _own_temp_directory(conn)
+
     conn.execute('SET enable_external_access = false')
     conn.execute('SET lock_configuration = true')
 
     return Connection(conn, connectInfo.get('upload_tables'),
                       Deadline(conn, connectInfo.get('query_timeout')))
+
+
+def _own_temp_directory(conn):
+    """
+    Give this process a spill directory of its own, inside the one
+    configured.  DuckDB lets a query read its temp directory whatever else
+    is locked, so with one directory for every request a query could list
+    and read what another request had spilled there, an uploaded table
+    among it (found in review, 23 November 2026).  Removed when the
+    process ends.
+    """
+    import atexit
+    import shutil
+    try:
+        base = conn.execute("SELECT current_setting('temp_directory')").fetchone()[0]
+        if not base or not os.path.isdir(base):
+            return
+        mine = os.path.join(base, 'q%d' % os.getpid())
+        os.makedirs(mine, mode=0o700, exist_ok=True)
+        conn.execute("SET temp_directory = '" + mine.replace("'", "''") + "'")
+        atexit.register(shutil.rmtree, mine, True)
+    except Exception as e:
+        logging.warning(f'DuckDB: no temp directory of its own: {e}')
 
 
 class QueryTimeout(Exception):

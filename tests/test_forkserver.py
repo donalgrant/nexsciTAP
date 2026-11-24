@@ -590,3 +590,47 @@ def test_a_closed_connection_stops_the_query():
     # Not a socket (an async job's /dev/null):  nothing is watched and nothing fails.
     with open(os.devnull, "w") as null:
         assert forkserver._watch_for_hangup(null.fileno(), []) is None
+
+
+# ---- from the security review of 23 November 2026 ---------------------------
+
+def test_a_form_that_is_not_an_upload_has_a_size(fork_server):
+    """A body read as a form costs fifty times its size in memory;  only an upload may be large."""
+    fork_server, _ = fork_server
+    big = "query=select+1&" + "a=1&" * 600000                 # 2.4 MB
+    r = requests.post(fork_server + "/TAP/sync", data=big, headers={"Content-Type": "application/x-www-form-urlencoded"})
+    assert r.status_code == 413
+    # Many fields in a small body are refused by the form reader, and the server lives.
+    many = "query=select+1&" + "a=1&" * 5000
+    r = requests.post(fork_server + "/TAP/sync", data=many, headers={"Content-Type": "application/x-www-form-urlencoded"})
+    assert r.status_code != 200
+    ok = requests.post(fork_server + "/TAP/sync", data={"query": "select l0filename from data_l0", "format": "ipac"})
+    assert ok.status_code == 200
+
+
+def test_a_job_document_escapes_what_the_client_sent(fork_server):
+    """LANG went into the job document as written: a script in a document served from this site."""
+    fork_server, _ = fork_server
+    evil = 'ADQL</uws:parameter><x:script xmlns:x="http://www.w3.org/1999/xhtml">alert(1)</x:script><uws:parameter id="z">'
+    r = requests.post(fork_server + "/TAP/async", data={"query": "select l0filename from data_l0", "lang": evil},
+                      allow_redirects=False)
+    assert r.status_code == 303, r.text[:300]
+    doc = requests.get(r.headers["Location"]).text
+    assert "<x:script" not in doc and "&lt;x:script" in doc
+    import xml.etree.ElementTree as ET
+    ET.fromstring(doc)
+
+
+def test_a_client_cannot_be_named_for_a_directory_above():
+    from TAP import forkserver
+
+    class H(forkserver.Handler):
+        def __init__(self, named):
+            self.headers = {"X-Client": named}
+            self.client_address = ("192.0.2.1", 1)
+    H.client_header = "X-Client"
+    assert H("..")._client() == "192.0.2.1"
+    assert H("...")._client() == "192.0.2.1"
+    assert H("../../etc")._client() == "etc"
+    assert H("10.0.0.7")._client() == "10.0.0.7"
+    assert H("health")._client() == "health"

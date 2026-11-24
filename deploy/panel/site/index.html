@@ -569,7 +569,7 @@ function bannerCard(s) {
     if (clear) clear.onclick = () => act({action: 'banner', message: ''}, () => 'Notice taken away.  It leaves the pages within about a minute.');
   });
   const now = b.error ? `<p class="note warnText">The notice could not be read:  ${esc(b.error)}</p>`
-    : b.message ? `<p class="note">Showing now, set ${when(b.set)} by ${esc(b.by || 'someone')}.</p>`
+    : b.message ? `<p class="note">Showing now, set ${when(b.set)}.  The Record says by whom.</p>`
     : '<p class="note">No notice is showing.</p>';
   return '<div class="card gap"><h2>Notice to users</h2>' + now +
     `<div class="form"><textarea id="btext" rows="2" maxlength="${most}" style="flex:1;min-width:20em" placeholder="For example:  The archive will be unavailable on Thursday from 9 to 11 am Pacific for maintenance.">${esc(b.message || '')}</textarea></div>` +

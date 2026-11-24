@@ -36,7 +36,11 @@ import re
 PLACEHOLDER = '(987654321 = 987654321)'
 PLACEHOLDER_RE = re.compile(r'\(\s*987654321\s*=\s*987654321\s*\)')
 
-MAX_UPLOAD_BYTES = 500 * 1024 * 1024
+# A table to match against is a list of positions:  50 MB is a million or two of
+# them, and is read into about 1 GB.  (500 MB until 23 November 2026;  reading one that size took minutes of
+# processor time and gigabytes of memory, with nothing to time it out.)
+MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+MAX_UPLOAD_ROWS = 2000000
 MAX_XMATCH_ORDER = 14          # cells about 13 arcsec across
 MAX_PRUNE_RANGES = 300
 PRUNE_ORDER = 8
@@ -319,13 +323,70 @@ def find_uploads(workdir):
 # Loading uploads
 # ---------------------------------------------------------------------------
 
+class _NoFetch:
+    """Stands where the VOTable reader keeps urllib, so that it can open nothing."""
+
+    class request:
+        @staticmethod
+        def urlopen(*args, **kwargs):
+            raise UploadError('An uploaded table must hold its own data;  this one points elsewhere for it.')
+
+
+def check_votable(path):
+    """
+    Refuse an uploaded VOTable that sends its reader elsewhere for the data.
+
+    A VOTable may give its rows as <STREAM href="...">, and the reader then
+    opens that address:  file://, http:// or ftp://, whatever the client
+    wrote.  That is the server reading a file or fetching a URL of a
+    stranger's choosing (its own configuration and keys, the task's
+    metadata address, the other containers), whatever UPLOAD_URLS says.
+    Found in review on 23 November 2026.  The FITS and PARQUET forms exist
+    only with such an address, so they are refused too.  An upload that is
+    not well-formed XML is refused here, with expat's reason.
+    """
+    from xml.parsers import expat
+
+    rows = [0]
+
+    def start(name, attrs):
+        local = name.rsplit(':', 1)[-1].upper()
+        if local == 'TR':
+            rows[0] += 1
+            if rows[0] > MAX_UPLOAD_ROWS:
+                # Before the reader builds the table:  it needs some twenty
+                # times the file's size in memory to do so.
+                raise UploadError(f'An uploaded table may have at most {MAX_UPLOAD_ROWS:,} rows.')
+        if local in ('FITS', 'PARQUET'):
+            raise UploadError('An uploaded table must hold its rows as TABLEDATA or BINARY, not ' + local + '.')
+        if local == 'STREAM' and any(k.rsplit(':', 1)[-1].lower() == 'href' for k in attrs):
+            raise UploadError('An uploaded table must hold its own data;  this one points elsewhere for it (STREAM href).')
+
+    parser = expat.ParserCreate()
+    parser.StartElementHandler = start
+    try:
+        with open(path, 'rb') as f:
+            parser.ParseFile(f)
+    except expat.ExpatError as e:
+        raise UploadError(f'The uploaded table is not a readable VOTable: {e}')
+
+
 def read_votable(path):
     """Read an uploaded VOTable into a dict of numpy columns."""
 
     import numpy as np
+    from astropy.io.votable import tree as _votable_tree
     from astropy.table import Table
 
+    check_votable(path)
+    # And should a form of address ever get past that check, the reader has
+    # nothing to open it with.
+    _votable_tree.urllib = _NoFetch
+
     t = Table.read(path, format='votable')
+
+    if len(t) > MAX_UPLOAD_ROWS:
+        raise UploadError(f'An uploaded table may have at most {MAX_UPLOAD_ROWS:,} rows;  this one has {len(t):,}.')
 
     cols = {}
 

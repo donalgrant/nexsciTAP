@@ -88,3 +88,16 @@ def test_the_sky_image_is_pointed_at_a_copy_that_answers():
     conf = read(FARGATE, 'nginx.conf.template')
     assert 'sub_filter "http://alasky.u-strasbg.fr/DSS/DSSColor" "${HIPS_URL}";' in conf
     assert 'sub_filter "ivo://CDS/P/DSS2/color" "${HIPS_URL}";' in conf
+
+
+def test_the_proxy_closes_what_the_public_has_no_use_for():
+    """From the security review of 23 November 2026."""
+    conf = read(FARGATE, 'nginx.conf.template')
+    assert 'server_tokens off;' in conf
+    assert 'location ^~ /firefly/admin { return 404; }' in conf
+    for header in ('X-Content-Type-Options "nosniff"', 'X-Frame-Options "SAMEORIGIN"', '${HSTS_HEADER}'):
+        assert header in conf
+    # The redirect to the public name must not be kept by CloudFront.
+    default = conf[conf.index('listen 80 default_server;'):conf.index('server_name ${PUBLIC_HOST}')]
+    assert 'add_header Cache-Control "no-store" always;' in default and 'return 301' in default
+    assert 'HSTS_HEADER' in read(FARGATE, 'stack.yaml') and 'HSTS_HEADER=""' in read(FARGATE, 'Dockerfile.proxy')

@@ -61,7 +61,9 @@ import pwd
 import re
 import shutil
 import signal
+import socket
 import socketserver
+import struct
 import sys
 import tempfile
 import time
@@ -120,7 +122,28 @@ def preload():
 JOB_STATUS = re.compile(r'/async/[A-Za-z0-9_.-]+(/(phase|error|quote|executionduration|destruction|owner|parameters|results))?/?$')
 
 
+FORM_MOST = 2 * 1024 * 1024         # bytes of a request body that is not a multipart upload
+FORM_FIELDS = 100                   # fields in one request
+HARD_LIMIT = int(os.environ.get('TAP_HARD_LIMIT', '3600') or 0)     # seconds one request's process may live; 0: no limit
+SOCKET_WAIT = 120                   # seconds a send or receive may make no progress
+# Bytes of data one request's process may hold (TAP_PROCESS_MEMORY, written like 2GB; unset or 0: no limit).
+PROCESS_MEMORY = 0
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
+
+    def setup(self):
+        # A client that stops reading its answer, or stops sending its
+        # request, would otherwise hold one of the server's processes for as
+        # long as it liked.  Set on the socket itself, so that it also holds
+        # for the copy of it that is standard output.
+        try:
+            wait = struct.pack('ll', SOCKET_WAIT, 0)
+            self.request.setsockopt(socket.SOL_SOCKET, socket.SO_SNDTIMEO, wait)
+            self.request.setsockopt(socket.SOL_SOCKET, socket.SO_RCVTIMEO, wait)
+        except OSError:
+            pass
+        super().setup()
 
     conf = ''
     workdir = ''
@@ -146,7 +169,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def _client(self):
         """Who is asking: the proxy's word for it if configured, else the peer address."""
         named = self.headers.get(self.client_header, '') if self.client_header else ''
-        named = re.sub(r'[^0-9A-Za-z.:_-]', '', named.split(',')[-1])[:64]
+        # (Not '..' or the like:  the name becomes a directory's.)
+        named = re.sub(r'[^0-9A-Za-z.:_-]', '', named.split(',')[-1])[:64].strip('.')
         return named or self.client_address[0]
 
     def _limit(self, client):
@@ -330,8 +354,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header('Content-Length', str(size))
             self.end_headers()
             if body:
-                shutil.copyfileobj(f, self.wfile, 1 << 20)
-                self._sent(client, size)
+                # What is counted is what went out, also when the client
+                # hangs up part-way:  a download cut short and started
+                # again used to count for nothing.
+                sent = 0
+                try:
+                    while True:
+                        chunk = f.read(1 << 20)
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+                        sent += len(chunk)
+                finally:
+                    self._sent(client, sent)
 
     def _tap(self, path_info, query):
         """Run the CGI entry point in this (already forked) process."""
@@ -343,6 +378,40 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         if length < 0:
             return self.send_error(400)
+
+        # A form that is not an upload is a query and a few settings.  Read
+        # as a form, a body costs some fifty times its size in memory, so
+        # tens of megabytes of "a=1&a=1&..." were gigabytes (found in
+        # review, 23 November 2026).
+        if length > FORM_MOST and 'multipart/form-data' not in (self.headers.get('Content-Type') or '').lower():
+            # What is nearly sent already is read and dropped, so that the
+            # client hears the answer and not a closed connection.
+            left = min(length, 4 * FORM_MOST)
+            while left > 0:
+                chunk = self.rfile.read(min(left, 1 << 16))
+                if not chunk:
+                    break
+                left -= len(chunk)
+            self.close_connection = True
+            return self.send_error(413, 'A request that is not an upload may be at most %d bytes' % FORM_MOST)
+
+        # However it goes, this request's process does not outlive this:  an
+        # upload is read before the query's own time limit starts, and
+        # reading a hostile one could run for ever, holding its place.
+        if HARD_LIMIT > 0:
+            signal.alarm(HARD_LIMIT)
+
+        # And it has a size.  The engine's memory limit does not count a
+        # single huge value, nor what Python holds of a result or an upload:
+        # one request could take several GB and have the kernel kill
+        # whatever else was running in the container (found in review, 23
+        # November 2026).  With this the request itself fails.
+        if PROCESS_MEMORY > 0:
+            try:
+                import resource
+                resource.setrlimit(resource.RLIMIT_DATA, (PROCESS_MEMORY, PROCESS_MEMORY))
+            except (ImportError, ValueError, OSError) as e:
+                sys.stderr.write(f'no memory limit set for the request: {e!r}\n')
 
         client = self._client()
         # Asking how a job is doing takes no place.  It does no work, and a
@@ -441,7 +510,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         _tap.Tap.pid = os.getpid()
         _tap.Tap.debugfname = '/tmp/tap_' + str(os.getpid()) + '.debug'
-        _tap.Tap.form = _cgi.FieldStorage()
+        try:
+            _tap.Tap.form = _cgi.FieldStorage(max_num_fields=FORM_FIELDS)
+        except ValueError:
+            self._release()
+            # The connection is this process's standard output by now.
+            said = 'Too many fields in the request (at most %d).\n' % FORM_FIELDS
+            sys.stdout.write('HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\n'
+                             'Content-Length: %d\r\nConnection: close\r\n\r\n%s' % (len(said), said))
+            sys.stdout.flush()
+            return
 
         started = time.time()
         request_pid = os.getpid()
@@ -727,6 +805,8 @@ def main():
     # Bytes one client may be sent in a day, written like 20GB (TAP/volume.py).
     from TAP.volume import parse_size
     Handler.volume_limit = parse_size(web.get('VOLUME_LIMIT', ''))
+    global PROCESS_MEMORY
+    PROCESS_MEMORY = parse_size(os.environ.get('TAP_PROCESS_MEMORY', ''))
     Handler.shared_volume_limit = parse_size(web.get('SHARED_VOLUME_LIMIT', ''))
 
     Handler.total_limit = int(str(web.get('TOTAL_LIMIT', '') or 0).strip() or 0)

@@ -246,6 +246,7 @@ Resources:
           SIGN_IN: !Ref SignIn
           SIGN_IN_HOST: !Sub ${UsersDomain}.auth.${AWS::Region}.amazoncognito.com
           SIGN_IN_CLIENT: !Ref UsersClient
+          SIGN_IN_POOL: !Ref Users
           SIGN_IN_RETURN: !If [HaveDomain, !Sub 'https://${DomainName}/', !Ref CallbackUrl]
           ALERT_TOPIC: !Ref AlertTopic
           LOG_BUCKET: !Ref LogBucket
@@ -591,6 +592,7 @@ Resources:
           SIGN_IN: !Ref SignIn
           SIGN_IN_HOST: !Sub ${UsersDomain}.auth.${AWS::Region}.amazoncognito.com
           SIGN_IN_CLIENT: !Ref UsersClient
+          SIGN_IN_POOL: !Ref Users
           SIGN_IN_RETURN: !If [HaveDomain, !Sub 'https://${DomainName}/', !Ref CallbackUrl]
           ALERT_TOPIC: !Ref AlertTopic
           LOG_BUCKET: !Ref LogBucket

@@ -24,7 +24,7 @@ Parameters:
       same three days had 156.
   Mode:
     Type: String
-    Default: count
+    Default: block
     AllowedValues: [count, block]
     Description: >-
       count: an address over RateLimit is only counted (the PerAddress
@@ -32,7 +32,7 @@ Parameters:
       rate falls.
   ManagedRules:
     Type: String
-    Default: count
+    Default: block
     AllowedValues: [count, block]
     Description: >-
       AWS's own rule sets (addresses with a bad reputation, inputs known to

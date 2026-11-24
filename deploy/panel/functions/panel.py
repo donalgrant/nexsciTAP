@@ -103,6 +103,7 @@ INGEST_LOGS = os.environ.get('INGEST_LOGS', '')
 SIGN_IN = os.environ.get('SIGN_IN', 'required') != 'off'
 SIGN_IN_HOST = os.environ.get('SIGN_IN_HOST', '')
 SIGN_IN_CLIENT = os.environ.get('SIGN_IN_CLIENT', '')
+SIGN_IN_POOL = os.environ.get('SIGN_IN_POOL', '')
 SIGN_IN_RETURN = os.environ.get('SIGN_IN_RETURN', '')
 ALERT_TOPIC = os.environ.get('ALERT_TOPIC', '')
 LOG_BUCKET = os.environ.get('LOG_BUCKET', '')
@@ -1189,7 +1190,9 @@ def set_banner(body, who):
     if not want['message'] and not had:
         raise Refused('There is no notice to take away.')
     # An empty notice is written, not deleted: the service takes either as none.
-    doc = dict(want, set=time.time(), by=who)
+    # Not who set it:  the service can read this object, and so, through a
+    # query, could anyone.  The Record has the name.
+    doc = dict(want, set=time.time())
     aws('s3').put_object(Bucket=CATALOG_BUCKET, Key=BANNER_KEY, Body=json.dumps(doc).encode(),
                          ContentType='application/json')
     record(who, 'banner', {'before': (had or {}).get('message', ''), 'after': want['message'], 'level': want['level']})
@@ -3034,6 +3037,32 @@ def verify_published():
 _known = {}         # token -> (who, checked at), for the few minutes a function instance lives
 
 
+def token_claims(token):
+    """What an access token says of itself (its middle part), unverified; {} if it is not one."""
+    import base64
+    try:
+        part = token.split('.')[1]
+        d = json.loads(base64.urlsafe_b64decode(part + '=' * (-len(part) % 4)))
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def ours(claims):
+    """
+    Is this a token of the panel's own user pool, made for the panel's page?
+    Cognito's GetUser vouches that a token is genuine, but answers for a
+    token of ANY user pool, in anybody's account: without this check a
+    person could make a pool of their own, sign in to it, and be let in
+    here.  (Found in review, 23 November 2026.)
+    """
+    if not SIGN_IN_POOL or not SIGN_IN_CLIENT:
+        return False
+    region = SIGN_IN_POOL.split('_')[0]
+    return (claims.get('iss') == f'https://cognito-idp.{region}.amazonaws.com/{SIGN_IN_POOL}'
+            and claims.get('client_id') == SIGN_IN_CLIENT and claims.get('token_use') == 'access')
+
+
 def signed_in(headers):
     """The email address of whoever holds the request's token, or None."""
     token = headers.get('x-panel-token', '')
@@ -3042,6 +3071,10 @@ def signed_in(headers):
     held = _known.get(token)
     if held and time.time() - held[1] < 120:
         return held[0]
+    # The claims are read from the token unverified, and count only because
+    # GetUser then confirms that Cognito signed this very token.
+    if not ours(token_claims(token)):
+        return None
     try:
         user = aws('cognito-idp').get_user(AccessToken=token)
     except ClientError:

@@ -314,3 +314,71 @@ def test_redirect_to_a_host_not_listed_is_refused(local_site, monkeypatch):
     assert tapupload.fetch_public_url(local_site + '/table.vot', hosts=(host,)) == b'<VOTABLE/>'
     with pytest.raises(tapupload.UploadError, match='does not fetch uploads from'):
         tapupload.fetch_public_url(local_site + '/to-metadata', hosts=(host,))
+
+
+# ---- an upload must not send the reader elsewhere (security review, 23 November 2026) ----
+
+def _vot(data, ns='', pre=''):
+    return (f'<?xml version="1.0"?><{pre}VOTABLE version="1.3" xmlns{ns}="http://www.ivoa.net/xml/VOTable/v1.3">'
+            f'<{pre}RESOURCE><{pre}TABLE><{pre}FIELD name="b" datatype="unsignedByte"/>'
+            f'<{pre}DATA>{data}</{pre}DATA></{pre}TABLE></{pre}RESOURCE></{pre}VOTABLE>')
+
+
+@pytest.mark.parametrize('data', [
+    '<BINARY><STREAM href="file://{secret}"/></BINARY>',
+    '<BINARY2><STREAM href="file://{secret}"/></BINARY2>',
+    '<BINARY><STREAM href="http://127.0.0.1:9/creds"/></BINARY>',
+    '<BINARY><STREAM encoding="gzip" href="ftp://127.0.0.1/x"/></BINARY>',
+    '<FITS><STREAM href="file://{secret}"/></FITS>',
+    '<PARQUET><STREAM href="file://{secret}"/></PARQUET>',
+    '<BINARY><STREAM HREF="file://{secret}"/></BINARY>',
+])
+def test_an_upload_that_points_elsewhere_for_its_data_is_refused(tmp_path, monkeypatch, data):
+    secret = tmp_path / 'secret.txt'
+    secret.write_text('the keys')
+    opened = []
+    import urllib.request
+    monkeypatch.setattr(urllib.request, 'urlopen', lambda *a, **k: opened.append(a) or (_ for _ in ()).throw(OSError('opened')))
+    path = tmp_path / 'upload_t.vot'
+    path.write_text(_vot(data.format(secret=secret)))
+    with pytest.raises(tapupload.UploadError):
+        tapupload.read_votable(str(path))
+    assert opened == [], 'nothing may be opened on behalf of an upload'
+
+
+def test_a_prefixed_stream_is_seen_too(tmp_path):
+    path = tmp_path / 'upload_t.vot'
+    path.write_text(_vot('<v:BINARY><v:STREAM href="file:///etc/hostname"/></v:BINARY>', ns=':v', pre='v:'))
+    with pytest.raises(tapupload.UploadError, match='points elsewhere'):
+        tapupload.check_votable(str(path))
+
+
+def test_the_reader_has_nothing_to_fetch_with(tmp_path, monkeypatch):
+    """Should the check ever miss a form of address, the reader still cannot open it."""
+    secret = tmp_path / 'secret.txt'
+    secret.write_text('the keys')
+    monkeypatch.setattr(tapupload, 'check_votable', lambda path: None)
+    path = tmp_path / 'upload_t.vot'
+    path.write_text(_vot(f'<BINARY><STREAM href="file://{secret}"/></BINARY>'))
+    with pytest.raises(tapupload.UploadError, match='points elsewhere'):
+        tapupload.read_votable(str(path))
+
+
+def test_ordinary_uploads_still_read(tmp_path):
+    import base64
+    path = tmp_path / 'upload_t.vot'
+    path.write_text(_vot('<TABLEDATA><TR><TD>7</TD></TR><TR><TD>9</TD></TR></TABLEDATA>'))
+    assert list(tapupload.read_votable(str(path))['b'][0]) == [7, 9]
+    path.write_text(_vot('<BINARY><STREAM encoding="base64">' + base64.b64encode(bytes([1, 2, 3])).decode() + '</STREAM></BINARY>'))
+    assert list(tapupload.read_votable(str(path))['b'][0]) == [1, 2, 3]
+    path.write_text('<VOTABLE><RESOURCE><TABLE>')
+    with pytest.raises(tapupload.UploadError, match='not a readable VOTable'):
+        tapupload.read_votable(str(path))
+
+
+def test_an_upload_has_a_row_limit(tmp_path, monkeypatch):
+    monkeypatch.setattr(tapupload, 'MAX_UPLOAD_ROWS', 2)
+    path = tmp_path / 'upload_t.vot'
+    path.write_text(_vot('<TABLEDATA><TR><TD>7</TD></TR><TR><TD>9</TD></TR><TR><TD>1</TD></TR></TABLEDATA>'))
+    with pytest.raises(tapupload.UploadError, match='at most 2 rows'):
+        tapupload.read_votable(str(path))

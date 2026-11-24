@@ -11,7 +11,10 @@
 # are often refused by Docker Hub's anonymous pull limit.
 FROM public.ecr.aws/docker/library/python:3.12-slim-bookworm
 
+# The base image's own packages are brought up to Debian's current fixes at
+# each build (ECR's scan of 23 November 2026 listed 15 high findings in them).
 RUN apt-get update \
+ && apt-get upgrade -y \
  && apt-get install -y --no-install-recommends build-essential ca-certificates util-linux \
  && rm -rf /var/lib/apt/lists/*
 

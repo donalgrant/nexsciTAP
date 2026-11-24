@@ -3,6 +3,8 @@ import sqlite3
 import tempfile
 import unittest
 
+import pytest
+
 from TAP.tablevalidator import TableValidationError, TableValidator
 
 
@@ -259,3 +261,43 @@ class TestTableNames(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+# ---- a function where a table belongs (security review, 23 November 2026) ----
+
+@pytest.mark.parametrize('query', [
+    "select * from read_text('/etc/passwd')",
+    "select * from fp_xsc cross join duckdb_settings()",
+    "select * from fp_xsc join duckdb_settings() on true",
+    "select (select value from duckdb_settings() where name='x') as v from fp_xsc",
+    "select * from fp_xsc where exists (select 1 from duckdb_settings())",
+    "select 1 from tap_schema.tables, (from duckdb_settings())",
+    "select 1 from tap_schema.tables, duckdb_settings()",
+    "select 1 from a, b, glob('s3://bucket/catalogs/*')",
+    "select (select count(*) from query('select 1')) as v from fp_xsc",
+    "select * from/**/read_text('x')",
+    "select * from\nread_blob ('x')",
+    'select * from "read_text"(\'x\')',
+    "select * from main.duckdb_secrets()",
+    "select * from (read_text('x'))",
+    "select * from fp_xsc, lateral range(10)",
+    "SELECT TOP 1 (SELECT content FROM read_text('s3://b/catalogs/_banner.json')) AS v FROM fp_xsc",
+])
+def test_a_function_cannot_stand_for_a_table(query):
+    with pytest.raises(Exception, match='where a table belongs'):
+        TableValidator.validate_statement(query)
+
+
+@pytest.mark.parametrize('query', [
+    "select ra, dec from fp_xsc where contains(point('icrs', ra, dec), circle('icrs', 10, 20, 0.1)) = 1",
+    "select a.ra from fp_xsc a join allwise b on 1 = contains(point('icrs', a.ra, a.dec), circle('icrs', b.ra, b.dec, 0.001))",
+    "select count(*), avg(w1mpro) from allwise group by round(ra, 0) order by count(*), max(dec)",
+    "select ra from fp_xsc, allwise where sin(fp_xsc.ra) > 0 order by ra, abs(dec)",
+    "select ra from fp_xsc where designation in ('from read_text(x)', 'a, f(b)')",
+    "select ra from (select ra, dec from fp_xsc where ra < 1) t where t.dec > 0",
+    "select t.ra from tap_upload.mine t, fp_xsc x where t.ra = x.ra",
+    "select ra from fp_xsc where ra in (select max(ra) from allwise)",
+    "select top 5 ra -- from f(x)\nfrom fp_xsc",
+])
+def test_ordinary_queries_are_not_taken_for_one(query):
+    TableValidator.validate_statement(query)

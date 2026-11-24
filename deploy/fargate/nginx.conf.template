@@ -15,10 +15,18 @@ server_names_hash_bucket_size 128;
 # Anything that arrives under another name is sent to the one public hostname
 # (see deploy/ec2/nginx.conf for why).  The load balancer's health checks
 # arrive under the task's private address, so they are answered here.
+server_tokens off;
+
 server {
     listen 80 default_server;
     location = /healthz { access_log off; return 200 "ok\n"; }
-    location / { return 301 ${PUBLIC_SCHEME}://${PUBLIC_HOST}$request_uri; }
+    # Never kept by a cache: CloudFront keeps some of Firefly's files by
+    # their path alone, and a kept redirect to the same path would be
+    # served under the public name too, to everyone.
+    location / {
+        add_header Cache-Control "no-store" always;
+        return 301 ${PUBLIC_SCHEME}://${PUBLIC_HOST}$request_uri;
+    }
 }
 
 server {
@@ -27,6 +35,13 @@ server {
     # to it; the restricted public address is closed to it.
     server_name ${PUBLIC_HOST} localhost;
     client_max_body_size 600m;
+
+    # For every answer of this server.  (A location that adds a header of
+    # its own must repeat these: nginx does not then inherit them.)
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    ${HSTS_HEADER}
 
     gzip on;
     gzip_proxied any;
@@ -39,6 +54,9 @@ server {
     root /usr/share/nginx/aiab;
     location = / { try_files /index.html =404; }
     location /about/ { try_files $uri =404; }
+
+    # Firefly's own administration pages are not for the public door.
+    location ^~ /firefly/admin { return 404; }
 
     location /firefly {
         proxy_pass http://127.0.0.1:8080;

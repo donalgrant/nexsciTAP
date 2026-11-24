@@ -360,3 +360,35 @@ def test_what_each_client_was_sent(panel):
         {'client': '192.0.2.7', 'bytes': 5_000_000_000, 'cap': 20_000_000_000, 'share': 0.25}]
     assert panel.volume_sent({'DownloadLimit': '0'}, records)['clients'][1]['share'] is None
     assert panel.size_bytes('1.5TB') == 1_500_000_000_000 and panel.size_bytes('0') == 0 and panel.size_bytes('x') == 0
+
+
+def test_only_a_token_of_the_panels_own_pool_signs_in(panel, monkeypatch):
+    """Cognito's GetUser answers for a token of any pool; the panel must not."""
+    import base64
+    import json
+
+    def token(**claims):
+        body = base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip('=')
+        return 'e30.' + body + '.sig'
+    monkeypatch.setattr(panel, 'SIGN_IN_POOL', 'us-west-2_Ours')
+    monkeypatch.setattr(panel, 'SIGN_IN_CLIENT', 'client1')
+    asked = []
+
+    class Cognito:
+        def get_user(self, AccessToken):
+            asked.append(AccessToken)
+            return {'Username': 'u', 'UserAttributes': [{'Name': 'email', 'Value': 'a@example.org'}]}
+    monkeypatch.setattr(panel, 'aws', lambda *a, **k: Cognito())
+    good = dict(iss='https://cognito-idp.us-west-2.amazonaws.com/us-west-2_Ours', client_id='client1', token_use='access')
+    assert panel.signed_in({'x-panel-token': token(**good)}) == 'a@example.org'
+    for change in ({'iss': 'https://cognito-idp.us-west-2.amazonaws.com/us-west-2_Theirs'}, {'client_id': 'other'},
+                   {'token_use': 'id'}, {'iss': 'https://evil.example/us-west-2_Ours'}):
+        panel._known.clear()
+        n = len(asked)
+        assert panel.signed_in({'x-panel-token': token(**dict(good, **change))}) is None
+        assert len(asked) == n, 'a foreign token is refused before Cognito is asked'
+    for junk in ('', 'nonsense', 'a.b.c', 'a.' + 'x' * 5000 + '.c'):
+        assert panel.signed_in({'x-panel-token': junk}) is None
+    monkeypatch.setattr(panel, 'SIGN_IN_POOL', '')
+    panel._known.clear()
+    assert panel.signed_in({'x-panel-token': token(**good)}) is None, 'no pool named: nobody signs in'
