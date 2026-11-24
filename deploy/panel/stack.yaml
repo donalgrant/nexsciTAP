@@ -451,6 +451,10 @@ Resources:
                   - !Sub arn:aws:iam::${AWS::AccountId}:role/${ServiceStack}-TaskRole-*
                 Condition:
                   StringEquals: {iam:PassedToService: ecs-tasks.amazonaws.com}
+              - Sid: LimitsWorkAreaAlarm   # the alarm on the work area's size, when its threshold is changed
+                Effect: Allow
+                Action: [cloudwatch:PutMetricAlarm, cloudwatch:DescribeAlarms]
+                Resource: !Sub arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${ServiceStack}-WorkAreaAlarm-*
               - Sid: LimitsFirewall
                 Effect: Allow
                 Action:
