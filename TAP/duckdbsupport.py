@@ -17,6 +17,7 @@ rebuilt when the service starts.
 """
 
 import logging
+import os
 import re
 
 

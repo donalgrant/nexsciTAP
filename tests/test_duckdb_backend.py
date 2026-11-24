@@ -436,3 +436,21 @@ def test_an_abandoned_query_is_interrupted():
     with pytest.raises(duckdbsupport.QueryAbandoned):
         cur.execute('SELECT 1')
     duckdbsupport._deadlines.clear()
+
+
+def test_a_connection_spills_to_a_directory_of_its_own(tmp_path, caplog):
+    """The spill directory is one per process, inside the one configured,
+    and setting it up logs no warning (it failed silently for a day for
+    want of an import)."""
+    import logging
+    import os
+    import duckdb
+    from TAP import duckdbsupport
+    conn = duckdb.connect()
+    conn.execute("SET temp_directory = '%s'" % tmp_path)
+    with caplog.at_level(logging.WARNING):
+        duckdbsupport._own_temp_directory(conn)
+    assert 'no temp directory of its own' not in caplog.text
+    mine = conn.execute("SELECT current_setting('temp_directory')").fetchone()[0]
+    assert mine == os.path.join(str(tmp_path), 'q%d' % os.getpid())
+    assert os.path.isdir(mine)
