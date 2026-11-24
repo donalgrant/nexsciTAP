@@ -81,3 +81,10 @@ def test_the_notice_reaches_every_page():
     assert 'sub_filter "</body>" "<script src=\\"/about/banner.js\\" defer></script></body>";' in conf
     script = read(SITE, 'about/banner.js')
     assert 'textContent = n.message' in script and 'innerHTML' not in script
+
+
+def test_the_sky_image_is_pointed_at_a_copy_that_answers():
+    """Firefly's default coverage image, by either name it has had, is rewritten to HIPS_URL."""
+    conf = read(FARGATE, 'nginx.conf.template')
+    assert 'sub_filter "http://alasky.u-strasbg.fr/DSS/DSSColor" "${HIPS_URL}";' in conf
+    assert 'sub_filter "ivo://CDS/P/DSS2/color" "${HIPS_URL}";' in conf
