@@ -27,6 +27,7 @@ HOUR = 3600
 HOURS = 24
 SMALL = 4096
 FOLDER = os.path.join('TAP', '.volume')
+EVERYONE = '-everyone-'     # the count for all clients together; no address is spelled so
 
 UNITS = {'': 1, 'B': 1, 'KB': 1000, 'MB': 1000 ** 2, 'GB': 1000 ** 3, 'TB': 1000 ** 4}
 

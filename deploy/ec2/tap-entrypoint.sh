@@ -31,6 +31,9 @@
 #   TOTAL_LIMIT     requests in progress from all clients together (default 0 = no limit);  keep it
 #                   below MAX_REQUESTS, past which requests wait unanswered
 #   STOP_ABANDONED  on (default) stops a sync query whose client has closed the connection
+#   TOTAL_VOLUME_LIMIT  what all clients together may be sent in a day (default 0 = no limit);
+#                   over it every request is answered 503 until the day has passed
+#   TAP_RESULT_BYTES  the most one result may be, written like 4GB (default: no limit)
 #   VOLUME_LIMIT    what one client may be sent in a day, written like 20GB (default 0 = no
 #                   limit);  SHARED_VOLUME_LIMIT is the same for the shared clients together
 #   BANNER          on (default) shows the notice the control panel keeps in
@@ -61,6 +64,7 @@ sed -e "s|__PUBLIC_URL__|${PUBLIC_URL}|" -e "s|__CATALOG_PREFIX__|${CATALOG_PREF
     -e "s|__SHARED_CLIENTS__|${SHARED_CLIENTS:-}|" -e "s|__SHARED_CLIENT_LIMIT__|${SHARED_CLIENT_LIMIT:-0}|" \
     -e "s|__SHARED_ASYNC_LIMIT__|${SHARED_ASYNC_LIMIT:-0}|" -e "s|__UPLOAD_URLS__|${UPLOAD_URLS:-none}|" \
     -e "s|__VOLUME_LIMIT__|${VOLUME_LIMIT:-0}|" -e "s|__SHARED_VOLUME_LIMIT__|${SHARED_VOLUME_LIMIT:-0}|" \
+    -e "s|__TOTAL_VOLUME_LIMIT__|${TOTAL_VOLUME_LIMIT:-0}|" \
     -e "s|__TOTAL_LIMIT__|${TOTAL_LIMIT:-0}|" -e "s|__STOP_ABANDONED__|${STOP_ABANDONED:-on}|" \
     /opt/tap/TAP.conf.template > /opt/tap/TAP.conf
 
@@ -121,6 +125,10 @@ if [ "$WORK_RETENTION_DAYS" -gt 0 ]; then
     ( while true; do
           as_tap find /work/TAP -mindepth 1 -maxdepth 1 -type d -name 'tap_*' \
                  -mtime "+${WORK_RETENTION_DAYS}" -exec rm -rf {} + 2>/dev/null || true
+          # A request killed outright (its time or memory limit) leaves its
+          # own spill directory behind.  No request lives two hours.
+          as_tap find /var/lib/tap/tmp -mindepth 1 -maxdepth 1 -type d -name 'q[0-9]*' \
+                 -mmin +120 -exec rm -rf {} + 2>/dev/null || true
           sleep 3600
       done ) &
 fi

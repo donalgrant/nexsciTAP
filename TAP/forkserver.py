@@ -161,6 +161,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
     shared_volume_limit = 0
     total_limit = 0
     total_exempt = ('health',)
+    total_volume_limit = 0
+    dldir = ''
     stop_abandoned = False
     rundir = ''
     _place = None
@@ -230,6 +232,39 @@ class Handler(http.server.BaseHTTPRequestHandler):
         Handler._place = mine
         return True
 
+    def _admit_download(self, client):
+        """
+        Take a place for a file fetched from the work area, unless the client
+        has as many downloads in progress as it may have requests.  A
+        download is held for as long as its reader cares to take, so without
+        this one client could hold every process the server has (found in
+        review, 23 November 2026).  Counted apart from the client's requests:
+        a client fetching results is not thereby refused its next query.
+        """
+        limit = self._limit(client)
+        if limit <= 0 or not self.dldir:
+            return True
+        places = os.path.join(self.dldir, client.replace(':', '_'))
+        os.makedirs(places, exist_ok=True)
+        mine = os.path.join(places, str(os.getpid()))
+        with open(mine, 'w'):
+            pass
+        held = 0
+        for name in os.listdir(places):
+            try:
+                os.kill(int(name), 0)
+                held += 1
+            except (OSError, ValueError):
+                try:
+                    os.remove(os.path.join(places, name))
+                except OSError:
+                    pass
+        if held > limit:
+            os.remove(mine)
+            return False
+        Handler._place = mine
+        return True
+
     def _volume_limit(self, client):
         """Bytes this client may be sent in a day (0: no limit)."""
         if client in self.unlimited_clients:
@@ -240,6 +275,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def _over_volume(self, client):
         """True, with the refusal sent, if the client has had its day's volume."""
+        if client in self.unlimited_clients or client in self.total_exempt:
+            return False
+        # Everyone together first:  the caps by client bound what one
+        # address is sent, and any number of addresses is any volume.
+        if self.total_volume_limit > 0:
+            try:
+                had, wait = _volume.used(self.workdir, _volume.EVERYONE)
+            except Exception as e:                  # a count that cannot be read refuses nobody
+                sys.stderr.write(f'volume not read: {e!r}\n')
+                had, wait = 0, 0
+            if had >= self.total_volume_limit:
+                soon = f'{wait // 3600 + 1} hours' if wait >= 5400 else f'{max(1, wait // 60)} minutes'
+                body = (f'This service sends at most {_volume.show_size(self.total_volume_limit)} in a day to all '
+                        f'its users together, and has sent {_volume.show_size(had)} in the last day.  '
+                        f'Try again in about {soon}.\n')
+                self._refuse(body, wait, status=503)
+                return True
         limit = self._volume_limit(client)
         if limit <= 0:
             return False
@@ -257,8 +309,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self._refuse(body, wait)
         return True
 
-    def _refuse(self, message, wait):
-        """Answer 429 with the message as a DALI error document.
+    def _refuse(self, message, wait, status=429):
+        """Answer 429 (or the status given) with the message as a DALI error document.
 
         TAP clients read an error from a VOTable whose QUERY_STATUS is ERROR
         and show its text;  given plain text they show only the status, or
@@ -272,7 +324,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 '<INFO name="QUERY_STATUS" value="ERROR">\n'
                 + _xml_escape(message.strip()) +
                 '\n</INFO>\n</RESOURCE>\n</VOTABLE>\n').encode()
-        self.send_response(429)
+        self.send_response(status)
         self.send_header('Retry-After', str(wait))
         self.send_header('Content-Type', 'application/x-votable+xml')
         self.send_header('Content-Length', str(len(body)))
@@ -281,11 +333,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def _sent(self, client, sent):
         """Write down what the client was sent, where a cap on it is in force."""
-        if sent and self._volume_limit(client) > 0:
-            try:
+        if not sent or client in self.unlimited_clients or client in self.total_exempt:
+            return
+        try:
+            if self._volume_limit(client) > 0:
                 _volume.add(self.workdir, client, sent)
-            except Exception as e:                  # a count, never a reason to fail
-                sys.stderr.write(f'volume not written: {e!r}\n')
+            if self.total_volume_limit > 0:
+                _volume.add(self.workdir, _volume.EVERYONE, sent)
+        except Exception as e:                      # a count, never a reason to fail
+            sys.stderr.write(f'volume not written: {e!r}\n')
 
     def _release(self):
         if self._place:
@@ -346,27 +402,34 @@ class Handler(http.server.BaseHTTPRequestHandler):
         client = self._client()
         if body and self._over_volume(client):
             return
+        if body and not self._admit_download(client):
+            who = ('through this portal' if client in self.shared_clients else f'by {client}')
+            return self._refuse(f'Too many files being fetched {who} at once (this service sends '
+                                f'{self._limit(client)} at a time).  Try again shortly.\n', 5)
 
-        with open(full, 'rb') as f:
-            size = os.fstat(f.fileno()).st_size
-            self.send_response(200)
-            self.send_header('Content-Type', ctype)
-            self.send_header('Content-Length', str(size))
-            self.end_headers()
-            if body:
-                # What is counted is what went out, also when the client
-                # hangs up part-way:  a download cut short and started
-                # again used to count for nothing.
-                sent = 0
-                try:
-                    while True:
-                        chunk = f.read(1 << 20)
-                        if not chunk:
-                            break
-                        self.wfile.write(chunk)
-                        sent += len(chunk)
-                finally:
-                    self._sent(client, sent)
+        try:
+            with open(full, 'rb') as f:
+                size = os.fstat(f.fileno()).st_size
+                self.send_response(200)
+                self.send_header('Content-Type', ctype)
+                self.send_header('Content-Length', str(size))
+                self.end_headers()
+                if body:
+                    # What is counted is what went out, also when the client
+                    # hangs up part-way:  a download cut short and started
+                    # again used to count for nothing.
+                    sent = 0
+                    try:
+                        while True:
+                            chunk = f.read(1 << 20)
+                            if not chunk:
+                                break
+                            self.wfile.write(chunk)
+                            sent += len(chunk)
+                    finally:
+                        self._sent(client, sent)
+        finally:
+            self._release()
 
     def _tap(self, path_info, query):
         """Run the CGI entry point in this (already forked) process."""
@@ -581,6 +644,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         if os.getpid() == request_pid:
             self._sent(client, counted.sent)
+            _forget_sync(seen[0] if seen else None, self.workdir)
 
         self._release()
         _tap.jobworker.finished()
@@ -633,6 +697,27 @@ def _watch_for_hangup(fd, gone):
 
     threading.Thread(target=watch, daemon=True).start()
     return stop
+
+
+def _forget_sync(tap, workdir):
+    """
+    Remove what a sync query left in the work area:  its answer has gone to
+    the client, and nothing can ask for it again.  It used to stay for the
+    retention period, a result file for every query, on a file system that
+    bills by the gigabyte (found in review, 23 November 2026).
+    TAP_KEEP_SYNC=1 keeps them, to look at.
+    """
+    if tap is None or os.environ.get('TAP_KEEP_SYNC', '') not in ('', '0'):
+        return
+    try:
+        if getattr(tap, 'tapcontext', '') != 'sync':
+            return
+        mine = os.path.realpath(getattr(tap, 'userWorkdir', '') or '')
+        home = os.path.realpath(os.path.join(workdir, 'TAP'))
+        if os.path.dirname(mine) == home and os.path.basename(mine).startswith('tap_') and os.path.isdir(mine):
+            shutil.rmtree(mine, ignore_errors=True)
+    except Exception as e:                          # tidying, never a reason to fail
+        sys.stderr.write(f'sync work area not removed: {e!r}\n')
 
 
 QUERY_RECORD = 'TAPQ'
@@ -750,8 +835,54 @@ class Server(socketserver.ForkingMixIn, http.server.HTTPServer):
     request_queue_size = 64
     max_children = 16
 
+    # Sent by this process itself, without a child, when every child is busy.
+    FULL = ('<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<VOTABLE version="1.3" xmlns="http://www.ivoa.net/xml/VOTable/v1.3">\n'
+            '<RESOURCE type="results">\n<INFO name="QUERY_STATUS" value="ERROR">\n'
+            'This service is as busy as it can be.  Try again shortly.\n'
+            '</INFO>\n</RESOURCE>\n</VOTABLE>\n').encode()
+
+    def collect_children(self, *, blocking=False):
+        # The library's own waits, when every child is busy, for one to
+        # end, and answers nobody meanwhile:  not the health check, and not
+        # with a refusal.  Sixteen requests that were slow to finish stopped
+        # the server so (found in review, 23 November 2026).  This only
+        # gathers the children that have ended.
+        if not self.active_children:
+            return
+        for pid in list(self.active_children):
+            try:
+                done, _ = os.waitpid(pid, 0 if blocking else os.WNOHANG)
+            except ChildProcessError:
+                done = pid
+            except OSError:
+                done = 0
+            if done:
+                self.active_children.discard(pid)
+
+    def process_request(self, request, client_address):
+        self.collect_children()
+        if self.active_children and len(self.active_children) >= self.max_children:
+            # No child to give it to.  Said from here, briefly, so that the
+            # client hears why and this process goes straight on.
+            try:
+                request.settimeout(0.5)
+                try:
+                    request.recv(65536)         # the request, so that closing does not reset the answer
+                except OSError:
+                    pass
+                request.sendall(b'HTTP/1.1 503 Service Unavailable\r\nRetry-After: 5\r\n'
+                                b'Content-Type: application/x-votable+xml\r\nConnection: close\r\n'
+                                b'Content-Length: ' + str(len(self.FULL)).encode() + b'\r\n\r\n' + self.FULL)
+            except OSError:
+                pass
+            sys.stderr.write('every process busy: a request refused (503)\n')
+            self.shutdown_request(request)
+            return
+        super().process_request(request, client_address)
+
     def service_actions(self):
-        super().service_actions()
+        self.collect_children()
 
         # Background workers of async jobs outlive the request that started
         # them and are inherited by this process when it is a container's
@@ -809,6 +940,7 @@ def main():
     PROCESS_MEMORY = parse_size(os.environ.get('TAP_PROCESS_MEMORY', ''))
     Handler.shared_volume_limit = parse_size(web.get('SHARED_VOLUME_LIMIT', ''))
 
+    Handler.total_volume_limit = parse_size(web.get('TOTAL_VOLUME_LIMIT', ''))
     Handler.total_limit = int(str(web.get('TOTAL_LIMIT', '') or 0).strip() or 0)
     exempt = web.get('TOTAL_EXEMPT', 'health')
     if isinstance(exempt, str):
@@ -827,6 +959,7 @@ def main():
     # Places held by requests in progress (see Handler._admit); made after
     # the switch of user, so the request processes can write here.
     Handler.rundir = tempfile.mkdtemp(prefix='tap_clients_')
+    Handler.dldir = tempfile.mkdtemp(prefix='tap_downloads_')
 
     # tap.py expects <workdir>/TAP to exist for VOSI and async requests.
     os.makedirs(os.path.join(Handler.workdir, 'TAP'), exist_ok=True)

@@ -19,7 +19,7 @@ from _helpers import row_count_from_ipac
 from conftest import FIXTURES, STUBS, TESTS_DIR, _free_port
 
 
-def _serve(fixture_root: Path, name: str, web_extra: str = "", workdir: Path | None = None):
+def _serve(fixture_root: Path, name: str, web_extra: str = "", workdir: Path | None = None, args=(), environ=None):
     """Start a fork server with its own configuration and (unless given one) work directory."""
     port = _free_port()
     workdir = workdir or fixture_root / f"{name}-workdir"
@@ -44,8 +44,8 @@ def _serve(fixture_root: Path, name: str, web_extra: str = "", workdir: Path | N
         [str(TESTS_DIR.parent), str(STUBS)] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
 
     proc = subprocess.Popen(
-        [sys.executable, "-m", "TAP.forkserver", "--conf", str(conf), "--port", str(port)],
-        env=env, cwd=str(fixture_root))
+        [sys.executable, "-m", "TAP.forkserver", "--conf", str(conf), "--port", str(port), *args],
+        env=dict(env, **(environ or {})), cwd=str(fixture_root))
 
     base = f"http://127.0.0.1:{port}"
     for _ in range(100):
@@ -634,3 +634,124 @@ def test_a_client_cannot_be_named_for_a_directory_above():
     assert H("../../etc")._client() == "etc"
     assert H("10.0.0.7")._client() == "10.0.0.7"
     assert H("health")._client() == "health"
+
+
+# ---- what the review of 23 November 2026 listed as larger items A, B and C ----
+
+def _stalled_download(base: str, client: str, path: str):
+    """A file asked for and never read."""
+    import socket
+    host, port = base.replace("http://", "").split(":")
+    s = socket.create_connection((host, int(port)))
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+    s.sendall(f"GET {path} HTTP/1.1\r\nHost: {host}\r\nX-Client: {client}\r\n\r\n".encode())
+    return s
+
+
+def test_everyone_together_has_a_volume(fixture_root: Path):
+    """The caps by client bound one address; this bounds them all."""
+    proc, base, workdir = _serve(fixture_root, "allcap", "CLIENT_HEADER=X-Client\nTOTAL_VOLUME_LIMIT=12000\nTOTAL_EXEMPT=health")
+    try:
+        (workdir / "TAP" / "big.txt").write_text("x" * 5000)
+        get = lambda who: requests.get(base + "/workspace/TAP/big.txt", headers={"X-Client": who})
+        assert [get(who).status_code for who in ("ann", "ben", "cat")] == [200, 200, 200]
+        r = get("dan")                          # who has been sent nothing
+        assert r.status_code == 503 and int(r.headers["Retry-After"]) > 3600
+        assert "all its users together" in r.text and "12 KB in a day" in r.text
+        assert 'name="QUERY_STATUS" value="ERROR"' in r.text
+        ask = {"query": "select l0filename from data_l0", "format": "ipac"}
+        assert requests.post(base + "/TAP/sync", data=ask, headers={"X-Client": "dan"}).status_code == 503
+        # The health check is answered whatever has been sent.
+        assert requests.get(base + "/TAP/availability", headers={"X-Client": "health"}).status_code == 200
+        # The count is one folder, not served.
+        assert (workdir / "TAP" / ".volume" / "-everyone-").is_dir()
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
+
+
+def test_a_download_takes_a_place(fixture_root: Path):
+    """Files being fetched are counted by client, apart from its requests."""
+    proc, base, workdir = _serve(fixture_root, "dlplace", "CLIENT_HEADER=X-Client\nCLIENT_LIMIT=2")
+    try:
+        with open(workdir / "TAP" / "huge.txt", "wb") as f:
+            f.write(b"x" * (64 << 20))
+        (workdir / "TAP" / "small.txt").write_text("hello")
+        held = [_stalled_download(base, "alice", "/workspace/TAP/huge.txt") for _ in range(2)]
+        try:
+            time.sleep(1)
+            r = requests.get(base + "/workspace/TAP/small.txt", headers={"X-Client": "alice"})
+            assert r.status_code == 429 and "files being fetched" in r.text and "alice" in r.text
+            # Her queries are not refused for it, and nobody else is affected.
+            ask = {"query": "select l0filename from data_l0", "format": "ipac"}
+            assert requests.post(base + "/TAP/sync", data=ask, headers={"X-Client": "alice"}).status_code == 200
+            assert requests.get(base + "/workspace/TAP/small.txt", headers={"X-Client": "bob"}).status_code == 200
+        finally:
+            for s in held:
+                s.close()
+        time.sleep(1)
+        assert requests.get(base + "/workspace/TAP/small.txt", headers={"X-Client": "alice"}).status_code == 200
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
+
+
+def test_a_full_server_says_so_at_once(fixture_root: Path):
+    """With every process busy the next request is refused, not left waiting."""
+    proc, base, workdir = _serve(fixture_root, "full", "CLIENT_HEADER=X-Client", args=("--max-children", "3"))
+    try:
+        held = [_stalled_request(base, f"c{i}") for i in range(3)]
+        try:
+            time.sleep(0.7)
+            began = time.time()
+            r = requests.get(base + "/TAP/availability", timeout=10)
+            assert r.status_code == 503 and r.headers["Retry-After"] == "5"
+            assert "as busy as it can be" in r.text and time.time() - began < 3
+        finally:
+            for s in held:
+                s.close()
+        for _ in range(20):
+            time.sleep(0.5)
+            if requests.get(base + "/TAP/availability", timeout=10).status_code == 200:
+                break
+        else:
+            raise AssertionError("the server did not take requests again")
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
+
+
+def test_a_sync_query_leaves_nothing_behind(fixture_root: Path):
+    proc, base, workdir = _serve(fixture_root, "tidy")
+    try:
+        ask = {"query": "select l0filename from data_l0", "format": "ipac"}
+        r = requests.post(base + "/TAP/sync", data=ask)
+        assert r.status_code == 200 and "l0filename" in r.text
+        # A failed one too.
+        requests.post(base + "/TAP/sync", data={"query": "select nothing from nowhere"})
+        time.sleep(0.5)
+        assert [p.name for p in (workdir / "TAP").iterdir() if p.name.startswith("tap_")] == []
+        # An async job's result is what the client comes back for: kept.
+        r = requests.post(base + "/TAP/async", data=dict(ask, phase="RUN"), allow_redirects=False)
+        job = r.headers["Location"].rstrip("/").split("/")[-1]
+        for _ in range(60):
+            if requests.get(base + f"/TAP/async/{job}/phase").text.strip() in ("COMPLETED", "ERROR"):
+                break
+            time.sleep(0.5)
+        assert (workdir / "TAP" / job).is_dir()
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
+
+
+def test_a_result_has_a_size(fixture_root: Path):
+    proc, base, workdir = _serve(fixture_root, "sized", environ={"TAP_RESULT_BYTES": "1KB"})
+    try:
+        r = requests.post(base + "/TAP/sync", data={"query": "select * from data_l1", "format": "csv"})
+        assert "larger than 1 KB" in r.text and "fewer rows or fewer columns" in r.text, r.text[:400]
+        # A small one is untouched.
+        r = requests.post(base + "/TAP/sync", data={"query": "select count(*) from data_l1", "format": "csv"})
+        assert r.status_code == 200 and "larger than" not in r.text
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)

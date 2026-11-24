@@ -382,7 +382,8 @@ def view_load(params):
             'limitsUndone': (load_state('stack') or {}).get('undone'),
             'limits': {k: params_now.get(k) for k in
                        ('ClientLimit', 'AsyncLimit', 'AsyncClientLimit', 'TotalLimit', 'FireflyLimit', 'FireflyAsyncLimit',
-                        'QueryMemory', 'QueryTimeout', 'MaxRecLimit', 'DownloadLimit', 'FireflyDownloadLimit')}}
+                        'QueryMemory', 'QueryTimeout', 'MaxRecLimit', 'DownloadLimit', 'FireflyDownloadLimit',
+                        'TotalDownloadLimit', 'ResultSize')}}
 
 
 SHARED_CLIENT = '127.0.0.1'         # Firefly, asking from inside the task for all of its users
@@ -451,7 +452,8 @@ def firewall(hours, period, end):
         held = stack_state(make, 'firewall')
         settings = held['params']
         out.update(status=held.get('status'), undone=held.get('undone'), limit=int(settings.get('RateLimit') or 0), overallLimit=int(settings.get('OverallLimit') or 0),
-                   mode=settings.get('Mode') or '', managed=settings.get('ManagedRules') or '')
+                   mode=settings.get('Mode') or '', managed=settings.get('ManagedRules') or '',
+                   overallMode=settings.get('OverallMode') or '')
         want = [('allowed', 'AllowedRequests', 'ALL'), ('refused', 'BlockedRequests', f'{name}-PerAddress'),
                 ('overAddress', 'CountedRequests', f'{name}-PerAddress'), ('overAll', 'CountedRequests', f'{name}-Overall')]
         r = aws('cloudwatch', FIREWALL_REGION).get_metric_data(
@@ -1430,6 +1432,14 @@ def _volume(v):
     return f'{m.group(1)}{m.group(2)}'
 
 
+def _result_size(v):
+    """The most one result may be: 0 (no limit) or 10MB to 100GB."""
+    t = _volume(v)
+    if t != '0' and (t.endswith('TB') or not 10 <= float(t[:-2]) * (1000 if t.endswith('GB') else 1) <= 100000):
+        raise ValueError('0 for no limit, or a size from 10MB to 100GB')
+    return t
+
+
 BLOCKED_MOST = 50
 
 
@@ -1503,8 +1513,11 @@ LIMITS = {
     'MaxRecLimit': ('service', _whole(1000, 50000000), 'rows, one result'),
     'DownloadLimit': ('service', _volume, 'volume sent to one client in a day'),
     'FireflyDownloadLimit': ('service', _volume, "volume sent to all of Firefly's users in a day"),
+    'TotalDownloadLimit': ('service', _volume, 'volume sent to all clients together in a day'),
+    'ResultSize': ('service', _result_size, 'the most one result may be'),
     'RateLimit': ('firewall', _whole(10, 1000000), 'requests in five minutes, one address'),
-    'OverallLimit': ('firewall', _whole(10, 10000000), 'requests in five minutes, all addresses (counted only)'),
+    'OverallLimit': ('firewall', _whole(10, 10000000), 'requests in five minutes, all addresses'),
+    'OverallMode': ('firewall', _mode, 'whether the firewall refuses or only counts past the overall limit'),
     'Mode': ('firewall', _mode, 'whether the firewall refuses or only counts'),
     'ManagedRules': ('firewall', _mode, "whether AWS's rule sets refuse or only count"),
     'BlockedAddresses': ('firewall', _addresses, 'addresses the firewall refuses outright'),

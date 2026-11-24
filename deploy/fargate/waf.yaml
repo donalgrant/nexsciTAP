@@ -19,9 +19,18 @@ Parameters:
     MinValue: 10
     Description: >-
       Requests from all addresses together in five minutes, above which the
-      Overall rule counts.  It only counts: it is there to be seen, and to be
-      made a limit if access is widened.  The busiest five minutes of the
+      Overall rule acts (OverallMode).  The busiest five minutes of the
       same three days had 156.
+  OverallMode:
+    Type: String
+    Default: block
+    AllowedValues: [count, block]
+    Description: >-
+      count: requests past OverallLimit are only counted.  block: they are
+      refused with status 429, whoever sends them, until the rate of all
+      addresses together falls.  The service is then closed to everyone for
+      those minutes, which is the point: per-address limits do nothing
+      against many addresses.
   Mode:
     Type: String
     Default: block
@@ -55,6 +64,7 @@ Conditions:
   Blocking: !Equals [!Ref Mode, block]
   AnyBlocked: !Not [!Equals [!Ref BlockedAddresses, '']]
   ManagedBlocking: !Equals [!Ref ManagedRules, block]
+  OverallBlocking: !Equals [!Ref OverallMode, block]
 
 Resources:
   # Addresses the administrator has blocked.  The set exists when empty, so
@@ -154,7 +164,15 @@ Resources:
                   PositionalConstraint: STARTS_WITH
                   SearchString: /
                   TextTransformations: [{Priority: 0, Type: NONE}]
-          Action: {Count: {}}
+          Action: !If
+            - OverallBlocking
+            - Block:
+                CustomResponse:
+                  ResponseCode: 429
+                  CustomResponseBodyKey: slow-down
+                  ResponseHeaders:
+                    - {Name: Retry-After, Value: '300'}
+            - Count: {}
           VisibilityConfig:
             SampledRequestsEnabled: true
             CloudWatchMetricsEnabled: true

@@ -12,8 +12,9 @@
 #    in a C routine.
 #
 import logging
+import os
 
-from TAP import compat, duckdbsupport, writerecs
+from TAP import compat, duckdbsupport, volume, writerecs
 
 
 class writeResult:
@@ -1477,6 +1478,19 @@ class writeResult:
 
                 if(istatus == 0):
                     self.status = 'ok'
+
+                # A result has a size as well as a number of rows:  a few
+                # wide values a row and two million rows is hundreds of GB,
+                # written to a work area that bills for it (TAP_RESULT_BYTES,
+                # written like 4GB;  unset or 0: no limit).
+                most = volume.parse_size(os.environ.get('TAP_RESULT_BYTES', ''))
+                if most > 0 and os.path.getsize(self.outpath) > most:
+                    try:
+                        os.remove(self.outpath)
+                    except OSError:
+                        pass
+                    raise Exception('The result is larger than %s, the most this service writes for one '
+                                    'query.  Ask for fewer rows or fewer columns.' % volume.show_size(most))
 
             except Exception as e:
 

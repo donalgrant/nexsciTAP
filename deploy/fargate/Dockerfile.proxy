@@ -12,4 +12,5 @@ COPY site /usr/share/nginx/aiab
 # over HTTPS sets PUBLIC_SCHEME=https and turns the cookie line into a comment.
 ENV PUBLIC_SCHEME=http \
     HSTS_HEADER="" \
+    TAP_BODY_MAX="60m" \
     PROXY_COOKIE_FLAGS="proxy_cookie_flags ~ nosecure samesite=lax;"

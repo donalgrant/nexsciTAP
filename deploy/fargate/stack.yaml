@@ -192,6 +192,37 @@ Parameters:
       of async jobs together, written like 20GB (0 = no limit).  A client
       that has had it is answered 429 until the day has passed.  The count
       is kept in the work area, so it holds across tasks and restarts.
+  TotalDownloadLimit:
+    Type: String
+    Default: '200GB'
+    AllowedPattern: '^(0|[0-9]+(\.[0-9]+)?(MB|GB|TB))$'
+    Description: >
+      What all clients together may be sent in a day (0 = no limit).  The
+      caps by client bound one address, and any number of addresses is any
+      volume;  this bounds the bill.  Over it every request is answered 503
+      with Retry-After until the oldest hour of the day drops out.
+  ResultSize:
+    Type: String
+    Default: '4GB'
+    AllowedPattern: '^(0|[0-9]+(\.[0-9]+)?(MB|GB))$'
+    Description: >
+      The most one query's result may be (0 = no limit).  MaxRecLimit bounds
+      its rows, not its width, and results are written to the work area,
+      which bills by the gigabyte.  A query over it fails with a message.
+  WorkAreaAlarmGB:
+    Type: Number
+    Default: 20
+    MinValue: 1
+    Description: >
+      Gigabytes in the work area (results, uploads, counts) above which an
+      alarm is raised, if AlertTopicArn is set.  The file system bills by
+      the gigabyte and has no size of its own.
+  AlertTopicArn:
+    Type: String
+    Default: ''
+    Description: >
+      An SNS topic the work area's alarm notifies (the control panel's alert
+      topic).  Empty: no alarm is made.
   FireflyDownloadLimit:
     Type: String
     Default: '50GB'
@@ -227,6 +258,7 @@ Parameters:
     Description: Public Firefly image the build copies into ECR.
 
 Conditions:
+  HasAlertTopic: !Not [!Equals [!Ref AlertTopicArn, '']]
   HaveAccessLog: !Not [!Equals [!Ref AccessLogBucket, '']]
   HaveDomain: !Not [!Equals [!Ref DomainName, '']]
   HaveWebAcl: !Not [!Equals [!Ref WebAclArn, '']]
@@ -315,6 +347,28 @@ Resources:
   # than inside the task, so they outlast a restart and every copy of the
   # task sees the same jobs.  Old jobs are removed by the service itself
   # (WorkRetentionDays).
+
+  WorkAreaAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: HasAlertTopic
+    Properties:
+      AlarmDescription: !Sub >-
+        The work area of ${AWS::StackName} (results and uploads of the last
+        days) holds more than ${WorkAreaAlarmGB} GB.  It bills by the
+        gigabyte and nothing bounds it but the removal of old jobs.
+      Namespace: AWS/EFS
+      MetricName: StorageBytes
+      Dimensions:
+        - {Name: FileSystemId, Value: !Ref WorkFileSystem}
+        - {Name: StorageClass, Value: Total}
+      Statistic: Average
+      Period: 900
+      EvaluationPeriods: 1
+      Threshold: !Sub '${WorkAreaAlarmGB}000000000'
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopicArn]
+      OKActions: [!Ref AlertTopicArn]
 
   WorkFileSystem:
     Type: AWS::EFS::FileSystem
@@ -626,6 +680,8 @@ Resources:
             - {Name: UPLOAD_URLS, Value: !Ref UploadUrls}
             - {Name: VOLUME_LIMIT, Value: !Ref DownloadLimit}
             - {Name: SHARED_VOLUME_LIMIT, Value: !Ref FireflyDownloadLimit}
+            - {Name: TOTAL_VOLUME_LIMIT, Value: !Ref TotalDownloadLimit}
+            - {Name: TAP_RESULT_BYTES, Value: !Ref ResultSize}
             - {Name: CLIENT_LIMIT, Value: !Ref ClientLimit}
             - {Name: TOTAL_LIMIT, Value: !Ref TotalLimit}
             - {Name: MAX_REQUESTS, Value: '16'}

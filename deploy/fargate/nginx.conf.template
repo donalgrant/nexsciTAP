@@ -92,6 +92,9 @@ server {
     }
 
     location /TAP {
+        # An uploaded table may be 50 MB (TAP/tapupload.py);  nothing else
+        # sent to TAP comes near.  The server's 600 MB is for the portal.
+        client_max_body_size ${TAP_BODY_MAX};
         proxy_pass http://127.0.0.1:8081;
         proxy_set_header Host $http_host;
         proxy_buffering off;

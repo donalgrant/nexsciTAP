@@ -392,3 +392,15 @@ def test_only_a_token_of_the_panels_own_pool_signs_in(panel, monkeypatch):
     monkeypatch.setattr(panel, 'SIGN_IN_POOL', '')
     panel._known.clear()
     assert panel.signed_in({'x-panel-token': token(**good)}) is None, 'no pool named: nobody signs in'
+
+
+def test_the_limits_of_24_november(panel):
+    """The overall volume, a result's size and the firewall's overall mode are limits the panel may change."""
+    assert panel.LIMITS['TotalDownloadLimit'][0] == 'service' and panel.LIMITS['OverallMode'][0] == 'firewall'
+    assert panel._result_size('4GB') == '4GB' and panel._result_size('0') == '0'
+    for bad in ('5MB', '1TB', '200GB', 'lots'):
+        try:
+            panel._result_size(bad)
+        except ValueError:
+            continue
+        raise AssertionError(bad)

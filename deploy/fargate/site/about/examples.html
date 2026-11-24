@@ -47,7 +47,7 @@ cone = tap.search("""
     WHERE CONTAINS(POINT('ICRS', w.ra, w.dec),
                    CIRCLE('ICRS', g.ra, g.dec, 0.000833)) = 1      <span class="c">-- 3 arcsec, written as a number</span>
 """, uploads={'mine': galaxies}).to_table()</pre>
-    <p>With 949 uploaded positions against the 58.6 million rows of <code>allwise</code>, this takes about 5 seconds.  The table must be sent with the request;  an upload given as a URL is refused.</p>
+    <p>With 949 uploaded positions against the 58.6 million rows of <code>allwise</code>, this takes about 5 seconds.  The table must be sent with the request;  an upload given as a URL is refused.  An uploaded table may be at most 50 MB and 2,000,000 rows.</p>
   </section>
 
   <section id="astroquery">
