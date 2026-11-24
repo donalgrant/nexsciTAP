@@ -92,9 +92,14 @@ Parameters:
   HipsUrl:
     Type: String
     Default: https://irsa.ipac.caltech.edu/data/hips/CDS/DSS2/color
-  FireflyAdminPassword:
+  OriginSecretPrevious:
     Type: String
     NoEcho: true
+    Default: ''
+    Description: >
+      To change OriginSecret without a gap:  give the value in force here
+      and the new one as OriginSecret in one update.  The load balancer then
+      accepts both while CloudFront changes over.  Empty it afterward.
   QueryTimeout:
     Type: Number
     Default: 300
@@ -277,6 +282,7 @@ Parameters:
     Description: Public Firefly image the build copies into ECR.
 
 Conditions:
+  HavePreviousSecret: !Not [!Equals [!Ref OriginSecretPrevious, '']]
   HasAlertTopic: !Not [!Equals [!Ref AlertTopicArn, '']]
   HaveAccessLog: !Not [!Equals [!Ref AccessLogBucket, '']]
   HaveDomain: !Not [!Equals [!Ref DomainName, '']]
@@ -307,6 +313,26 @@ Resources:
             Action: sts:AssumeRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: read-the-portal-password
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref FireflyAdminSecret
+
+  # Firefly's administration password.  It was a setting of this stack,
+  # written in plain text into every task definition (security review of 23
+  # November 2026, item I).  Made here, known to nobody, and handed to the
+  # container when it starts.  The administration pages are not served
+  # through the proxy;  to use them, read the secret and reach port 8080
+  # from inside the task.
+  FireflyAdminSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: !Sub Firefly's administration password for ${AWS::StackName}
+      GenerateSecretString: {PasswordLength: 32, ExcludePunctuation: true}
 
   # What the containers themselves may do: read the catalogs, nothing else.
   TaskRole:
@@ -360,6 +386,24 @@ Resources:
           FromPort: 80
           ToPort: 80
           SourceSecurityGroupId: !Ref LoadBalancerSecurityGroup
+      # What the task may reach:  the web (S3, the image registry, the logs,
+      # and whatever Firefly fetches for its users), and the work area
+      # (TaskToWorkArea, below).  It could reach any port of any host
+      # (security review of 23 November 2026, items H and K).  The VPC's own
+      # name server and the task's metadata are not subject to these rules.
+      SecurityGroupEgress:
+        - {IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0, Description: HTTPS}
+        - {IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: 0.0.0.0/0, Description: HTTP}
+
+  TaskToWorkArea:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref TaskSecurityGroup
+      IpProtocol: tcp
+      FromPort: 2049
+      ToPort: 2049
+      DestinationSecurityGroupId: !Ref WorkSecurityGroup
+      Description: the work area (NFS)
 
   # ---- Work area -------------------------------------------------------
   # Async results and uploaded tables live on a network file system rather
@@ -484,7 +528,9 @@ Resources:
       Priority: 1
       Conditions:
         - Field: http-header
-          HttpHeaderConfig: {HttpHeaderName: X-Origin-Secret, Values: [!Ref OriginSecret]}
+          HttpHeaderConfig:
+            HttpHeaderName: X-Origin-Secret
+            Values: !If [HavePreviousSecret, [!Ref OriginSecret, !Ref OriginSecretPrevious], [!Ref OriginSecret]]
       Actions:
         - {Type: forward, TargetGroupArn: !Ref TargetGroup}
 
@@ -653,8 +699,11 @@ Resources:
         # proxy's DependsOn).  Without this a new task took requests while TAP
         # was still starting, and a restart answered a few of them with 502
         # (seen 20 November 2026).  It also stops the proxy first.
+        # Capabilities no container here uses are dropped from all three.
         - Name: tap
           Image: !Ref TapImage
+          LinuxParameters:
+            Capabilities: {Drop: [NET_RAW, MKNOD, AUDIT_WRITE, SYS_CHROOT, SETFCAP]}
           Essential: true
           Memory: !Ref TapMemory
           HealthCheck:
@@ -717,6 +766,8 @@ Resources:
               awslogs-stream-prefix: task
         - Name: firefly
           Image: !Ref FireflyImage
+          LinuxParameters:
+            Capabilities: {Drop: [NET_RAW, MKNOD, AUDIT_WRITE, SYS_CHROOT, SETFCAP]}
           Essential: true
           Memory: 3584
           HealthCheck:
@@ -725,8 +776,9 @@ Resources:
             Timeout: 5
             Retries: 3
             StartPeriod: 120
+          Secrets:
+            - {Name: ADMIN_PASSWORD, ValueFrom: !Ref FireflyAdminSecret}
           Environment:
-            - {Name: ADMIN_PASSWORD, Value: !Ref FireflyAdminPassword}
             # Lists the TAP service in Firefly's own menu, by the name
             # Firefly's server can reach it under.
             - Name: PROPS_FIREFLY_OPTIONS
@@ -739,6 +791,8 @@ Resources:
               awslogs-stream-prefix: task
         - Name: proxy
           Image: !Ref ProxyImage
+          LinuxParameters:
+            Capabilities: {Drop: [NET_RAW, MKNOD, AUDIT_WRITE, SYS_CHROOT, SETFCAP]}
           Essential: true
           Memory: 256
           DependsOn:

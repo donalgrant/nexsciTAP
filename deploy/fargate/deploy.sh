@@ -12,12 +12,8 @@ set -euo pipefail
 STACK="$1"; TAP_IMAGE="$2"; PROXY_IMAGE="$3"; FIREFLY_IMAGE="$4"; COUNT="${5:-1}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
-# A new stack needs a Firefly admin password; an existing one keeps its own,
-# so that updating the stack does not restart the task for nothing.
+# (Firefly's admin password is made by the stack itself, as a secret.)
 PASSWORD=()
-if ! aws cloudformation describe-stacks --stack-name "$STACK" >/dev/null 2>&1; then
-    PASSWORD=("FireflyAdminPassword=$(head -c 18 /dev/urandom | base64 | tr -d '/+=')")
-fi
 
 # Likewise the secret CloudFront shows the load balancer: made once, then kept.
 if ! aws cloudformation describe-stacks --stack-name "$STACK" \
