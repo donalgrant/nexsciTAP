@@ -33,6 +33,8 @@
 #   STOP_ABANDONED  on (default) stops a sync query whose client has closed the connection
 #   VOLUME_LIMIT    what one client may be sent in a day, written like 20GB (default 0 = no
 #                   limit);  SHARED_VOLUME_LIMIT is the same for the shared clients together
+#   BANNER          on (default) shows the notice the control panel keeps in
+#                   <CATALOG_PREFIX>_banner.json;  BANNER_INTERVAL is seconds between looks (60)
 #   WORK_RETENTION_DAYS  days results and uploads are kept in /work (default 7; 0 = for ever)
 set -euo pipefail
 
@@ -103,6 +105,13 @@ fi
 # container, already holding other jobs: own the top of it, not every file.
 mkdir -p /work/TAP
 chown www-data:www-data /work /work/TAP 2>/dev/null || true
+
+# The administrator's notice to users, if the control panel has set one, is
+# copied from the catalog bucket to the work area, where the pages fetch it
+# (banner.py).  Every copy of the container does this, to the same file.
+if [ "${BANNER:-on}" = "on" ] && [ "${CATALOG_PREFIX#s3://}" != "$CATALOG_PREFIX" ]; then
+    as_tap python /opt/tap/banner.py "${CATALOG_PREFIX}" /work/banner.json "${BANNER_INTERVAL:-60}" &
+fi
 
 # Jobs older than the retention period are removed, here because nothing
 # else would: results in a shared work area outlive the container.  Every

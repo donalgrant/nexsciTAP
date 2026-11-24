@@ -42,11 +42,32 @@ Parameters:
       service matches and which stay counted.  The set against SQL injection
       is left out on purpose: every query to this service is SQL.
 
+  BlockedAddresses:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^[0-9./]+(,[0-9./]+)*$'
+    Description: >-
+      Addresses refused outright, whatever their rate: IPv4 addresses or
+      ranges in CIDR form (192.0.2.7/32), separated by commas.  Empty for
+      none.  The control panel's Load tab changes this.
+
 Conditions:
   Blocking: !Equals [!Ref Mode, block]
+  AnyBlocked: !Not [!Equals [!Ref BlockedAddresses, '']]
   ManagedBlocking: !Equals [!Ref ManagedRules, block]
 
 Resources:
+  # Addresses the administrator has blocked.  The set exists when empty, so
+  # that blocking the first one changes a set and creates nothing.
+  Blocked:
+    Type: AWS::WAFv2::IPSet
+    Properties:
+      Name: !Sub ${AWS::StackName}-blocked
+      Scope: CLOUDFRONT
+      Description: Addresses refused by the Archive in a Box service
+      IPAddressVersion: IPV4
+      Addresses: !If [AnyBlocked, !Split [',', !Ref BlockedAddresses], []]
+
   WebAcl:
     Type: AWS::WAFv2::WebACL
     Properties:
@@ -59,13 +80,47 @@ Resources:
         CloudWatchMetricsEnabled: true
         MetricName: !Sub ${AWS::StackName}
       CustomResponseBodies:
+        # The refusals are written as DALI error documents (a VOTable whose
+        # QUERY_STATUS is ERROR), as the service writes its own, so that a
+        # TAP client shows the message and not only the status.  A person
+        # with curl can still read it.
         slow-down:
           ContentType: TEXT_PLAIN
-          Content: >-
-            Too many requests from this address in the last five minutes.
-            Wait a few minutes and try again.  For a large job, use one
-            asynchronous query in place of many small ones.
+          Content: |
+            <?xml version="1.0" encoding="UTF-8"?>
+            <VOTABLE version="1.3" xmlns="http://www.ivoa.net/xml/VOTable/v1.3">
+            <RESOURCE type="results">
+            <INFO name="QUERY_STATUS" value="ERROR">
+            Too many requests from this address in the last five minutes.  Wait a few minutes and try again.  For a large job, use one asynchronous query in place of many small ones.
+            </INFO>
+            </RESOURCE>
+            </VOTABLE>
+        blocked:
+          ContentType: TEXT_PLAIN
+          Content: |
+            <?xml version="1.0" encoding="UTF-8"?>
+            <VOTABLE version="1.3" xmlns="http://www.ivoa.net/xml/VOTable/v1.3">
+            <RESOURCE type="results">
+            <INFO name="QUERY_STATUS" value="ERROR">
+            This service is not accepting requests from this address.  If you think that is a mistake, write to the service's administrator.
+            </INFO>
+            </RESOURCE>
+            </VOTABLE>
       Rules:
+        - Name: Blocked
+          Priority: 0
+          Statement:
+            IPSetReferenceStatement:
+              Arn: !GetAtt Blocked.Arn
+          Action:
+            Block:
+              CustomResponse:
+                ResponseCode: 403
+                CustomResponseBodyKey: blocked
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: !Sub ${AWS::StackName}-Blocked
         - Name: PerAddress
           Priority: 1
           Statement:
@@ -79,6 +134,8 @@ Resources:
                 CustomResponse:
                   ResponseCode: 429
                   CustomResponseBodyKey: slow-down
+                  ResponseHeaders:
+                    - {Name: Retry-After, Value: '300'}
             - Count: {}
           VisibilityConfig:
             SampledRequestsEnabled: true

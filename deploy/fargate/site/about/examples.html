@@ -105,6 +105,8 @@ curl -s https://aiab.ipac.caltech.edu/TAP/capabilities</pre>
       <tr><td>403</td><td>The request came from outside IPAC and Caltech, which is all the pilot admits.  From elsewhere, use the Caltech VPN.</td></tr>
       <tr><td>"This archive is paused"</td><td>The service is switched off outside its hours to save cost.  Nothing is lost;  ask its administrator to start it.</td></tr>
       <tr><td>429, "too many requests in progress"</td><td>One address may have 6 requests in progress at once.  Wait for one to finish.</td></tr>
+      <tr><td>429, "the most it takes at once"</td><td>The service is handling 12 requests, from everyone together.  Try again in a few seconds.</td></tr>
+      <tr><td>403, "not accepting requests from this address"</td><td>The administrator has blocked the address.</td></tr>
       <tr><td>An async job fails, "jobs running"</td><td>One address may have 3 async jobs running, and the service runs 8 in all.  Submit it again when one has finished.</td></tr>
       <tr><td>429 with a volume and a time to try again</td><td>One address is sent at most 20 GB in a day.  Ask for fewer columns or rows, or wait the time given.</td></tr>
       <tr><td>429, plain</td><td>More than 1,000 requests from one address in five minutes.  It clears a few minutes after the requests slow down.</td></tr>
@@ -131,5 +133,6 @@ curl -s https://aiab.ipac.caltech.edu/TAP/capabilities</pre>
   <p class="credit">Archive in a Box is a pilot of IPAC at Caltech.  It is built on nexsciTAP, from the NASA Exoplanet Science Institute (NExScI), and on Firefly, from the NASA/IPAC Infrared Science Archive (IRSA).</p>
 </div></footer>
 <script src="/about/site.js"></script>
+<script src="/about/banner.js"></script>
 </body>
 </html>

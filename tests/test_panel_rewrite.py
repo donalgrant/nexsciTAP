@@ -287,3 +287,76 @@ def test_a_new_name_needs_no_quotes(panel):
             panel.rewrite_settings({'rename': [{'from': 'a', 'to': bad}]})
     assert panel.rewrite_settings({'rename': [{'from': '_planets', 'to': 'n_planets'}, {'from': 'size', 'to': 'size_'}]}) \
         == {'RENAME': '_planets=n_planets,size=size_'}
+
+
+# ---- the notice to users, blocking an address, and what the firewall refused ----
+
+def test_the_paused_page_fits_with_any_notice(panel):
+    assert panel.paused_page() == panel.PAUSED_PAGE
+    for message in ('Back at 3 pm.', 'x' * 300, '<b>&</b>' * 37, 'é' * 300, '&' * 300):
+        page = panel.paused_page(message)
+        assert len(page.encode()) <= panel.PAUSED_MOST
+        assert 'This archive is paused' in page and '<b>' not in page
+        assert not page.rstrip('</p>').endswith('&am')
+    assert 'Back at 3 pm.' in panel.paused_page('Back at 3 pm.')
+    assert '&lt;script&gt;' in panel.paused_page('<script>')
+
+
+def test_a_notice_is_short_plain_text(panel):
+    assert panel.banner_settings({'message': '  Down   on\nThursday. ', 'level': 'warn'}) == {'message': 'Down on Thursday.', 'level': 'warn'}
+    assert panel.banner_settings({}) == {'message': '', 'level': 'info'}
+    for body in ({'message': 'x' * 301}, {'message': 'a', 'level': 'loud'}, {'message': 'a\x07b'}):
+        with pytest.raises(panel.Refused):
+            panel.banner_settings(body)
+
+
+def test_an_address_to_block(panel):
+    assert panel._address('192.0.2.7') == '192.0.2.7/32'
+    assert panel._address(' 192.0.2.77/24 ') == '192.0.2.0/24'
+    for bad in ('', 'example.org', '2001:db8::1', '10.0.0.0/8', '300.1.1.1', '1.2.3.4/33'):
+        with pytest.raises(ValueError):
+            panel._address(bad)
+    assert panel._addresses('192.0.2.9, 192.0.2.7/32,192.0.2.9') == '192.0.2.7/32,192.0.2.9/32'
+    assert panel._addresses('') == ''
+    assert panel.LIMITS['BlockedAddresses'][0] == 'firewall'
+    got = panel.limit_changes({'BlockedAddresses': '192.0.2.7'}, {'firewall': {'BlockedAddresses': ''}, 'service': {}})
+    assert got == {'firewall': {'BlockedAddresses': ('', '192.0.2.7/32')}}
+
+
+def test_a_refusal_by_the_firewall_in_the_door_log(panel):
+    row = {'sc-status': '429', 'x-edge-result-type': 'Error', 'time-taken': '0.001'}
+    assert panel.by_firewall(row)
+    assert panel.by_firewall(dict(row, **{'sc-status': '403'}))
+    assert not panel.by_firewall(dict(row, **{'time-taken': '0.212'}))             # the service's own refusal
+    assert not panel.by_firewall(dict(row, **{'x-edge-result-type': 'FunctionGeneratedResponse'}))      # the door's
+    assert not panel.by_firewall(dict(row, **{'sc-status': '200'}))
+    assert not panel.by_firewall(dict(row, **{'time-taken': '-'}))
+    hour = str(int(panel.time.time() // 3600) * 3600)
+    watch = {'hours': {hour: {'walled': {'192.0.2.7': {'429': 40, '403': 2}, '192.0.2.9': {'403': 5}}},
+                       '0': {'walled': {'192.0.2.1': {'429': 999}}}}}
+    assert panel.refused_by_firewall(watch) == [
+        {'address': '192.0.2.7', 'refused': 42, 'rate': 40, 'last': int(hour)},
+        {'address': '192.0.2.9', 'refused': 5, 'rate': 0, 'last': int(hour)}]
+
+
+def test_the_firewall_rule(panel):
+    assert panel.firewall_verdict({'refused': 0, 'overAll': 0}) == (False, 'nothing refused for its rate')
+    bad, said = panel.firewall_verdict({'refused': 31, 'overAll': 0, 'who': ['192.0.2.7']})
+    assert bad and '31 requests refused' in said and '192.0.2.7' in said
+    bad, said = panel.firewall_verdict({'refused': 0, 'overAll': 12})
+    assert bad and 'overall mark' in said
+    assert 'firewall' in panel.RULES
+
+
+def test_what_each_client_was_sent(panel):
+    t = panel.time.time()
+    records = [{'t': t - 60, 'client': '192.0.2.7', 'bytes': 5_000_000_000}, {'t': t - 90, 'client': '192.0.2.7', 'bytes': 3000},
+               {'t': t - 100, 'client': '127.0.0.1', 'bytes': 10_000_000_000}, {'t': t - 90000, 'client': '192.0.2.7', 'bytes': 10 ** 12},
+               {'t': t - 5, 'client': '192.0.2.9'}]
+    got = panel.volume_sent({'DownloadLimit': '20GB', 'FireflyDownloadLimit': '50GB'}, records)
+    assert got['cap'] == 20_000_000_000 and got['sharedCap'] == 50_000_000_000
+    assert got['clients'] == [
+        {'client': 'Firefly (all its users)', 'bytes': 10_000_000_000, 'cap': 50_000_000_000, 'share': 0.2},
+        {'client': '192.0.2.7', 'bytes': 5_000_000_000, 'cap': 20_000_000_000, 'share': 0.25}]
+    assert panel.volume_sent({'DownloadLimit': '0'}, records)['clients'][1]['share'] is None
+    assert panel.size_bytes('1.5TB') == 1_500_000_000_000 and panel.size_bytes('0') == 0 and panel.size_bytes('x') == 0

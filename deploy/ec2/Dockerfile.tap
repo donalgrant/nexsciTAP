@@ -58,6 +58,7 @@ RUN mkdir -p /opt/duckdb_ext \
  && python -c "import duckdb; c = duckdb.connect(); c.execute(\"SET extension_directory='/opt/duckdb_ext'\"); c.execute('INSTALL httpfs'); c.execute('INSTALL aws')"
 
 COPY nexsciTAP/deploy/ec2/refresh_secret.py /opt/tap/refresh_secret.py
+COPY nexsciTAP/deploy/ec2/banner.py /opt/tap/banner.py
 COPY nexsciTAP/deploy/ec2/tap-entrypoint.sh /opt/tap/entrypoint.sh
 COPY nexsciTAP/deploy/ec2/TAP.conf.template /opt/tap/TAP.conf.template
 COPY nexsciTAP/deploy/ec2/s3_init.sql /opt/tap/s3_init.sql

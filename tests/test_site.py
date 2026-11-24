@@ -71,3 +71,13 @@ def test_the_sources_are_well_formed():
         assert src['url'].startswith('https://') and ' ' not in src['url'], table
         assert src['from'].strip(), table
     assert "fetch('/about/sources.json')" in read(SITE, 'about', 'site.js')
+
+
+def test_the_notice_reaches_every_page():
+    """The administrator's notice: the service's pages include its script, and the proxy adds it to the portal's."""
+    for page in ('index.html', 'about/examples.html'):
+        assert '<script src="/about/banner.js"></script>' in read(SITE, page)
+    conf = read(FARGATE, 'nginx.conf.template')
+    assert 'sub_filter "</body>" "<script src=\\"/about/banner.js\\" defer></script></body>";' in conf
+    script = read(SITE, 'about/banner.js')
+    assert 'textContent = n.message' in script and 'innerHTML' not in script

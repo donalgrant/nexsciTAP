@@ -466,6 +466,23 @@ Resources:
                 Effect: Allow
                 Action: wafv2:UpdateWebACL
                 Resource: !Sub arn:aws:wafv2:us-east-1:${AWS::AccountId}:global/managedruleset/*/*
+              # The addresses the administrator has blocked:  a set the web ACL
+              # refers to, changed through the firewall's stack like its limits.
+              - Sid: LimitsFirewallBlockedAddresses
+                Effect: Allow
+                Action:
+                  - wafv2:GetIPSet
+                  - wafv2:UpdateIPSet
+                  - wafv2:UpdateWebACL
+                  - wafv2:ListTagsForResource
+                  - wafv2:TagResource
+                  - wafv2:UntagResource
+                Resource: !Sub arn:aws:wafv2:us-east-1:${AWS::AccountId}:global/ipset/aiab-waf*/*
+              # Which addresses the firewall refused, from its sampled requests.
+              - Sid: FirewallSampledRequests
+                Effect: Allow
+                Action: wafv2:GetSampledRequests
+                Resource: !Sub arn:aws:wafv2:us-east-1:${AWS::AccountId}:global/webacl/aiab-waf*/*
               - Sid: LimitsFirewallAccountCheck
                 Effect: Allow
                 Action: payments:GetConnectedAccount

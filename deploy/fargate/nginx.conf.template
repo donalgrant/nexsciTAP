@@ -64,6 +64,9 @@ server {
         # The page must arrive uncompressed for the substitution to apply.
         proxy_set_header Accept-Encoding "";
         sub_filter "http://alasky.u-strasbg.fr/DSS/DSSColor" "${HIPS_URL}";
+        # The administrator's notice to users, shown by the service's own
+        # script on the portal's page too.
+        sub_filter "</body>" "<script src=\"/about/banner.js\" defer></script></body>";
         sub_filter_once off;
     }
 

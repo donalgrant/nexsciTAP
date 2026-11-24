@@ -306,6 +306,7 @@ const VIEW = {
         s.canary.history.map((c) => `<i class="${c.ok === null ? 'skip' : c.ok ? '' : 'bad'}" title="${when(c.at)}: ${c.ok === null ? 'skipped' : c.ok ? 'passed, ' + ms(c.ms) : 'failed'}"></i>`).join('') +
         `</div>${(s.canaryTables || []).filter((t) => !t.on).map((t) => `<p class="note warnText">No check on <span class="mono">${esc(t.table)}</span>:  ${esc(t.why || 'switched off')}.</p>`).join('')}<p class="note">${s.canary.day.runs} runs in the last 24 hours, ${s.canary.day.failed} failed${s.canary.day.skipped ? ', ' + s.canary.day.skipped + ' skipped' : ''}.</p>` + canaryDetail(s.canary.last) + '</div>';
     }
+    h += bannerCard(s);
     h += scheduleCard(s);
     h += '<div class="card gap"><h2>Service events</h2><table>' + s.events.map((e) => `<tr><td class="note" style="white-space:nowrap">${when(e.at)}</td><td>${esc(e.message)}</td></tr>`).join('') + '</table></div>';
     return h;
@@ -343,6 +344,7 @@ const VIEW = {
     h += `<div class="grid g11 gap"><div class="card"><h2>Requests per ${l.period / 60} minutes</h2>${lines(s.requests, null, '')}</div>` +
          `<div class="card"><h2>Response time, seconds</h2>${lines(s.responseP50, s.responseP95, ' s')}<p class="note">Blue median, amber 95th percentile.</p></div></div>`;
     const L = l.limits || {}, F = l.firewall;
+    const busyLimits = [l.limitsStatus, F && F.status].some((x) => x && !/_COMPLETE$/.test(x));
     if (F && F.error) h += `<div class="notice err gap">The firewall's numbers could not be read:  ${esc(F.error)}</div>`;
     if (F && F.series) {
       const fs = F.series, blocking = F.mode === 'block';
@@ -351,9 +353,9 @@ const VIEW = {
         tile(blocking ? 'Refused' : 'Would be refused', num(total(blocking ? fs.refused : fs.overAddress)), blocking ? 'answered 429, over the limit for one address' : 'over the limit for one address;  counting only') +
         tile('Limit, one address', num(F.limit), 'requests in five minutes') +
         tile('Over the overall mark', num(total(fs.overAll)), `requests after all addresses passed ${num(F.overallLimit)} in five minutes;  counted, not refused`) + '</div>' +
-        `<div class="gap">${lines(fs.allowed, blocking ? fs.refused : fs.overAddress, '')}</div><p class="note">Requests per ${l.period / 60} minutes.  Blue let through, amber ${blocking ? 'refused' : 'over the limit (counted only)'}.  The firewall acts before the address check and before the paused page, so it counts requests the door then refuses.  Its numbers reach here a few minutes late.</p>` + ruleSets(F) + '</div>';
+        `<div class="gap">${lines(fs.allowed, blocking ? fs.refused : fs.overAddress, '')}</div><p class="note">Requests per ${l.period / 60} minutes.  Blue let through, amber ${blocking ? 'refused' : 'over the limit (counted only)'}.  The firewall acts before the address check and before the paused page, so it counts requests the door then refuses.  Its numbers reach here a few minutes late.</p>` + ruleSets(F) + refusedAddresses(F) + blockedAddresses(F, busyLimits) + '</div>';
     }
-    const busyLimits = [l.limitsStatus, F && F.status].some((x) => x && !/_COMPLETE$/.test(x));
+    h += sentCard(l.sent);
     if (busyLimits) {
       h += '<div class="notice gap">The limits are being changed.  A change to the service restarts it on the new settings, which takes about five minutes;  a change to the firewall takes about a minute.  This page refreshes by itself.</div>';
       clearTimeout(VIEW.Load.timer);
@@ -363,6 +365,7 @@ const VIEW = {
       if (u && Date.now() / 1000 - u.at < 86400) h += `<div class="notice err gap">The last change to the limits of ${what} (${when(u.at)}) was not made.  CloudFormation undid it, and the limits are as they were.${u.why ? '  It said:  ' + esc(u.why) : ''}</div>`;
     const rows = [['ClientLimit', 'Requests in progress, one client, per task', L.ClientLimit, '', 'service'], ['AsyncClientLimit', 'Async jobs running, one client', L.AsyncClientLimit, '', 'service'],
        ['AsyncLimit', 'Async jobs running, in all', L.AsyncLimit, '', 'service'],
+       ...(L.TotalLimit != null ? [['TotalLimit', 'Requests in progress, all clients together, per task', L.TotalLimit, '', 'service']] : []),
        ...(L.FireflyLimit != null ? [['FireflyLimit', 'Requests in progress, all of Firefly\'s users together, per task', L.FireflyLimit, '', 'service'], ['FireflyAsyncLimit', 'Async jobs running, all of Firefly\'s users together', L.FireflyAsyncLimit, '', 'service']] : []),
        ['QueryMemory', 'Memory, one query', L.QueryMemory, '', 'service'],
        ['QueryTimeout', 'Time, one query', L.QueryTimeout, ' s', 'service'], ['MaxRecLimit', 'Rows, one result', L.MaxRecLimit, '', 'service'],
@@ -549,6 +552,31 @@ function detail(e) {
   return JSON.stringify(d);
 }
 const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+function bannerCard(s) {
+  const b = s.banner || {}, most = s.bannerMost || 300;
+  setTimeout(() => {
+    const save = $('#bsave'); if (!save) return;
+    const text = $('#btext'), left = $('#bleft');
+    const count = () => { left.textContent = `${text.value.length} of ${most}`; };
+    text.oninput = count; count();
+    save.onclick = () => {
+      const message = text.value.trim();
+      if (!message) { toast('Write the notice first, or use "Take it away".'); return; }
+      act({action: 'banner', message, level: $('#blevel').value},
+        (o) => o.paused ? 'Notice set.  The service is in standby, so it is on the paused page now.' : 'Notice set.  The pages show it within about a minute.');
+    };
+    const clear = $('#bclear');
+    if (clear) clear.onclick = () => act({action: 'banner', message: ''}, () => 'Notice taken away.  It leaves the pages within about a minute.');
+  });
+  const now = b.error ? `<p class="note warnText">The notice could not be read:  ${esc(b.error)}</p>`
+    : b.message ? `<p class="note">Showing now, set ${when(b.set)} by ${esc(b.by || 'someone')}.</p>`
+    : '<p class="note">No notice is showing.</p>';
+  return '<div class="card gap"><h2>Notice to users</h2>' + now +
+    `<div class="form"><textarea id="btext" rows="2" maxlength="${most}" style="flex:1;min-width:20em" placeholder="For example:  The archive will be unavailable on Thursday from 9 to 11 am Pacific for maintenance.">${esc(b.message || '')}</textarea></div>` +
+    `<div class="form"><select id="blevel"><option value="info" ${b.level === 'warn' ? '' : 'selected'}>Information (blue)</option><option value="warn" ${b.level === 'warn' ? 'selected' : ''}>Warning (amber)</option></select>` +
+    `<span class="note" id="bleft"></span><button id="bsave">Show this notice</button>${b.message ? '<button id="bclear">Take it away</button>' : ''}</div>` +
+    '<p class="note">A strip across the top of the front page, the examples page and Firefly, as plain text.  In standby it is on the paused page.  It is not sent to TAP clients such as pyvo or TOPCAT.</p></div>';
+}
 function scheduleCard(s) {
   const c = s.schedule || {};
   setTimeout(() => {
@@ -690,6 +718,53 @@ async function uploadAndConvert() {
   } catch (e) { state.innerHTML = `<span class="badText">${esc(e.message)}</span>`; const b = $('#upbusy'); if (b) { b.disabled = false; b.id = 'ugo'; } }
 }
 let limitRows = [];
+// Whom the firewall refused, and the addresses blocked by hand: two tables inside the Firewall card.
+function refusedAddresses(F) {
+  const byLog = F.refusedAddresses || [], samples = F.sampled || [];
+  const why = {};
+  for (const x of samples) (why[x.address] = why[x.address] || []).push(x);
+  const blocked = new Set((F.blocked || []).map((a) => a.replace(/\/32$/, '')));
+  const seen = new Set(byLog.map((r) => r.address));
+  const rows = byLog.map((r) => ({address: r.address, refused: r.refused, rate: r.rate, last: r.last}))
+    .concat(Object.keys(why).filter((a) => !seen.has(a)).map((a) => ({address: a, refused: null})));
+  if (!rows.length) return '<p class="note gap">No address was refused by the firewall in the last day.</p>';
+  setTimeout(() => document.querySelectorAll('[data-block]').forEach((b) => { b.onclick = () => blockAddress(b.dataset.block, true); }));
+  return '<h3 class="gap">Addresses the firewall refused</h3><table><tr><th>Address</th><th class="num">Refused, last day</th><th class="num">For its rate (429)</th><th>Rule, by the last three hours\' samples</th><th></th></tr>' +
+    rows.map((r) => `<tr><td class="mono">${esc(r.address)}</td><td class="num">${r.refused == null ? 'not yet in the log' : num(r.refused)}</td><td class="num">${r.refused == null ? '' : num(r.rate)}</td>` +
+      `<td>${(why[r.address] || []).map((x) => `${esc(x.rule)} (${x.count}${x.uri ? ', ' + esc(x.uri) : ''})`).join('<br>') || '<span class="note">no sample</span>'}</td>` +
+      `<td>${!F.canBlock ? '' : blocked.has(r.address) ? '<span class="note">blocked</span>' : `<button data-block="${esc(r.address)}">Block</button>`}</td></tr>`).join('') +
+    '</table><p class="note">Counts are from CloudFront\'s log, which arrives up to an hour late, and take a refusal to be any 403 or 429 answered within 10 ms.  The rule comes from AWS\'s samples of the last three hours, which say who and why, not how many.  Scanners refused by AWS\'s rule sets are ordinary.</p>';
+}
+function blockedAddresses(F, busy) {
+  if (!F.canBlock) return '<p class="note gap">Blocking an address from here needs the firewall\'s stack to be deployed again from deploy/fargate/waf.yaml.</p>';
+  const list = F.blocked || [];
+  setTimeout(() => {
+    const b = $('#blockadd'); if (!b) return;
+    b.onclick = () => { const a = $('#blockaddr').value.trim(); if (a) blockAddress(a, true); };
+    document.querySelectorAll('[data-unblock]').forEach((u) => { u.onclick = () => blockAddress(u.dataset.unblock, false); });
+  });
+  return '<h3 class="gap">Blocked addresses</h3>' +
+    (list.length ? '<table>' + list.map((a) => `<tr><td class="mono">${esc(a)}</td><td><button data-unblock="${esc(a)}" ${busy ? 'disabled' : ''}>Unblock</button></td></tr>`).join('') + '</table>'
+                 : '<p class="note">None.</p>') +
+    `<div class="form gap"><input id="blockaddr" placeholder="192.0.2.7 or 192.0.2.0/24" size="24"><button id="blockadd" ${busy ? 'disabled' : ''}>Block this address</button></div>` +
+    '<p class="note">A blocked address is answered 403 by the firewall, before anything else looks at its request.  It takes effect in about a minute and restarts nothing.  The panel itself is not behind this firewall.</p>';
+}
+function blockAddress(address, on) {
+  if (!confirm(on ? `Block ${address}?\n\nEvery request from it to the service will be refused until it is unblocked here.` : `Stop blocking ${address}?`)) return;
+  act({action: 'block', address, on}, (o) => on ? `Blocking ${o.address}.  It takes effect in about a minute.` : `No longer blocking ${o.address}.  It takes effect in about a minute.`);
+}
+// What each client was sent in the last day, against the cap on it.
+function sentCard(v) {
+  if (!v) return '';
+  if (v.error) return `<div class="notice err gap">What clients were sent could not be read:  ${esc(v.error)}</div>`;
+  const rows = v.clients || [];
+  const cap = (c) => c ? bytes(c) : 'no cap';
+  return '<div class="card gap"><h2>Sent in the last day, by client</h2>' +
+    (rows.length ? '<table><tr><th>Client</th><th class="num">Sent</th><th class="num">Cap</th><th class="num">Of the cap</th></tr>' +
+      rows.map((r) => `<tr><td class="mono">${esc(r.client)}</td><td class="num">${bytes(r.bytes)}</td><td class="num">${cap(r.cap)}</td><td class="num ${r.share >= 0.8 ? 'warnText' : ''}">${r.share == null ? '' : (r.share * 100).toFixed(r.share < 0.1 ? 1 : 0) + '%'}</td></tr>`).join('') + '</table>'
+      : '<p class="note">Nothing of size was sent in the last day.</p>') +
+    `<p class="note">The caps are ${cap(v.cap)} a day for one client and ${cap(v.sharedCap)} for Firefly's users together.  Added up from the service's request records, without answers under 4 KB, as the service counts;  the service's own count is what refuses.</p></div>`;
+}
 // What AWS's rule sets matched: a table inside the Firewall card.  Nothing when the firewall has none.
 function ruleSets(F) {
   if (!F.managed) return '';

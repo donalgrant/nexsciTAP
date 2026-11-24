@@ -71,6 +71,7 @@ the page where to sign in, is the one request answered without a token.
 
 import copy
 import csv
+import html
 import io
 import json
 import os
@@ -287,8 +288,15 @@ def view_status(params):
     if state == 'running' and paused:
         state = 'starting'          # a task is up, but users still get the paused page
 
+    try:
+        notice = banner()
+    except Exception as e:
+        print(f'banner: {e!r}')
+        notice = {'error': str(e)[:200]}
+
     return {
         'state': state, 'desired': desired, 'running': running, 'pending': svc.get('pendingCount', 0),
+        'banner': notice, 'bannerMost': BANNER_MOST,
         'taskCap': TASK_CAP, 'serviceUrl': SERVICE_URL, 'paused': paused,
         'schedule': load_state('schedule', dict(DEFAULT_SCHEDULE)), 'scheduleNow': scheduled_state(),
         'canaryTables': [{'table': k, **v} for k, v in sorted(load_state('canary_tables', {}).items())],
@@ -362,13 +370,53 @@ def view_load(params):
             pass
 
     params_now = stack_parameters()
-    return {'hours': hours, 'period': period, 'series': series, 'workArea': work,
+    try:
+        sent = volume_sent(params_now)
+    except Exception as e:
+        print(f'volume sent: {e!r}')
+        sent = {'error': str(e)[:200]}
+    return {'hours': hours, 'period': period, 'series': series, 'workArea': work, 'sent': sent,
             'firewall': firewall(hours, period, end),
             'limitsStatus': (load_state('stack') or {}).get('status'),
             'limitsUndone': (load_state('stack') or {}).get('undone'),
             'limits': {k: params_now.get(k) for k in
-                       ('ClientLimit', 'AsyncLimit', 'AsyncClientLimit', 'FireflyLimit', 'FireflyAsyncLimit',
+                       ('ClientLimit', 'AsyncLimit', 'AsyncClientLimit', 'TotalLimit', 'FireflyLimit', 'FireflyAsyncLimit',
                         'QueryMemory', 'QueryTimeout', 'MaxRecLimit', 'DownloadLimit', 'FireflyDownloadLimit')}}
+
+
+SHARED_CLIENT = '127.0.0.1'         # Firefly, asking from inside the task for all of its users
+VOLUME_COUNTED = 4096               # the service leaves smaller answers out of a client's count (TAP/volume.py)
+
+
+def size_bytes(text):
+    """'20GB' as a number of bytes; 0 for no cap or anything unreadable."""
+    m = re.fullmatch(r'(\d+(?:\.\d+)?)\s*(KB|MB|GB|TB)?', str(text or '').strip().upper())
+    return int(float(m.group(1)) * {None: 1, 'KB': 1e3, 'MB': 1e6, 'GB': 1e9, 'TB': 1e12}[m.group(2)]) if m else 0
+
+
+def volume_sent(settings, records=None):
+    """
+    What each client was sent in the last day, against the cap on it:
+    {'cap', 'sharedCap', 'clients': [{'client', 'bytes', 'cap', 'share'}]},
+    the most first.  Added up from the service's request records, leaving out
+    the small answers the service leaves out, so it is close to the
+    service's own count and not that count itself, which is kept in the
+    work area where the panel cannot read.
+    """
+    cap, shared = size_bytes(settings.get('DownloadLimit')), size_bytes(settings.get('FireflyDownloadLimit'))
+    since = time.time() - 86400
+    totals = {}
+    for r in (query_records(24) if records is None else records):
+        n = r.get('bytes') or 0
+        if n >= VOLUME_COUNTED and r.get('t', 0) >= since:
+            c = r.get('client', '?')
+            totals[c] = totals.get(c, 0) + n
+    rows = []
+    for c, n in sorted(totals.items(), key=lambda kv: -kv[1])[:15]:
+        limit = shared if c == SHARED_CLIENT else cap
+        rows.append({'client': 'Firefly (all its users)' if c == SHARED_CLIENT else c, 'bytes': n, 'cap': limit,
+                     'share': round(n / limit, 4) if limit else None})
+    return {'cap': cap, 'sharedCap': shared, 'clients': rows}
 
 
 FIREWALL_REGION = 'us-east-1'       # the only region CloudFront reads web ACLs from
@@ -415,12 +463,108 @@ def firewall(hours, period, end):
         print(f'firewall: {e!r}')
         out['error'] = str(e)[:200]
         return out
+    out['blocked'] = blocked_addresses(settings.get('BlockedAddresses'))
+    out['canBlock'] = 'BlockedAddresses' in settings
+    out['refusedAddresses'] = refused_by_firewall(load_state('watch', {}))
+    try:
+        out['sampled'] = sampled_refusals(name)
+    except Exception as e:
+        print(f'firewall samples: {e!r}')
+        out['sampledError'] = str(e)[:200]
     try:
         out['rules'] = firewall_rules(name, hours, end)
     except Exception as e:                  # the rate limit's numbers are still worth showing
         print(f'firewall rules: {e!r}')
         out['rulesError'] = str(e)[:200]
     return out
+
+
+def firewall_lately(minutes):
+    """
+    What the firewall's rate rules did in the last minutes: {'refused',
+    'overAll', 'who'}, or None when the service has no firewall.  'who' is
+    the addresses among its sampled refusals, the busiest first, which may
+    be empty: the samples are a courtesy of AWS's, not a count.
+    """
+    name = firewall_name()
+    if not name:
+        return None
+    end = now().replace(second=0, microsecond=0)
+    want = [('refused', 'BlockedRequests', f'{name}-PerAddress'), ('overAll', 'CountedRequests', f'{name}-Overall')]
+    r = aws('cloudwatch', FIREWALL_REGION).get_metric_data(
+        MetricDataQueries=[metric(i, 'AWS/WAFV2', m, {'WebACL': name, 'Rule': rule}, 'Sum', 300)
+                           for i, (_, m, rule) in enumerate(want)],
+        StartTime=end - timedelta(minutes=minutes), EndTime=end)
+    out = {want[int(res['Id'][1:])][0]: int(sum(res['Values'])) for res in r['MetricDataResults']}
+    out['who'] = []
+    if out.get('refused'):
+        try:
+            rows = sampled_refusals(name, ['PerAddress'], minutes)
+            out['who'] = [x['address'] for x in rows]
+        except Exception as e:
+            print(f'firewall samples: {e!r}')
+    return out
+
+
+def firewall_verdict(seen):
+    """(failing?, what was seen) for the firewall's rule."""
+    refused, over = seen.get('refused', 0), seen.get('overAll', 0)
+    parts = []
+    if refused:
+        who = seen.get('who') or []
+        parts.append(f'{refused} requests refused for their rate in the last 15 minutes'
+                     + (f', from {", ".join(who[:3])}' if who else ''))
+    if over:
+        parts.append(f'{over} requests counted over the overall mark')
+    return bool(parts), ';  '.join(parts) or 'nothing refused for its rate'
+
+
+FIREWALL_RULES = ('Blocked', 'PerAddress', 'BadReputation', 'KnownBadInputs', 'Common')
+SAMPLE_WINDOW = 180         # minutes: as far back as AWS keeps samples
+
+
+def web_acl_arn():
+    return stack_parameters().get('WebAclArn') or ''
+
+
+def sampled_refusals(name, rules=FIREWALL_RULES, minutes=SAMPLE_WINDOW):
+    """
+    Whom the firewall refused in the last minutes (three hours at most), by
+    its samples: [{'address', 'rule', 'count', 'last', 'uri'}], the most
+    sampled first.  AWS keeps up to 500 samples for a rule, so the counts
+    say who and why, not how many.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    waf = aws('wafv2', FIREWALL_REGION)
+    end = now()
+    window = {'StartTime': end - timedelta(minutes=min(minutes, SAMPLE_WINDOW)), 'EndTime': end}
+
+    def one(rule):
+        try:
+            return rule, waf.get_sampled_requests(WebAclArn=web_acl_arn(), RuleMetricName=f'{name}-{rule}',
+                                                  Scope='CLOUDFRONT', TimeWindow=window, MaxItems=500).get('SampledRequests', [])
+        except ClientError as e:
+            print(f'firewall samples of {rule}: {e!r}')
+            return rule, []
+    rows = {}
+    with ThreadPoolExecutor(max_workers=len(rules)) as pool:
+        for rule, samples in pool.map(one, rules):
+            for x in samples:
+                if x.get('Action') != 'BLOCK':
+                    continue
+                req = x.get('Request') or {}
+                within = x.get('RuleNameWithinRuleGroup') or ''
+                key = (req.get('ClientIP', '?'), rule + (': ' + within.split('#')[-1] if within else ''))
+                row = rows.setdefault(key, {'address': key[0], 'rule': key[1], 'count': 0, 'last': 0, 'uri': ''})
+                row['count'] += 1
+                at = x['Timestamp'].timestamp() if x.get('Timestamp') else 0
+                if at >= row['last']:
+                    row['last'], row['uri'] = at, (req.get('URI') or '')[:80]
+    return sorted(rows.values(), key=lambda x: -x['count'])[:40]
+
+
+def blocked_addresses(text):
+    return [a for a in (text or '').split(',') if a]
 
 
 def firewall_rules(name, hours, end):
@@ -973,16 +1117,91 @@ class Refused(Exception):
     """A control that will not be carried out; the message is for the administrator."""
 
 
-PAUSED_PAGE = (
-    '<!doctype html><html lang="en"><head><meta charset="utf-8">'
-    '<meta name="viewport" content="width=device-width, initial-scale=1"><title>Archive paused</title>'
-    '<style>body{font:16px/1.5 -apple-system,Segoe UI,Helvetica,Arial,sans-serif;max-width:34em;'
-    'margin:18vh auto;padding:0 1.5em;color:#222}h1{font-size:1.4em}p{color:#555}</style></head><body>'
-    '<h1>This archive is paused</h1>'
+PAUSED_HEAD = (
+    '<!doctype html><html lang="en"><meta charset="utf-8">'
+    '<meta name="viewport" content="width=device-width,initial-scale=1"><title>Archive paused</title>'
+    '<style>body{font:16px/1.5 sans-serif;max-width:34em;margin:18vh auto;padding:0 1.5em;color:#222}'
+    'h1{font-size:1.4em}p{color:#555}.n{background:#fdecc8;color:#5c3b00;padding:.6em .9em}</style>'
+    '<h1>This archive is paused</h1>')
+PAUSED_TEXT = (
     '<p>The service is switched off to save cost, or is just starting.  '
     'Nothing is lost:  the catalogs and the results of earlier jobs are kept.</p>'
-    '<p>If it is starting, it will answer within a few minutes.  Otherwise, ask its administrator to start it.</p>'
-    '</body></html>')
+    '<p>If it is starting, it will answer within a few minutes.  Otherwise, ask its administrator to start it.</p>')
+PAUSED_SHORT = '<p>The service is switched off or just starting.  Nothing is lost.</p>'
+PAUSED_MOST = 1024          # the most a load balancer's fixed response may hold, in bytes
+PAUSED_PAGE = PAUSED_HEAD + PAUSED_TEXT
+
+
+def paused_page(message=''):
+    """The page shown in standby, with the administrator's notice if there is one, within the load balancer's size."""
+    if not message:
+        return PAUSED_PAGE
+    note = '<p class="n">' + html.escape(message, quote=False) + '</p>'
+    for text in (PAUSED_TEXT, PAUSED_SHORT, ''):
+        page = PAUSED_HEAD + note + text
+        if len(page.encode()) <= PAUSED_MOST:
+            return page
+    room = PAUSED_MOST - len((PAUSED_HEAD + '<p class="n"></p>').encode())
+    cut = html.escape(message, quote=False).encode()[:room].decode('utf-8', 'ignore')
+    cut = cut[:cut.rindex('&')] if '&' in cut[-6:] else cut          # not half of an escaped character
+    return PAUSED_HEAD + '<p class="n">' + cut + '</p>'
+
+
+BANNER_KEY = CATALOG_PREFIX + '/_banner.json'       # beside the catalogs, where the service may read
+BANNER_MOST = 300
+BANNER_LEVELS = ('info', 'warn')
+
+
+def banner():
+    """The notice shown to the service's users: {'message', 'level', 'set', 'by'}, or None."""
+    try:
+        d = json.loads(aws('s3').get_object(Bucket=CATALOG_BUCKET, Key=BANNER_KEY)['Body'].read())
+    except ClientError as e:
+        if e.response['Error']['Code'] in ('NoSuchKey', '404'):
+            return None
+        raise
+    except ValueError:
+        return None
+    return d if isinstance(d, dict) and d.get('message') else None
+
+
+def banner_settings(body):
+    """What is to be shown, from what was asked: {'message', 'level'}; an empty message is no notice."""
+    message = ' '.join(str(body.get('message') or '').split())
+    if len(message) > BANNER_MOST:
+        raise Refused(f'A notice is at most {BANNER_MOST} characters;  this one has {len(message)}.')
+    if any(ord(c) < 32 or ord(c) == 127 for c in message):
+        raise Refused('A notice is plain text.')
+    level = body.get('level') or 'info'
+    if level not in BANNER_LEVELS:
+        raise Refused('A notice is "info" or "warn".')
+    return {'message': message, 'level': level}
+
+
+def set_banner(body, who):
+    """
+    Show the service's users a notice, or take it away.  It is written beside
+    the catalogs; the service looks every minute and its pages show what it
+    found.  While the service is in standby the paused page carries it.
+    """
+    want = banner_settings(body)
+    had = banner()
+    if not want['message'] and not had:
+        raise Refused('There is no notice to take away.')
+    # An empty notice is written, not deleted: the service takes either as none.
+    doc = dict(want, set=time.time(), by=who)
+    aws('s3').put_object(Bucket=CATALOG_BUCKET, Key=BANNER_KEY, Body=json.dumps(doc).encode(),
+                         ContentType='application/json')
+    record(who, 'banner', {'before': (had or {}).get('message', ''), 'after': want['message'], 'level': want['level']})
+    paused = False
+    try:
+        paused = is_paused()
+        if paused:
+            set_paused(True, want['message'])
+    except (ClientError, Refused) as e:
+        print(f'banner: the paused page was not changed: {e!r}')
+    return {'banner': doc if want['message'] else None, 'paused': paused}
+
 
 DEFAULT_SCHEDULE = {'enabled': False, 'days': [0, 1, 2, 3, 4], 'start': '07:00', 'end': '19:00',
                     'tz': 'America/Los_Angeles', 'count': 1}
@@ -1011,10 +1230,16 @@ def is_paused():
     return any(a['Type'] == 'fixed-response' for a in rule['Actions'])
 
 
-def set_paused(on):
+def set_paused(on, message=None):
     if on:
+        if message is None:
+            try:
+                message = (banner() or {}).get('message', '')
+            except Exception as e:              # the page matters more than the notice on it
+                print(f'paused page: no notice read: {e!r}')
+                message = ''
         actions = [{'Type': 'fixed-response', 'FixedResponseConfig': {
-            'StatusCode': '503', 'ContentType': 'text/html', 'MessageBody': PAUSED_PAGE}}]
+            'StatusCode': '503', 'ContentType': 'text/html', 'MessageBody': paused_page(message)}}]
     else:
         actions = [{'Type': 'forward', 'TargetGroupArn': service_resources()['TargetGroup']}]
     aws('elbv2').modify_rule(RuleArn=rule_arn(), Actions=actions)
@@ -1202,6 +1427,61 @@ def _volume(v):
     return f'{m.group(1)}{m.group(2)}'
 
 
+BLOCKED_MOST = 50
+
+
+def _address(text):
+    """One IPv4 address or range as the firewall holds it ('192.0.2.7/32'); ValueError if it is not one."""
+    import ipaddress
+    t = str(text or '').strip()
+    try:
+        net = ipaddress.ip_network(t if '/' in t else t + '/32', strict=False)
+    except ValueError:
+        raise ValueError('an IPv4 address, or a range written like 192.0.2.0/24')
+    if net.version != 4:
+        raise ValueError('an IPv4 address (the service takes requests over IPv4 only)')
+    if net.prefixlen < 16:
+        raise ValueError('a single address or a range no wider than /16')
+    return str(net)
+
+
+def _addresses(v):
+    seen = []
+    for a in blocked_addresses(str(v or '').replace(' ', '')):
+        a = _address(a)
+        if a not in seen:
+            seen.append(a)
+    if len(seen) > BLOCKED_MOST:
+        raise ValueError(f'at most {BLOCKED_MOST} addresses')
+    return ','.join(sorted(seen))
+
+
+def block_address(body, who):
+    """Refuse an address at the firewall, or stop refusing it: the firewall's BlockedAddresses setting, changed like a limit."""
+    try:
+        address = _address(body.get('address'))
+    except ValueError as e:
+        raise Refused(f'The address must be {e}.')
+    name = firewall_name()
+    if not name:
+        raise Refused('The service has no firewall to block an address at.')
+    st = aws('cloudformation', FIREWALL_REGION).describe_stacks(StackName=name)['Stacks'][0]
+    now_ = {p['ParameterKey']: p.get('ParameterValue', '') for p in st.get('Parameters', [])}
+    if 'BlockedAddresses' not in now_:
+        raise Refused("The firewall's stack has no list of blocked addresses yet.  Deploy deploy/fargate/waf.yaml again first.")
+    have = blocked_addresses(now_['BlockedAddresses'])
+    if body.get('on', True):
+        if address in have:
+            raise Refused(f'{address} is blocked already.')
+        want = have + [address]
+    else:
+        if address not in have:
+            raise Refused(f'{address} is not blocked.')
+        want = [a for a in have if a != address]
+    out = change_limits({'changes': {'BlockedAddresses': ','.join(want)}}, who)
+    return dict(out, address=address, blocked=bool(body.get('on', True)))
+
+
 def _mode(v):
     if str(v).strip().lower() not in ('count', 'block'):
         raise ValueError('"block" or "count"')
@@ -1224,6 +1504,8 @@ LIMITS = {
     'OverallLimit': ('firewall', _whole(10, 10000000), 'requests in five minutes, all addresses (counted only)'),
     'Mode': ('firewall', _mode, 'whether the firewall refuses or only counts'),
     'ManagedRules': ('firewall', _mode, "whether AWS's rule sets refuse or only count"),
+    'BlockedAddresses': ('firewall', _addresses, 'addresses the firewall refuses outright'),
+    'TotalLimit': ('service', _whole(0, 14), 'requests in progress, all clients together, per task'),
 }
 
 
@@ -1355,6 +1637,10 @@ def control(body, who):
         return abort_job(body.get('id'), who)
     if action == 'limits':
         return change_limits(body, who)
+    if action == 'block':
+        return block_address(body, who)
+    if action == 'banner':
+        return set_banner(body, who)
     if action == 'upload':
         return upload_slot(body)
     if action == 'ingest':
@@ -2267,6 +2553,7 @@ RULES = {
     'volume':   ('Download volume', 'one client takes more than 5 GB in 24 hours'),
     'restart':  ('Task restarts', 'a task starts that nobody asked for'),
     'knocking': ('Requests refused at the door', '500 or more in an hour from outside'),
+    'firewall': ('The firewall', 'an address is refused for its rate, or all addresses together pass the overall mark, in 15 minutes'),
 }
 ERRORS_MAX, REFUSED_MAX, TRAFFIC_MIN, TRAFFIC_TIMES = 5, 20, 500, 5
 # 500:  in two days of true counts (20 to 22 November 2026) the panel's own check
@@ -2290,6 +2577,38 @@ def door_log_age(key, now=None):
         return float('inf')
     y, mo, d, h = map(int, m.groups())
     return (now or time.time()) - datetime(y, mo, d, h, tzinfo=timezone.utc).timestamp()
+
+
+FIREWALL_QUICK = 0.01       # seconds: an answer faster than any the service itself could give
+
+
+def by_firewall(row):
+    """
+    Was this line of CloudFront's log a request the firewall refused?  The
+    log has no field that says so.  What the refusals of 20 and 21 November
+    2026 have in common: status 403 or 429, a result of "Error" (the door's
+    own 403 is "FunctionGeneratedResponse"), and an answer within 3 ms,
+    where one that went to the service takes far longer.
+    """
+    if row.get('sc-status') not in ('403', '429') or row.get('x-edge-result-type') != 'Error':
+        return False
+    try:
+        return float(row.get('time-taken', '')) < FIREWALL_QUICK
+    except ValueError:
+        return False
+
+
+def refused_by_firewall(watch, seconds=86400):
+    """[{'address', 'refused', 'rate' (answered 429), 'last' (hour)}] over the kept hours, the most refused first."""
+    out = {}
+    for h, b in watch.get('hours', {}).items():
+        if int(h) + 3600 > time.time() - seconds:
+            for ip, codes in b.get('walled', {}).items():
+                o = out.setdefault(ip, {'address': ip, 'refused': 0, 'rate': 0, 'last': 0})
+                o['refused'] += sum(codes.values())
+                o['rate'] += codes.get('429', 0)
+                o['last'] = max(o['last'], int(h))
+    return sorted(out.values(), key=lambda o: -o['refused'])[:25]
 
 
 def gather(watch):
@@ -2355,7 +2674,8 @@ def gather(watch):
                 if line.startswith('#') or not fields:
                     continue
                 row = dict(zip(fields, line.split('\t')))
-                if row.get('sc-status') != '403':
+                walled = by_firewall(row)
+                if row.get('sc-status') != '403' and not walled:
                     continue
                 try:
                     t = datetime.strptime(row['date'] + ' ' + row['time'], '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc).timestamp()
@@ -2363,6 +2683,11 @@ def gather(watch):
                     continue
                 b = bucket(t)
                 ip = row.get('c-ip', '?')
+                if walled:
+                    w = b.setdefault('walled', {}).setdefault(ip, {})
+                    w[row['sc-status']] = w.get(row['sc-status'], 0) + 1
+                if row.get('sc-status') != '403':
+                    continue
                 b['knocks'][ip] = b['knocks'].get(ip, 0) + 1
                 path = urllib.parse.unquote(row.get('cs-uri-stem', ''))[:80]
                 if len(b['paths']) < 40 or path in b['paths']:
@@ -2448,6 +2773,13 @@ def check_rules(watch):
                and time.time() - e['createdAt'].timestamp() < 900]
     out['restart'] = (bool(started) and not asked and not deploying,
                       started[0]['message'][:160] if started else 'no task has started lately')
+
+    try:
+        seen = firewall_lately(15)
+        if seen is not None:
+            out['firewall'] = firewall_verdict(seen)
+    except Exception as e:
+        print(f'firewall rule: {e!r}')
 
     knocks = in_last(watch, 'knocks', 3600)
     n = sum(knocks.values())
