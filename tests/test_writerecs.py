@@ -239,3 +239,22 @@ def test_json_special_characters(tmp_path):
     dd = _dd([(name, "char", "varchar", "80s", "", "", 80)])
     text = _write(tmp_path, "json", dd, [[AWKWARD]])
     assert json.loads(text) == [{name: AWKWARD}]
+
+
+def test_votable_fields_carry_a_ucd_when_one_is_sent(tmp_path):
+    """taplint W-MDQ-DRUC: the column's UCD belongs in its FIELD.  It is an eighth row of the ddlist, before the widths."""
+    names, types, dbtypes, fmts, units, descs, widths = _dd([
+        ("ra", "double", "double", "14.6f", "deg", "Right ascension", 14),
+        ("name", "char", "varchar(12)", "12s", "", "", 12),
+        ("n", "int", "integer", "8d", "", "", 8)])
+    ucds = ["pos.eq.ra;meta.main", 'meta.id"<', ""]
+    text = _write(tmp_path, "votable", [names, types, dbtypes, fmts, units, descs, ucds, widths], [[1.5, "a", 2]])
+    assert '<FIELD ID="ra" datatype="double" name="ra" unit="deg" ucd="pos.eq.ra;meta.main">' in text
+    assert 'name="name" ucd="meta.id&quot;&lt;"/>' in text
+    assert '<FIELD ID="n" datatype="int" name="n"/>' in text
+    # The seven rows older callers send still mean what they meant.
+    old = _write(tmp_path, "votable", [names, types, dbtypes, fmts, units, descs, widths], [[1.5, "a", 2]], name="old")
+    assert "ucd=" not in old and 'unit="deg"' in old
+    # Other formats are untouched by the extra row.
+    assert _write(tmp_path, "csv", [names, types, dbtypes, fmts, units, descs, ucds, widths], [[1.5, "a", 2]]) == \
+        _write(tmp_path, "csv", [names, types, dbtypes, fmts, units, descs, widths], [[1.5, "a", 2]], name="old")

@@ -36,6 +36,7 @@ class dataDictionary:
     coltype  = {}
     coldesc  = {}
     colunits = {}
+    colucd   = {}
     colwidth = {}
 
     connectInfo = None
@@ -248,6 +249,7 @@ class dataDictionary:
         ind_datatype = -1
         ind_desc = -1
         ind_unit = -1
+        ind_ucd = -1
         ind_format = -1
 
         i = 0
@@ -270,6 +272,9 @@ class dataDictionary:
 
             if(name == 'unit'):
                 ind_unit = i
+
+            if(name == 'ucd'):
+                ind_ucd = i
 
             if(name == 'format'):
                 ind_format = i
@@ -303,6 +308,7 @@ class dataDictionary:
         self.coltype  = {}
         self.coldesc  = {}
         self.colunits = {}
+        self.colucd   = {}
         self.colwidth = {}
         self.ncols = 0
 
@@ -370,6 +376,15 @@ class dataDictionary:
                     self.colunits[col_str] = ''
                 else:
                     self.colunits[col_str] = str(row[ind_unit]).strip()
+
+                #
+                # UCD, where the dictionary has one (TAP_SCHEMA does)
+                #
+
+                if(ind_ucd < 0 or row[ind_ucd] is None):
+                    self.colucd[col_str] = ''
+                else:
+                    self.colucd[col_str] = str(row[ind_ucd]).strip()
 
                 #
                 # Desc

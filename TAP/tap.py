@@ -254,7 +254,7 @@ class Tap:
         self.phase     = ''
         self.instance  = ''
 
-        self.uwsheader = '<uws:job xmlns:uws="http://www.ivoa.net/xml/UWS/v1.0" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:xsi="http://www.w3.org/2001/XMLSchema" xsi:schemaLocation="http://www.ivoa.net/xml/UWS/v1.0 http://www.ivoa.net/xml/UWS/v1.0">'
+        self.uwsheader = '<uws:job xmlns:uws="http://www.ivoa.net/xml/UWS/v1.0" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.ivoa.net/xml/UWS/v1.0 http://www.ivoa.net/xml/UWS/v1.0">'
 
 
         for key in self.fields:
@@ -1021,9 +1021,14 @@ class Tap:
                 self.statdict['ownerId'] = job['uws:ownerId']
                 self.statdict['phase'] = job['uws:phase']
                 self.statdict['quote'] = job['uws:quote']
-                self.statdict['starttime'] = job['uws:startTime']
-                self.statdict['endtime'] = job['uws:endTime']
-                self.statdict['destruction'] = job['uws:destruction']
+                # xmltodict reads an empty element as None and a nil one
+                # as a dict; both are a time not yet known.
+                def known(value):
+                    return value if isinstance(value, str) else ''
+
+                self.statdict['starttime'] = known(job['uws:startTime'])
+                self.statdict['endtime'] = known(job['uws:endTime'])
+                self.statdict['destruction'] = known(job['uws:destruction'])
                 self.statdict['duration'] = compat.duration_value(job)
 
                 if self.debug:
@@ -2149,7 +2154,7 @@ class Tap:
             logging.debug(f'retvalstr= {retvalstr:s}')
 
 
-        uwsschema = ' xmlns:uws="http://www.ivoa.net/xml/UWS/v1.0" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:xsi="http://www.w3.org/2001/XMLSchema" xsi:schemaLocation="http://www.ivoa.net/xml/UWS/v1.0 http://www.ivoa.net/xml/UWS/v1.0">'
+        uwsschema = ' xmlns:uws="http://www.ivoa.net/xml/UWS/v1.0" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.ivoa.net/xml/UWS/v1.0 http://www.ivoa.net/xml/UWS/v1.0">'
 
 
         if ((key == 'error')
@@ -2600,12 +2605,10 @@ class Tap:
 
                         print("HTTP/1.1 200 OK\r")
 
-                        if(format == 'json'):
-                            print("Content-type: application/json\r")
-                        elif(format == 'votable'):
-                            print("Content-type: %s\r" % compat.votable_content_type(self.compat))
-                        else:
-                            print("Content-type: text/plain\r")
+                        # The type is the result file's own.  The format in hand here
+                        # is the request's, not the job's, so a VOTable went out as
+                        # text/plain.
+                        print("Content-type: %s\r" % self.__resultType__(resultpath))
                         print("\r")
 
                         try:
@@ -3163,6 +3166,14 @@ class Tap:
         return
 
 
+    def __resultType__(self, path):
+        """The content type of a result file, from its name."""
+        ext = os.path.splitext(path)[1].lower()
+        if ext == '.xml':
+            return compat.votable_content_type(self.compat)
+        return {'.json': 'application/json', '.csv': 'text/csv',
+                '.tsv': 'text/tab-separated-values'}.get(ext, 'text/plain')
+
     def __writeStatusMsg__(self, statuspath, statdict, param, **kwargs):
 
         if self.debug:
@@ -3252,18 +3263,22 @@ class Tap:
         fp.write(f"    <uws:phase>{statdict['phase'].upper():s}</uws:phase>\n")
         fp.write('    <uws:quote xsi:nil="true"/>\n')
 
-        fp.write(f"    <uws:startTime>{statdict['starttime']:s}</uws:startTime>\n")
+        # A time not yet known is nil, not an empty element:  an empty
+        # string is not a dateTime, and the UWS schema refuses it.
+        def when(tag, value):
+            value = value.strip() if isinstance(value, str) else ''
+            if value:
+                return f"    <uws:{tag}>{html.escape(value)}</uws:{tag}>\n"
+            return f'    <uws:{tag} xsi:nil="true"/>\n'
 
-        fp.write(f"    <uws:endTime>{statdict['endtime']:s}</uws:endTime>\n")
+        fp.write(when('startTime', statdict['starttime']))
+
+        fp.write(when('endTime', statdict['endtime']))
 
         fp.write(f"    <uws:executionDuration>{statdict['duration']:d}"
                  "</uws:executionDuration>\n")
 
-        if (statdict['destruction'] is None):
-            fp.write('    <uws:destruction xsi:nil="true"/>\n')
-        else:
-            fp.write(f"    <uws:destruction>{statdict['destruction']:s}"
-                     "</uws:destruction>\n")
+        fp.write(when('destruction', statdict['destruction']))
 
         fp.write('    <uws:parameters>\n')
 
@@ -3300,7 +3315,12 @@ class Tap:
                      f' xlink:href="{resulturl:s}"/>\n')
             fp.write('    </uws:results>\n')
 
-        elif(phase.lower() == 'error'):
+        else:
+
+            # The UWS schema wants the element in every job document.
+            fp.write('    <uws:results/>\n')
+
+        if(phase.lower() == 'error'):
 
             fp.write('    <uws:errorSummary type="transient" hasDetail="true">\n')
             fp.write(f'        <uws:message>{html.escape(errmsg):s}</uws:message>\n')

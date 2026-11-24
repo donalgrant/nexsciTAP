@@ -244,6 +244,7 @@ class writeResult:
         dbtypearr = []
         fmtarr    = []
         unitsarr  = []
+        ucdarr    = []
         widtharr  = []
         descarr   = []
 
@@ -565,6 +566,7 @@ class writeResult:
             dbtype  = ''
             coltype = ''
             units   = ''
+            ucd     = ''
             desc    = ''
             fmt     = ''
             width   = 0
@@ -578,6 +580,7 @@ class writeResult:
                 width   = self.dd.colwidth[colname]
                 coltype = self.dd.coltype [colname]
                 units   = self.dd.colunits[colname]
+                ucd     = getattr(self.dd, 'colucd', {}).get(colname, '')
                 fmt     = self.dd.colfmt  [colname]
                 desc    = self.dd.coldesc [colname]
 
@@ -955,6 +958,7 @@ class writeResult:
             fmtarr.append(fmt)
             widtharr.append(width)
             unitsarr.append(units)
+            ucdarr.append(ucd)
             descarr.append(compat.field_description(self.compat, desc, coltype))
 
             i = i + 1
@@ -978,6 +982,7 @@ class writeResult:
         ddlist.append(fmtarr)
         ddlist.append(unitsarr)
         ddlist.append(descarr)
+        ddlist.append(ucdarr)
         ddlist.append(widtharr)
 
         if self.debug:

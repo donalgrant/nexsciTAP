@@ -140,3 +140,59 @@ def test_delete_works_in_compat_mode(legacy_tap_server, fixture_root):
     r = requests.delete(url, allow_redirects=False, timeout=60)
     assert r.status_code == 303, r.text
     assert requests.get(url, timeout=60).status_code == 404
+
+
+XSI = "{http://www.w3.org/2001/XMLSchema-instance}"
+JOB_ORDER = ["jobId", "runId", "ownerId", "phase", "quote", "startTime", "endTime",
+             "executionDuration", "destruction", "parameters", "results", "errorSummary", "jobInfo"]
+
+
+def _run(url):
+    requests.post(url + "/phase", data={"PHASE": "RUN"}, allow_redirects=False, timeout=60)
+    for _ in range(100):
+        if _text(url, "phase") in ("COMPLETED", "ERROR", "ABORTED"):
+            break
+    return _text(url, "phase")
+
+
+@pytest.mark.parametrize("phase", ["PENDING", "COMPLETED"])
+def test_job_document_has_the_shape_the_uws_schema_wants(tap_server, phase):
+    """taplint's UWS stage: nil for what is not known, a results element always, the schema's order."""
+    url = _submit(tap_server)
+    if phase == "COMPLETED":
+        assert _run(url) == "COMPLETED"
+    raw = requests.get(url, timeout=60).text
+    assert 'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"' in raw
+    job = ET.fromstring(raw)
+
+    names = [child.tag.replace(UWS, "") for child in job]
+    assert names == sorted(names, key=JOB_ORDER.index), names
+    assert "results" in names
+
+    for tag in ("ownerId", "quote"):
+        assert job.find(UWS + tag).get(XSI + "nil") == "true"
+    for tag in ("startTime", "endTime", "destruction"):
+        e = job.find(UWS + tag)
+        # A time is either given or nil; never an empty element, which is not a dateTime.
+        assert (e.text or "").strip() or e.get(XSI + "nil") == "true", tag
+    if phase == "PENDING":
+        assert job.find(UWS + "startTime").get(XSI + "nil") == "true"
+        assert len(job.find(UWS + "results")) == 0
+        assert _text(url, "startTime") == ""
+    else:
+        assert job.find(UWS + "startTime").text
+        assert job.find(UWS + "results/" + UWS + "result") is not None
+
+
+@pytest.mark.parametrize("fmt, ctype", [("votable", "text/xml"), ("csv", "text/csv"), ("ipac", "text/plain")])
+def test_a_result_is_sent_with_its_own_type(tap_server, fmt, ctype):
+    """taplint E-QAS-VOCT: a VOTable result fetched at results/result went out as text/plain."""
+    r = requests.post(tap_async_url(tap_server), data={"query": QUERY, "lang": "ADQL", "format": fmt},
+                      allow_redirects=False, timeout=60)
+    url = r.headers["Location"]
+    assert _run(url) == "COMPLETED"
+    got = requests.get(url + "/results/result", timeout=60)
+    assert got.status_code == 200, got.text[:300]
+    assert got.headers["Content-Type"].split(";")[0].strip() == ctype
+    if fmt == "votable":
+        assert got.text.lstrip().startswith("<?xml")

@@ -39,7 +39,7 @@
 
 /* Number of string rows in ddlist before the width row. */
 
-#define NDDSTR 6
+#define NDDSTR 7
 
 enum { FMT_IPAC, FMT_VOTABLE, FMT_CSV, FMT_TSV, FMT_JSON, FMT_OTHER };
 
@@ -52,6 +52,7 @@ typedef struct {
     char *fmt;
     char *units;
     char *desc;
+    char *ucd;      /* the row after desc, when the caller sends one */
     int   width;
 } column_t;
 
@@ -317,6 +318,7 @@ static void free_columns (column_t *cols, Py_ssize_t ncols)
         free (cols[i].fmt);
         free (cols[i].units);
         free (cols[i].desc);
+        free (cols[i].ucd);
     }
     free (cols);
 }
@@ -416,6 +418,7 @@ static column_t *read_columns (PyObject *ddlist, Py_ssize_t *ncols_out)
                     case 3: dst = &c->fmt;    break;
                     case 4: dst = &c->units;  break;
                     case 5: dst = &c->desc;   break;
+                    case 6: dst = &c->ucd;    break;
                 }
 
                 /* Date and timestamp values are written as text. */
@@ -448,7 +451,8 @@ static column_t *read_columns (PyObject *ddlist, Py_ssize_t *ncols_out)
 
     for (i = 0; i < ncols; i++) {
         char **f[NDDSTR] = { &cols[i].name, &cols[i].type, &cols[i].dbtype,
-                             &cols[i].fmt,  &cols[i].units, &cols[i].desc };
+                             &cols[i].fmt,  &cols[i].units, &cols[i].desc,
+                             &cols[i].ucd };
         int    k;
 
         for (k = 0; k < NDDSTR; k++) {
@@ -585,6 +589,12 @@ static void write_votable_field (FILE *fp, const column_t *c)
     if (hasunits) {
         fputs (" unit=\"", fp);
         write_xml_attr (fp, c->units);
+        fputs ("\"", fp);
+    }
+
+    if (c->ucd[0] != '\0') {
+        fputs (" ucd=\"", fp);
+        write_xml_attr (fp, c->ucd);
         fputs ("\"", fp);
     }
 
