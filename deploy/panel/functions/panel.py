@@ -383,7 +383,7 @@ def view_load(params):
             'limits': {k: params_now.get(k) for k in
                        ('ClientLimit', 'AsyncLimit', 'AsyncClientLimit', 'TotalLimit', 'FireflyLimit', 'FireflyAsyncLimit',
                         'QueryMemory', 'QueryTimeout', 'MaxRecLimit', 'DownloadLimit', 'FireflyDownloadLimit',
-                        'TotalDownloadLimit', 'ResultSize')}}
+                        'TotalDownloadLimit', 'ResultSize', 'ProcessMemory', 'WorkAreaAlarmGB')}}
 
 
 SHARED_CLIENT = '127.0.0.1'         # Firefly, asking from inside the task for all of its users
@@ -1417,8 +1417,24 @@ def _memory(v):
     m = re.fullmatch(r'(\d+(?:\.\d+)?)\s*(MB|GB)', str(v).strip().upper())
     mb = float(m.group(1)) * (1000 if m.group(2) == 'GB' else 1) if m else 0
     if not 200 <= mb <= 3000:
-        raise ValueError('a size from 200MB to 3GB, written like 800MB or 1.5GB (the TAP container has 3.5 GB)')
+        raise ValueError('a size from 200MB to 3GB, written like 800MB or 1.5GB')
     return f'{m.group(1)}{m.group(2)}'
+
+
+def _process_memory(v):
+    """What one request's process may hold: 0 (no limit) or 500MB to 8GB."""
+    t = str(v).strip().upper().replace(' ', '')
+    if t == '0':
+        return '0'
+    m = re.fullmatch(r'(\d+(?:\.\d+)?)(MB|GB)', t)
+    mb = float(m.group(1)) * (1000 if m.group(2) == 'GB' else 1) if m else 0
+    if not 500 <= mb <= 8000:
+        raise ValueError('0 for no limit, or a size from 500MB to 8GB, written like 2GB')
+    return f'{m.group(1)}{m.group(2)}'
+
+
+# Settings of the service's stack that change no task definition: nothing restarts.
+NO_RESTART = ('WorkAreaAlarmGB',)
 
 
 def _volume(v):
@@ -1515,6 +1531,8 @@ LIMITS = {
     'FireflyDownloadLimit': ('service', _volume, "volume sent to all of Firefly's users in a day"),
     'TotalDownloadLimit': ('service', _volume, 'volume sent to all clients together in a day'),
     'ResultSize': ('service', _result_size, 'the most one result may be'),
+    'ProcessMemory': ('service', _process_memory, "memory, one request's process"),
+    'WorkAreaAlarmGB': ('service', _whole(1, 1000), 'gigabytes in the work area that raise an alarm'),
     'RateLimit': ('firewall', _whole(10, 1000000), 'requests in five minutes, one address'),
     'OverallLimit': ('firewall', _whole(10, 10000000), 'requests in five minutes, all addresses'),
     'OverallMode': ('firewall', _mode, 'whether the firewall refuses or only counts past the overall limit'),
@@ -1570,7 +1588,8 @@ def change_limits(body, who):
         status = stacks[where]['StackStatus']
         if status not in ('CREATE_COMPLETE', 'UPDATE_COMPLETE', 'UPDATE_ROLLBACK_COMPLETE'):
             raise Refused(f"The {where}'s settings are being changed now ({status}).  Wait for that to finish.")
-    if 'service' in changes:
+    restarts = any(k not in NO_RESTART for k in changes.get('service', {}))
+    if restarts:
         svc = ecs_service()
         if svc['desiredCount'] == 0:
             raise Refused('The service is in standby.  Start it first:  a change of its limits restarts it, '
@@ -1595,7 +1614,7 @@ def change_limits(body, who):
                    {'at': 0, 'status': 'UPDATE_IN_PROGRESS', 'updated': time.time(),
                     'params': dict(now[where], **{k: v[1] for k, v in change.items()})})
     return {'changed': {where: {k: list(v) for k, v in change.items()} for where, change in changes.items()},
-            'restarts': 'service' in changes, 'notes': notes}
+            'restarts': restarts, 'notes': notes}
 
 
 JOB_ID = re.compile(r'tap_[A-Za-z0-9_]+')

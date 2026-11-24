@@ -371,6 +371,7 @@ const VIEW = {
        ['QueryTimeout', 'Time, one query', L.QueryTimeout, ' s', 'service'], ['MaxRecLimit', 'Rows, one result', L.MaxRecLimit, '', 'service'],
        ...(L.DownloadLimit != null ? [['DownloadLimit', 'Volume sent to one client in a day', L.DownloadLimit, '', 'service'], ['FireflyDownloadLimit', 'Volume sent to all of Firefly\'s users together in a day', L.FireflyDownloadLimit, '', 'service']] : []),
        ...(L.TotalDownloadLimit != null ? [['TotalDownloadLimit', 'Volume sent to all clients together in a day', L.TotalDownloadLimit, '', 'service'], ['ResultSize', 'Size, one result', L.ResultSize, '', 'service']] : []),
+       ...(L.ProcessMemory != null ? [['ProcessMemory', 'Memory, one request\'s process', L.ProcessMemory, '', 'service'], ['WorkAreaAlarmGB', 'Work area size that raises an alarm', L.WorkAreaAlarmGB, ' GB', 'service']] : []),
        ...(F && F.limit ? [['RateLimit', 'Requests in five minutes, one address (firewall)', F.limit, '', 'firewall'], ['Mode', 'Over that, the firewall', F.mode, '', 'firewall'],
                            ...(F.managed ? [['ManagedRules', 'On a match with one of AWS\'s rule sets, the firewall', F.managed, '', 'firewall']] : []),
                            ['OverallLimit', 'Requests in five minutes, all addresses (firewall)', F.overallLimit, '', 'firewall'],

@@ -404,3 +404,16 @@ def test_the_limits_of_24_november(panel):
         except ValueError:
             continue
         raise AssertionError(bad)
+
+
+def test_process_memory_and_the_work_area_alarm_are_limits(panel):
+    assert panel._process_memory('2GB') == '2GB' and panel._process_memory('0') == '0' and panel._process_memory('1.5gb') == '1.5GB'
+    for bad in ('100MB', '9GB', '2', 'much'):
+        with pytest.raises(ValueError):
+            panel._process_memory(bad)
+    check = panel.LIMITS['WorkAreaAlarmGB'][1]
+    assert check('50') == '50'
+    with pytest.raises(ValueError):
+        check('0')
+    # The alarm's threshold changes no task definition.
+    assert 'WorkAreaAlarmGB' in panel.NO_RESTART and 'ProcessMemory' not in panel.NO_RESTART
