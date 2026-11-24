@@ -55,6 +55,7 @@ main { padding: 20px 24px 40px; max-width: 1180px; margin: 0 auto; }
 .dot { width: 11px; height: 11px; border-radius: 50%; display: inline-block; background: var(--idle); }
 .dot.ok { background: var(--good); } .dot.bad { background: var(--bad); } .dot.warn { background: var(--warn); }
 .note { font-size: 12.5px; color: var(--quiet); }
+.restarts { color: var(--warn); font-weight: 700; }
 .gap { margin-top: 16px; }
 table { width: 100%; border-collapse: collapse; }
 th { text-align: left; font-weight: 400; color: var(--quiet); font-size: 12.5px; padding: 4px 10px 6px 0; border-bottom: 1px solid var(--rule); white-space: nowrap; }
@@ -371,7 +372,7 @@ const VIEW = {
        ['QueryTimeout', 'Time, one query', L.QueryTimeout, ' s', 'service'], ['MaxRecLimit', 'Rows, one result', L.MaxRecLimit, '', 'service'],
        ...(L.DownloadLimit != null ? [['DownloadLimit', 'Volume sent to one client in a day', L.DownloadLimit, '', 'service'], ['FireflyDownloadLimit', 'Volume sent to all of Firefly\'s users together in a day', L.FireflyDownloadLimit, '', 'service']] : []),
        ...(L.TotalDownloadLimit != null ? [['TotalDownloadLimit', 'Volume sent to all clients together in a day', L.TotalDownloadLimit, '', 'service'], ['ResultSize', 'Size, one result', L.ResultSize, '', 'service']] : []),
-       ...(L.ProcessMemory != null ? [['ProcessMemory', 'Memory, one request\'s process', L.ProcessMemory, '', 'service'], ['WorkAreaAlarmGB', 'Work area size that raises an alarm', L.WorkAreaAlarmGB, ' GB', 'service']] : []),
+       ...(L.ProcessMemory != null ? [['ProcessMemory', 'Memory, one request\'s process', L.ProcessMemory, '', 'service'], ['WorkAreaAlarmGB', 'Work area size that raises an alarm', L.WorkAreaAlarmGB, ' GB', 'alarm']] : []),
        ...(F && F.limit ? [['RateLimit', 'Requests in five minutes, one address (firewall)', F.limit, '', 'firewall'], ['Mode', 'Over that, the firewall', F.mode, '', 'firewall'],
                            ...(F.managed ? [['ManagedRules', 'On a match with one of AWS\'s rule sets, the firewall', F.managed, '', 'firewall']] : []),
                            ['OverallLimit', 'Requests in five minutes, all addresses (firewall)', F.overallLimit, '', 'firewall'],
@@ -379,7 +380,8 @@ const VIEW = {
     limitRows = rows;
     const shown = (r) => r[0] === 'Mode' || r[0] === 'OverallMode' ? (r[2] === 'block' ? (r[0] === 'Mode' ? 'refuses (429)' : 'refuses (503)') : 'only counts') : r[0] === 'ManagedRules' ? (r[2] === 'block' ? 'refuses (403)' : 'only counts') : /DownloadLimit$|^ResultSize$/.test(r[0]) ? (String(r[2]) === '0' ? 'no cap' : esc(String(r[2] ?? '?').replace(/([0-9.]+)([A-Z]+)/, '$1 $2'))) : (/Limit$/.test(r[0]) && r[0] !== 'QueryMemory' ? num(r[2]) : esc(r[2] ?? '?')) + r[3];
     h += '<div class="card gap" id="limits"><h2>Limits in force</h2><table>' +
-      rows.map((r) => `<tr><td>${r[1]}</td><td class="num" data-limit="${r[0]}">${shown(r)}</td></tr>`).join('') + '</table>' +
+      rows.map((r) => `<tr><td>${r[1]}${r[4] === 'service' ? ' <span class="restarts" title="A change restarts the service">*</span>' : ''}</td><td class="num" data-limit="${r[0]}">${shown(r)}</td></tr>`).join('') + '</table>' +
+      '<p class="note"><span class="restarts">*</span> A change restarts the service on the new setting:  about five minutes, with the old task answering until the new one is ready;  an async job running then is lost.  A change to a limit with no mark takes effect within about a minute and restarts nothing.</p>' +
       `<div class="tools gap"><button id="limedit" ${busyLimits ? 'disabled' : ''}>Change the limits</button><span class="note">Settings of the service's stack, and of the firewall's.  A change here asks CloudFormation to make it, so the stacks stay as the record of what is in force.</span></div></div>`;
     setTimeout(() => { const b = $('#limedit'); if (b) b.onclick = limitEditor; });
     return h;
@@ -789,7 +791,7 @@ function limitEditor() {
       ? `<select data-set="${r[0]}"><option value="block" ${r[2] === 'block' ? 'selected' : ''}>refuses (${r[0] === 'ManagedRules' ? 403 : r[0] === 'OverallMode' ? 503 : 429})</option><option value="count" ${r[2] === 'count' ? 'selected' : ''}>only counts</option></select>`
       : `<input data-set="${r[0]}" size="10" style="text-align:right" value="${esc(r[2] ?? '')}">${r[3]}`;
   });
-  card.querySelector('.tools').innerHTML = '<button class="go" id="limsave">Save</button><button id="limcancel">Cancel</button><span class="note">A change to any limit of the service (all but the firewall\'s) restarts it on the new settings:  about five minutes, with the old task answering until the new one is ready.  An async job running on the old task is lost.  A change to the firewall takes about a minute and restarts nothing.  0 means no limit for the counts, and no cap for the two volumes, which are written like 20GB.</span>';
+  card.querySelector('.tools').innerHTML = '<button class="go" id="limsave">Save</button><button id="limcancel">Cancel</button><span class="note">A change to a limit marked * restarts the service;  the others restart nothing.  0 means no limit for the counts, and no cap for the two volumes, which are written like 20GB.</span>';
   $('#limcancel').onclick = () => show(true);
   $('#limsave').onclick = () => {
     const changes = {}, said = [];
